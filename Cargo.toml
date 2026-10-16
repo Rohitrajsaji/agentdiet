@@ -23,8 +23,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 # regex: secret-scrubber patterns; regex::bytes keeps non-UTF-8 output lossless. Pure Rust, linear time.
 regex = "1"
-# rusqlite: bundled SQLite with FTS5/BM25 for memory.db (mandated by CLAUDE.md); no system SQLite.
-rusqlite = { version = "0.37", features = ["bundled", "bundled-full"] }
+# rusqlite: bundled SQLite for memory.db (mandated by CLAUDE.md); no system SQLite. `bundled` alone
+# compiles in FTS5 and its built-in bm25(); `bundled-full` would add chrono -> iana-time-zone ->
+# CoreFoundation on macOS plus ~30 crates we do not use.
+rusqlite = { version = "0.37", default-features = false, features = ["bundled"] }
 sha2 = "0.10"
 thiserror = "2"
 # toml: parse-only (no `display`/writer); Codex config.toml edits are validated against a real TOML

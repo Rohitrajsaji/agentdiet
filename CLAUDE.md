@@ -9,11 +9,23 @@ this file is the source of truth for *how we build it*.
 - **Single binary, zero runtime deps.** One `agentdiet` executable. No Node, Python,
   shared grammar files, or helper binaries at runtime. Rust crates are fine; they compile in.
   - Linux release builds: `x86_64-unknown-linux-musl` / `aarch64-unknown-linux-musl` (fully static).
-  - macOS: as static as the platform allows (libSystem is always dynamic); no other dylibs.
+  - macOS: the release binary may load only `/usr/lib/libSystem.B.dylib`. `build.rs` passes
+    `-Wl,-dead_strip_dylibs` on Apple targets, which drops dylibs nothing references, notably
+    `libiconv` (the `libc` crate links it unconditionally on Apple). If a future dependency
+    really calls iconv, the linker keeps it and the check fails: stop and decide explicitly, do not
+    loosen this rule silently. Run `scripts/check-binary-deps.sh --build` after any dependency
+    change; it inspects a freshly built artifact (macOS and Linux only; it exits 2, not 0, on
+    anything it cannot check).
 - **Errors:** `thiserror` for typed errors in library modules; `anyhow` (with `.context()`)
   at binary/command boundaries. No `unwrap()` / `expect()` outside tests and proven invariants.
-- **Storage:** `rusqlite` with features `["bundled", "bundled-full"]` — SQLite, FTS5 and
-  BM25 ranking are compiled in. Never link a system SQLite. Databases open in WAL mode.
+- **Storage:** `rusqlite` with `default-features = false, features = ["bundled"]`. `bundled`
+  compiles SQLite from source with FTS5 (including its built-in `bm25()`) enabled; nothing more is
+  needed. Do not enable `bundled-full`/`modern-full` or the type-integration features (`chrono`,
+  `time`, `jiff`, `url`, `uuid`, `serde_json`, `csvtab`, `load_extension`): they add crates, and
+  `chrono` -> `iana-time-zone` links CoreFoundation on macOS. Never link a system SQLite.
+  Databases open in WAL mode. FTS5 is proven by tests that query it (`src/memory.rs`), not by
+  `strings` on a binary: link-time optimisation drops SQLite from any binary in which nothing
+  reachable uses `memory.rs`.
 - **Code parsing:** `tree-sitter` with statically linked grammar crates only (no runtime
   grammar loading, no `.so`, no wasm).
 - **CLI:** `clap` (derive API) for commands and flags; `inquire` for interactive prompts and

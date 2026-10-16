@@ -224,6 +224,46 @@ mod tests {
         assert_eq!(fts_query(""), None);
     }
 
+    /// `rusqlite` is built with `bundled` only (no `bundled-full`); this pins down that the
+    /// bundled SQLite still has FTS5 and its built-in ranking, by option flag and by behavior.
+    #[test]
+    fn bundled_sqlite_has_fts5_bm25_and_wal() {
+        let conn = Connection::open_in_memory().unwrap();
+        let fts5: i64 = conn
+            .query_row("SELECT sqlite_compileoption_used('ENABLE_FTS5')", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(fts5, 1, "bundled SQLite must be compiled with FTS5");
+
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE t USING fts5(title, body, tokenize='unicode61');
+             INSERT INTO t(title, body) VALUES ('alpha', 'rust cargo build');
+             INSERT INTO t(title, body) VALUES ('beta', 'rust rust rust cargo');
+             INSERT INTO t(title, body) VALUES ('gamma', 'python pytest');",
+        )
+        .unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT title, bm25(t), snippet(t, 1, '[', ']', '…', 8)
+                 FROM t WHERE t MATCH 'rust' ORDER BY bm25(t)",
+            )
+            .unwrap();
+        let rows: Vec<(String, f64, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(rows.len(), 2, "only the two `rust` rows match");
+        assert_eq!(rows[0].0, "beta", "denser match ranks first (lower bm25)");
+        assert!(rows[0].1 < rows[1].1 && rows[0].1 < 0.0);
+        assert!(rows[0].2.contains("[rust]"), "snippet: {}", rows[0].2);
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = MemoryDb::open(&dir.path().join("m.db")).unwrap();
+        assert_eq!(db.journal_mode().unwrap(), "wal");
+    }
+
     #[test]
     fn hostile_queries_never_error() {
         let dir = tempfile::TempDir::new().unwrap();
