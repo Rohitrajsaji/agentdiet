@@ -79,9 +79,7 @@ fn plausible_secret_value(h: &[u8], start: usize, end: usize) -> bool {
         .strip_prefix(b"\"")
         .or_else(|| value.strip_prefix(b"'"))
         .unwrap_or(value);
-    !value.starts_with(b"[REDACTED:")
-        && value.len() >= 6
-        && !value.iter().all(u8::is_ascii_digit)
+    !value.starts_with(b"[REDACTED:") && value.len() >= 6 && !value.iter().all(u8::is_ascii_digit)
 }
 
 fn rule(id: &'static str, pattern: &str, group: usize, accept: Accept) -> Rule {
@@ -216,7 +214,14 @@ mod tests {
 
     fn pem() -> String {
         let body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC".repeat(6);
-        ["-----BEGIN ", "PRIVATE KEY-----\n", &body, "\n-----END ", "PRIVATE KEY-----"].concat()
+        [
+            "-----BEGIN ",
+            "PRIVATE KEY-----\n",
+            &body,
+            "\n-----END ",
+            "PRIVATE KEY-----",
+        ]
+        .concat()
     }
 
     fn text(s: &Scrubbed) -> String {
@@ -243,7 +248,10 @@ mod tests {
     fn aws_secret_access_key_keeps_the_name() {
         let raw = format!("AWS_SECRET_ACCESS_KEY=\"{}\"", aws_secret());
         let out = text(&scrub(raw.as_bytes()));
-        assert_eq!(out, "AWS_SECRET_ACCESS_KEY=\"[REDACTED:aws-secret-access-key]\"");
+        assert_eq!(
+            out,
+            "AWS_SECRET_ACCESS_KEY=\"[REDACTED:aws-secret-access-key]\""
+        );
     }
 
     #[test]
@@ -280,7 +288,9 @@ mod tests {
 
     #[test]
     fn bearer_redacts_only_the_token() {
-        let out = text(&scrub(b"Authorization: Bearer abcdefghijklmnop1234567890=="));
+        let out = text(&scrub(
+            b"Authorization: Bearer abcdefghijklmnop1234567890==",
+        ));
         assert_eq!(out, "Authorization: Bearer [REDACTED:bearer-token]");
         let lower = text(&scrub(b"authorization: bearer abcdefghijklmnop1234567890"));
         assert_eq!(lower, "authorization: bearer [REDACTED:bearer-token]");
@@ -307,7 +317,10 @@ mod tests {
         let raw = format!("AWS_SECRET_ACCESS_KEY={}\n", aws_secret());
         let out = scrub(raw.as_bytes());
         assert_eq!(out.redactions(), 1);
-        assert_eq!(text(&out), "AWS_SECRET_ACCESS_KEY=[REDACTED:aws-secret-access-key]\n");
+        assert_eq!(
+            text(&out),
+            "AWS_SECRET_ACCESS_KEY=[REDACTED:aws-secret-access-key]\n"
+        );
     }
 
     #[test]

@@ -66,7 +66,9 @@ pub fn status_line(state: &State) -> String {
 pub fn pause(paths: &Paths) -> anyhow::Result<String> {
     let change = state::set_status(paths, Status::Paused).context("could not update state.json")?;
     Ok(match change {
-        Change::Changed => "⏸ AgentDiet paused. Output passes through raw until you run 'agentdiet resume'.".into(),
+        Change::Changed => {
+            "⏸ AgentDiet paused. Output passes through raw until you run 'agentdiet resume'.".into()
+        }
         Change::Unchanged => "AgentDiet is already paused.".into(),
     })
 }
@@ -97,7 +99,9 @@ pub fn run(paths: &Paths) -> anyhow::Result<()> {
     let state = state::load(paths);
     if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
         println!("{}", status_line(&state));
-        println!("Run `agentdiet --help` for commands, or run in a terminal for the Control Center.");
+        println!(
+            "Run `agentdiet --help` for commands, or run in a terminal for the Control Center."
+        );
         return Ok(());
     }
     loop {
@@ -115,7 +119,9 @@ pub fn run(paths: &Paths) -> anyhow::Result<()> {
             .prompt()
         {
             Ok(choice) => choice.item,
-            Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => return Ok(()),
+            Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+                return Ok(());
+            }
             Err(e) => return Err(e).context("menu failed"),
         };
         match handle(paths, picked, &state) {
@@ -145,7 +151,9 @@ fn handle(paths: &Paths, item: MenuItem, state: &State) -> anyhow::Result<()> {
         MenuItem::InspectLast => println!("{}", inspect_last(state)),
         MenuItem::SwitchMode => switch_mode(paths, state)?,
         MenuItem::ManageAssistants => manage_assistants(paths)?,
-        MenuItem::OpenTop => println!("`agentdiet top` is not available yet (coming in a later slice)."),
+        MenuItem::OpenTop => {
+            println!("`agentdiet top` is not available yet (coming in a later slice).")
+        }
     }
     Ok(())
 }
@@ -184,8 +192,16 @@ fn manage_assistants(paths: &Paths) -> anyhow::Result<()> {
         .raw_prompt()?;
     let selected: Vec<Target> = picked.iter().map(|o| all[o.index]).collect();
 
-    let to_add: Vec<Target> = selected.iter().copied().filter(|t| !installed.contains(t)).collect();
-    let to_remove: Vec<Target> = installed.iter().copied().filter(|t| !selected.contains(t)).collect();
+    let to_add: Vec<Target> = selected
+        .iter()
+        .copied()
+        .filter(|t| !installed.contains(t))
+        .collect();
+    let to_remove: Vec<Target> = installed
+        .iter()
+        .copied()
+        .filter(|t| !selected.contains(t))
+        .collect();
 
     if to_add.is_empty() && to_remove.is_empty() {
         println!("No changes.");
@@ -210,7 +226,10 @@ fn manage_assistants(paths: &Paths) -> anyhow::Result<()> {
         for warning in &report.warnings {
             eprintln!("warning: {warning}");
         }
-        let count = report.restored.len() + report.deleted.len() + report.cleaned.len() + report.shims_removed.len();
+        let count = report.restored.len()
+            + report.deleted.len()
+            + report.cleaned.len()
+            + report.shims_removed.len();
         println!("Disconnected: {count} item(s) restored or removed.");
     }
     Ok(())
@@ -235,7 +254,10 @@ mod tests {
 
     #[test]
     fn menu_order_matches_spec_section_2_1() {
-        let labels: Vec<_> = MenuItem::ALL.iter().map(|i| i.label(Status::Active)).collect();
+        let labels: Vec<_> = MenuItem::ALL
+            .iter()
+            .map(|i| i.label(Status::Active))
+            .collect();
         assert_eq!(
             labels,
             [
@@ -250,8 +272,14 @@ mod tests {
 
     #[test]
     fn first_menu_label_reflects_status() {
-        assert_eq!(MenuItem::PauseResume.label(Status::Paused), "Resume AgentDiet");
-        assert_eq!(MenuItem::PauseResume.label(Status::Active), "Pause AgentDiet");
+        assert_eq!(
+            MenuItem::PauseResume.label(Status::Paused),
+            "Resume AgentDiet"
+        );
+        assert_eq!(
+            MenuItem::PauseResume.label(Status::Active),
+            "Pause AgentDiet"
+        );
     }
 
     #[test]

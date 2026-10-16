@@ -307,9 +307,13 @@ mod tests {
 
     #[test]
     fn recognises_our_commands() {
-        assert!(is_agentdiet_hook_command("\"/opt/bin/agentdiet\" hook PreToolUse"));
+        assert!(is_agentdiet_hook_command(
+            "\"/opt/bin/agentdiet\" hook PreToolUse"
+        ));
         assert!(is_agentdiet_hook_command("agentdiet hook SessionStart"));
-        assert!(is_agentdiet_hook_command("\"C:\\bin\\agentdiet.exe\" hook PreCompact"));
+        assert!(is_agentdiet_hook_command(
+            "\"C:\\bin\\agentdiet.exe\" hook PreCompact"
+        ));
         assert!(!is_agentdiet_hook_command("agentdiet show #4f9a"));
         assert!(!is_agentdiet_hook_command("rtk hook claude"));
         assert!(!is_agentdiet_hook_command("\"unterminated hook"));
@@ -352,7 +356,10 @@ mod tests {
         let restored = unpatch_claude_hooks(&patched).unwrap().unwrap();
         let v: Value = serde_json::from_str(&restored).unwrap();
         assert_eq!(v["hooks"].as_object().unwrap().len(), 1);
-        assert_eq!(v["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "echo keep");
+        assert_eq!(
+            v["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            "echo keep"
+        );
         assert!(!has_claude_hooks(&restored));
     }
 
@@ -367,11 +374,17 @@ mod tests {
     #[test]
     fn mcp_entry_is_idempotent_and_keeps_other_servers() {
         let text = r#"{ "mcpServers": { "other": {"command":"x"} }, "n": 1 }"#;
-        let first = patch_mcp(Some(text), "mcpServers", false, &exe()).unwrap().unwrap();
+        let first = patch_mcp(Some(text), "mcpServers", false, &exe())
+            .unwrap()
+            .unwrap();
         let v: Value = serde_json::from_str(&first).unwrap();
         assert_eq!(v["mcpServers"]["other"]["command"], "x");
         assert_eq!(v["mcpServers"]["agentdiet"]["args"], json!(["mcp"]));
-        assert!(patch_mcp(Some(&first), "mcpServers", false, &exe()).unwrap().is_none());
+        assert!(
+            patch_mcp(Some(&first), "mcpServers", false, &exe())
+                .unwrap()
+                .is_none()
+        );
         assert!(has_mcp(&first, "mcpServers"));
 
         let removed = unpatch_mcp(&first, "mcpServers").unwrap().unwrap();
@@ -400,9 +413,15 @@ mod tests {
     #[test]
     fn bom_is_tolerated_and_preserved() {
         let text = "\u{feff}{\"a\":1}";
-        let out = patch_mcp(Some(text), "mcpServers", false, &exe()).unwrap().unwrap();
+        let out = patch_mcp(Some(text), "mcpServers", false, &exe())
+            .unwrap()
+            .unwrap();
         assert!(out.starts_with('\u{feff}'));
-        assert!(patch_mcp(Some(&out), "mcpServers", false, &exe()).unwrap().is_none());
+        assert!(
+            patch_mcp(Some(&out), "mcpServers", false, &exe())
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -419,6 +438,10 @@ mod tests {
 
     #[test]
     fn empty_file_is_treated_as_empty_object() {
-        assert!(patch_mcp(Some("  \n"), "mcpServers", false, &exe()).unwrap().is_some());
+        assert!(
+            patch_mcp(Some("  \n"), "mcpServers", false, &exe())
+                .unwrap()
+                .is_some()
+        );
     }
 }

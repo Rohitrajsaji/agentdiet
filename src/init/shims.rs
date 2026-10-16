@@ -23,7 +23,10 @@ fn symlink(original: &Path, link: &Path) -> io::Result<()> {
 
 #[cfg(not(unix))]
 fn symlink(_original: &Path, _link: &Path) -> io::Result<()> {
-    Err(io::Error::new(io::ErrorKind::Unsupported, "symlink shims need unix"))
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "symlink shims need unix",
+    ))
 }
 
 /// Create or refresh the shim symlinks. With `dry_run`, only report.
@@ -99,7 +102,7 @@ pub fn remove(paths: &Paths) -> Result<Vec<PathBuf>, InitError> {
 
 /// `true` if any shim symlink points at an agentdiet binary.
 pub fn is_installed(paths: &Paths) -> bool {
-    SHIM_COMMANDS.iter().any(|name| {
-        fs::read_link(paths.shims_dir().join(name)).is_ok_and(|t| is_agentdiet_exe(&t))
-    })
+    SHIM_COMMANDS
+        .iter()
+        .any(|name| fs::read_link(paths.shims_dir().join(name)).is_ok_and(|t| is_agentdiet_exe(&t)))
 }

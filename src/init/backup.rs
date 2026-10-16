@@ -104,9 +104,7 @@ pub fn load_active(paths: &Paths) -> (Vec<Loaded>, Vec<String>) {
             Err(e) => warnings.push(format!("skipping unreadable {}: {e}", file.display())),
         }
     }
-    loaded.sort_by(|a, b| {
-        (a.manifest.created_ms, &a.dir).cmp(&(b.manifest.created_ms, &b.dir))
-    });
+    loaded.sort_by(|a, b| (a.manifest.created_ms, &a.dir).cmp(&(b.manifest.created_ms, &b.dir)));
     (loaded, warnings)
 }
 
@@ -188,7 +186,12 @@ impl<'a> Session<'a> {
 }
 
 /// Copy `bytes` to `<dir>/<target>/<file name>`, avoiding name clashes.
-fn store_backup(dir: &Path, target: Target, original: &Path, bytes: &[u8]) -> Result<String, InitError> {
+fn store_backup(
+    dir: &Path,
+    target: Target,
+    original: &Path,
+    bytes: &[u8],
+) -> Result<String, InitError> {
     let name = original
         .file_name()
         .map_or_else(|| "file".to_string(), |n| n.to_string_lossy().into_owned());

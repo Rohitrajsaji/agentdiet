@@ -9,7 +9,9 @@ use super::json_patch::{self, PatchError};
 use super::toml_block;
 use crate::Paths;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, ValueEnum, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, ValueEnum, Serialize, Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Target {
     #[value(alias = "claude-code")]
@@ -126,26 +128,46 @@ pub fn files(paths: &Paths, target: Target, project: bool) -> Option<Vec<FileSpe
         (Target::Shims, _) | (Target::Windsurf, true) => return None,
         (Target::Claude, false) => vec![
             spec(home.join(".claude/settings.json"), PatchKind::ClaudeHooks),
-            spec(home.join(".claude.json"), PatchKind::mcp("mcpServers", true)),
+            spec(
+                home.join(".claude.json"),
+                PatchKind::mcp("mcpServers", true),
+            ),
         ],
         (Target::Claude, true) => vec![
             spec(root.join(".claude/settings.json"), PatchKind::ClaudeHooks),
             spec(root.join(".mcp.json"), PatchKind::mcp("mcpServers", true)),
         ],
-        (Target::Cursor, false) => vec![spec(home.join(".cursor/mcp.json"), PatchKind::mcp("mcpServers", false))],
-        (Target::Cursor, true) => vec![spec(root.join(".cursor/mcp.json"), PatchKind::mcp("mcpServers", false))],
+        (Target::Cursor, false) => vec![spec(
+            home.join(".cursor/mcp.json"),
+            PatchKind::mcp("mcpServers", false),
+        )],
+        (Target::Cursor, true) => vec![spec(
+            root.join(".cursor/mcp.json"),
+            PatchKind::mcp("mcpServers", false),
+        )],
         (Target::Windsurf, false) => vec![spec(
             home.join(".codeium/windsurf/mcp_config.json"),
             PatchKind::mcp("mcpServers", false),
         )],
-        (Target::Gemini, false) => vec![spec(home.join(".gemini/settings.json"), PatchKind::mcp("mcpServers", false))],
-        (Target::Gemini, true) => vec![spec(root.join(".gemini/settings.json"), PatchKind::mcp("mcpServers", false))],
+        (Target::Gemini, false) => vec![spec(
+            home.join(".gemini/settings.json"),
+            PatchKind::mcp("mcpServers", false),
+        )],
+        (Target::Gemini, true) => vec![spec(
+            root.join(".gemini/settings.json"),
+            PatchKind::mcp("mcpServers", false),
+        )],
         (Target::Copilot, false) => vec![spec(
             paths.config_dir.join("Code/User/mcp.json"),
             PatchKind::mcp("servers", true),
         )],
-        (Target::Copilot, true) => vec![spec(root.join(".vscode/mcp.json"), PatchKind::mcp("servers", true))],
-        (Target::Codex, false) => vec![spec(home.join(".codex/config.toml"), PatchKind::CodexBlock)],
+        (Target::Copilot, true) => vec![spec(
+            root.join(".vscode/mcp.json"),
+            PatchKind::mcp("servers", true),
+        )],
+        (Target::Codex, false) => {
+            vec![spec(home.join(".codex/config.toml"), PatchKind::CodexBlock)]
+        }
         (Target::Codex, true) => vec![spec(root.join(".codex/config.toml"), PatchKind::CodexBlock)],
     })
 }
@@ -153,7 +175,11 @@ pub fn files(paths: &Paths, target: Target, project: bool) -> Option<Vec<FileSpe
 /// Directory whose existence suggests `target` is installed (for the
 /// interactive checklist).
 fn marker_dir(paths: &Paths, target: Target, project: bool) -> Option<PathBuf> {
-    let base = if project { &paths.project_root } else { &paths.home };
+    let base = if project {
+        &paths.project_root
+    } else {
+        &paths.home
+    };
     Some(match target {
         Target::Claude => base.join(".claude"),
         Target::Cursor => base.join(".cursor"),

@@ -59,7 +59,11 @@ fn init_three_times_is_fully_idempotent() {
 
     for run in 2..=3 {
         let report = init::run(&env.paths, &all()).unwrap();
-        assert!(report.changed.is_empty(), "run {run} changed {:?}", report.changed);
+        assert!(
+            report.changed.is_empty(),
+            "run {run} changed {:?}",
+            report.changed
+        );
         assert!(report.backup_dir.is_none(), "run {run} made a backup");
         // Byte-identical tree: no rewritten files and no new backup directories.
         assert_eq!(env.snapshot(), after_first, "run {run} altered the tree");
@@ -74,7 +78,10 @@ fn init_three_times_is_fully_idempotent() {
         assert_eq!(hook_count(&settings, event), 1, "{event}");
     }
     assert_eq!(settings["theme"], "dark");
-    assert_eq!(settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "echo mine");
+    assert_eq!(
+        settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+        "echo mine"
+    );
 
     // One MCP entry per JSON config, other servers preserved.
     let mcp_files = [
@@ -114,7 +121,11 @@ fn eject_restores_exact_originals_and_removes_everything_else() {
 
     init::run(&env.paths, &all()).unwrap();
     init::run(&env.paths, &all()).unwrap();
-    assert_ne!(env.snapshot_without_backups(), pristine, "init changed nothing?");
+    assert_ne!(
+        env.snapshot_without_backups(),
+        pristine,
+        "init changed nothing?"
+    );
 
     let report = eject::eject(&env.paths, None, false).unwrap();
     assert!(report.warnings.is_empty(), "{:?}", report.warnings);
@@ -122,8 +133,14 @@ fn eject_restores_exact_originals_and_removes_everything_else() {
 
     // Exactly the pre-init files, byte for byte — including the file init
     // created (Windsurf) being gone and shims removed.
-    assert_eq!(env.snapshot_without_backups(), strip_agentdiet_dir(pristine));
-    assert!(!env.paths.home.join(".codeium").exists(), "created dirs removed");
+    assert_eq!(
+        env.snapshot_without_backups(),
+        strip_agentdiet_dir(pristine)
+    );
+    assert!(
+        !env.paths.home.join(".codeium").exists(),
+        "created dirs removed"
+    );
     assert!(!env.paths.shims_dir().exists());
 
     // Backups survive an eject, and a second eject is a no-op.
@@ -157,13 +174,19 @@ fn eject_after_exe_moved_restores_the_pristine_original() {
     for event in json_patch::CLAUDE_EVENTS {
         assert_eq!(hook_count(&settings, event), 1);
     }
-    assert!(env.read(&env.paths.home.join(".codex/config.toml")).contains("new/agentdiet"));
+    assert!(
+        env.read(&env.paths.home.join(".codex/config.toml"))
+            .contains("new/agentdiet")
+    );
     assert!(init::run(&moved, &all()).unwrap().changed.is_empty());
 
     // Two generations of backups exist; eject goes back to the earliest.
     assert_eq!(fs::read_dir(env.backups()).unwrap().count(), 2);
     eject::eject(&moved, None, false).unwrap();
-    assert_eq!(env.snapshot_without_backups(), strip_agentdiet_dir(pristine));
+    assert_eq!(
+        env.snapshot_without_backups(),
+        strip_agentdiet_dir(pristine)
+    );
 }
 
 #[test]
@@ -174,11 +197,20 @@ fn eject_keeps_user_edits_made_after_init() {
     let settings_path = env.paths.home.join(".claude/settings.json");
     let mut settings = json(&env, settings_path.clone());
     settings["added_later"] = Value::Bool(true);
-    fs::write(&settings_path, serde_json::to_string_pretty(&settings).unwrap()).unwrap();
+    fs::write(
+        &settings_path,
+        serde_json::to_string_pretty(&settings).unwrap(),
+    )
+    .unwrap();
 
     let report = eject::eject(&env.paths, None, false).unwrap();
     assert!(report.cleaned.contains(&settings_path));
-    assert!(report.warnings.iter().any(|w| w.contains("edited after init")));
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains("edited after init"))
+    );
 
     let after = json(&env, settings_path);
     assert_eq!(after["added_later"], true, "user edit survives");
@@ -186,9 +218,15 @@ fn eject_keeps_user_edits_made_after_init() {
     for event in json_patch::CLAUDE_EVENTS {
         assert_eq!(hook_count(&after, event), 0, "{event}");
     }
-    assert_eq!(after["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "echo mine");
+    assert_eq!(
+        after["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+        "echo mine"
+    );
     // Untouched-by-user files still get the exact original back.
-    assert_eq!(env.read(&env.paths.home.join(".cursor/mcp.json")), CURSOR_MCP);
+    assert_eq!(
+        env.read(&env.paths.home.join(".cursor/mcp.json")),
+        CURSOR_MCP
+    );
 }
 
 #[test]
@@ -202,15 +240,27 @@ fn dry_run_changes_nothing_and_prints_diffs() {
     assert!(report.backup_dir.is_none());
     assert_eq!(env.snapshot(), before);
     assert!(!env.paths.agentdiet_home.exists());
-    assert!(report.diffs.iter().any(|d| d.contains("+ ") && d.contains("agentdiet")));
+    assert!(
+        report
+            .diffs
+            .iter()
+            .any(|d| d.contains("+ ") && d.contains("agentdiet"))
+    );
 }
 
 #[test]
 fn project_scope_writes_only_inside_the_project() {
     let env = Env::with_existing_configs();
-    let home_before: Vec<_> = env.snapshot().into_iter().filter(|(p, _)| p.starts_with("home")).collect();
+    let home_before: Vec<_> = env
+        .snapshot()
+        .into_iter()
+        .filter(|(p, _)| p.starts_with("home"))
+        .collect();
 
-    let targets: Vec<Target> = Target::ALL.into_iter().filter(|t| *t != Target::Shims).collect();
+    let targets: Vec<Target> = Target::ALL
+        .into_iter()
+        .filter(|t| *t != Target::Shims)
+        .collect();
     let report = init::run(&env.paths, &opts(targets, true, false)).unwrap();
     assert!(
         report.skipped.iter().any(|s| s.contains("Windsurf")),
@@ -239,13 +289,23 @@ fn project_scope_writes_only_inside_the_project() {
         .into_iter()
         .filter(|(p, _)| p.starts_with("home") && !p.starts_with("home/.agentdiet"))
         .collect();
-    let home_before: Vec<_> = home_before.into_iter().filter(|(p, _)| !p.starts_with("home/.agentdiet")).collect();
+    let home_before: Vec<_> = home_before
+        .into_iter()
+        .filter(|(p, _)| !p.starts_with("home/.agentdiet"))
+        .collect();
     assert_eq!(home_after, home_before);
 
     // Project init is idempotent and ejectable too.
     let again = init::run(
         &env.paths,
-        &opts(Target::ALL.into_iter().filter(|t| *t != Target::Shims).collect(), true, false),
+        &opts(
+            Target::ALL
+                .into_iter()
+                .filter(|t| *t != Target::Shims)
+                .collect(),
+            true,
+            false,
+        ),
     )
     .unwrap();
     assert!(again.changed.is_empty());
@@ -265,14 +325,23 @@ fn unparseable_configs_are_skipped_and_never_rewritten() {
     let report = init::run(&env.paths, &all()).unwrap();
     assert_eq!(report.skipped.len(), 2, "{:?}", report.skipped);
     assert_eq!(env.read(&env.paths.home.join(".cursor/mcp.json")), jsonc);
-    assert_eq!(env.read(&env.paths.home.join(".codex/config.toml")), hand_written);
+    assert_eq!(
+        env.read(&env.paths.home.join(".codex/config.toml")),
+        hand_written
+    );
     // The rest still got connected.
-    assert!(json(&env, env.paths.home.join(".gemini/settings.json"))["mcpServers"]["agentdiet"].is_object());
+    assert!(
+        json(&env, env.paths.home.join(".gemini/settings.json"))["mcpServers"]["agentdiet"]
+            .is_object()
+    );
 
     // And eject leaves the skipped files alone.
     eject::eject(&env.paths, None, false).unwrap();
     assert_eq!(env.read(&env.paths.home.join(".cursor/mcp.json")), jsonc);
-    assert_eq!(env.read(&env.paths.home.join(".codex/config.toml")), hand_written);
+    assert_eq!(
+        env.read(&env.paths.home.join(".codex/config.toml")),
+        hand_written
+    );
 }
 
 #[test]
@@ -281,8 +350,14 @@ fn partial_eject_only_touches_the_chosen_targets() {
     init::run(&env.paths, &all()).unwrap();
 
     eject::eject(&env.paths, Some(&[Target::Cursor]), false).unwrap();
-    assert_eq!(env.read(&env.paths.home.join(".cursor/mcp.json")), CURSOR_MCP);
-    assert!(json(&env, env.paths.home.join(".gemini/settings.json"))["mcpServers"]["agentdiet"].is_object());
+    assert_eq!(
+        env.read(&env.paths.home.join(".cursor/mcp.json")),
+        CURSOR_MCP
+    );
+    assert!(
+        json(&env, env.paths.home.join(".gemini/settings.json"))["mcpServers"]["agentdiet"]
+            .is_object()
+    );
     assert!(init::installed(&env.paths).contains(&Target::Gemini));
     assert!(!init::installed(&env.paths).contains(&Target::Cursor));
 
@@ -339,5 +414,8 @@ fn rapid_back_to_back_backups_never_collide() {
     }
     assert_eq!(fs::read_dir(env.backups()).unwrap().count(), 5);
     eject::eject(&moved, None, false).unwrap();
-    assert!(!env.paths.home.join(".cursor/mcp.json").exists(), "back to 'did not exist'");
+    assert!(
+        !env.paths.home.join(".cursor/mcp.json").exists(),
+        "back to 'did not exist'"
+    );
 }

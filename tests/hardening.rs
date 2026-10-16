@@ -99,7 +99,10 @@ fn config_backups_are_private_and_byte_exact_under_any_umask() {
         let backups = env.backups();
         assert_eq!(mode(&backups), 0o700, "umask {umask}");
         let entries = tree(&backups);
-        assert!(entries.len() >= 5, "expected backups + manifest, got {entries:?}");
+        assert!(
+            entries.len() >= 5,
+            "expected backups + manifest, got {entries:?}"
+        );
         for path in &entries {
             let want = if path.is_dir() { 0o700 } else { 0o600 };
             assert_eq!(mode(path), want, "umask {umask}: {}", path.display());
@@ -117,12 +120,26 @@ fn config_backups_are_private_and_byte_exact_under_any_umask() {
                 .find(|p| p.file_name().is_some_and(|n| n == name))
                 .unwrap_or_else(|| panic!("no backup named {name}"))
         };
-        assert_eq!(fs::read(backed_up("settings.json")).unwrap(), settings_before);
-        assert_eq!(fs::read(backed_up(".claude.json")).unwrap(), claude_json_before);
+        assert_eq!(
+            fs::read(backed_up("settings.json")).unwrap(),
+            settings_before
+        );
+        assert_eq!(
+            fs::read(backed_up(".claude.json")).unwrap(),
+            claude_json_before
+        );
 
         assert_ok(&agentdiet(&env, umask, &["eject"]));
-        assert_eq!(fs::read(&settings).unwrap(), settings_before, "umask {umask}");
-        assert_eq!(fs::read(&claude_json).unwrap(), claude_json_before, "umask {umask}");
+        assert_eq!(
+            fs::read(&settings).unwrap(),
+            settings_before,
+            "umask {umask}"
+        );
+        assert_eq!(
+            fs::read(&claude_json).unwrap(),
+            claude_json_before,
+            "umask {umask}"
+        );
         assert_eq!(mode(&settings), 0o600, "umask {umask}");
     }
 }
@@ -167,7 +184,11 @@ fn vault_child_writes_entries() {
     };
     let cas = Cas::new(PathBuf::from(dir));
     let now = SystemTime::now();
-    cas.put(&scrub(b"expires soon\n"), now - Duration::from_secs(8 * 24 * 3600)).unwrap();
+    cas.put(
+        &scrub(b"expires soon\n"),
+        now - Duration::from_secs(8 * 24 * 3600),
+    )
+    .unwrap();
     cas.put(&scrub(b"stays\n"), now).unwrap(); // GC tombstones the first entry
 }
 
@@ -182,7 +203,12 @@ fn vault_is_private_under_a_permissive_umask() {
         .arg("umask 000 && exec \"$@\"")
         .arg("sh")
         .arg(&exe)
-        .args(["--ignored", "--exact", "vault_child_writes_entries", "--nocapture"])
+        .args([
+            "--ignored",
+            "--exact",
+            "vault_child_writes_entries",
+            "--nocapture",
+        ])
         .env("AD_VAULT_CHILD_DIR", &cas_dir)
         .stdin(Stdio::null())
         .output()
@@ -194,7 +220,10 @@ fn vault_is_private_under_a_permissive_umask() {
         .iter()
         .map(|p| p.extension().unwrap().to_string_lossy().into_owned())
         .collect();
-    assert!(names.contains(&"log".to_string()) && names.contains(&"expired".to_string()), "{names:?}");
+    assert!(
+        names.contains(&"log".to_string()) && names.contains(&"expired".to_string()),
+        "{names:?}"
+    );
     assert_eq!(mode(&cas_dir), 0o700);
     assert_eq!(mode(&env.paths.agentdiet_home), 0o700);
     for path in entries {
@@ -223,11 +252,21 @@ fn codex_conflicts_are_skipped_with_a_warning_and_left_byte_identical() {
         (
             // The reproduced bug: trailing comment after the table header.
             "trailing comment",
-            "[mcp_servers.agentdiet] # existing user config\ncommand = \"existing-binary\"\n".into(),
+            "[mcp_servers.agentdiet] # existing user config\ncommand = \"existing-binary\"\n"
+                .into(),
         ),
-        ("quoted key", "[mcp_servers.\"agentdiet\"]\ncommand = \"x\"\n".into()),
-        ("dotted key", "mcp_servers.agentdiet.command = \"x\"\n".into()),
-        ("inline table", "mcp_servers = { agentdiet = { command = \"x\" } }\n".into()),
+        (
+            "quoted key",
+            "[mcp_servers.\"agentdiet\"]\ncommand = \"x\"\n".into(),
+        ),
+        (
+            "dotted key",
+            "mcp_servers.agentdiet.command = \"x\"\n".into(),
+        ),
+        (
+            "inline table",
+            "mcp_servers = { agentdiet = { command = \"x\" } }\n".into(),
+        ),
         ("markers in a string", multiline_markers.into()),
         ("duplicate blocks", duplicate_blocks),
         ("not toml", "this = = broken\n".into()),
@@ -241,15 +280,33 @@ fn codex_conflicts_are_skipped_with_a_warning_and_left_byte_identical() {
         let out = agentdiet(&env, "022", &["init", "--only", "codex"]);
         assert_ok(&out);
         let combined = format!("{}{}", text(&out.stdout), text(&out.stderr));
-        assert!(combined.contains("left untouched"), "{label}: no warning in {combined}");
+        assert!(
+            combined.contains("left untouched"),
+            "{label}: no warning in {combined}"
+        );
 
-        assert_eq!(env.read(&codex_path(&env)), original, "{label}: file changed");
-        assert_eq!(env.snapshot_without_backups(), before, "{label}: something else changed");
-        assert!(!env.backups().exists(), "{label}: a no-op must leave no backup");
+        assert_eq!(
+            env.read(&codex_path(&env)),
+            original,
+            "{label}: file changed"
+        );
+        assert_eq!(
+            env.snapshot_without_backups(),
+            before,
+            "{label}: something else changed"
+        );
+        assert!(
+            !env.backups().exists(),
+            "{label}: a no-op must leave no backup"
+        );
 
         // And eject must not strip what it cannot prove is its own.
         assert_ok(&agentdiet(&env, "022", &["eject"]));
-        assert_eq!(env.read(&codex_path(&env)), original, "{label}: eject changed the file");
+        assert_eq!(
+            env.read(&codex_path(&env)),
+            original,
+            "{label}: eject changed the file"
+        );
     }
 }
 
@@ -270,7 +327,10 @@ fn valid_codex_configs_stay_valid_and_round_trip_through_eject() {
         let patched = env.read(&codex_path(&env));
         assert!(patched.starts_with(original), "{original:?}");
         let after = valid_toml(&patched);
-        assert_eq!(after["mcp_servers"]["agentdiet"]["args"][0].as_str(), Some("mcp"));
+        assert_eq!(
+            after["mcp_servers"]["agentdiet"]["args"][0].as_str(),
+            Some("mcp")
+        );
         for (key, value) in &before {
             if key != "mcp_servers" {
                 assert_eq!(after.get(key), Some(value), "{key} changed");

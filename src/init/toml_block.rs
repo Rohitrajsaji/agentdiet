@@ -151,7 +151,9 @@ pub fn patch(current: Option<&str>, exe: &Path) -> Result<Option<String>, PatchE
         None => {}
         Some(Value::Table(servers)) if !servers.contains_key(ENTRY_KEY) => {}
         Some(Value::Table(_)) => {
-            return Err(conflict("`mcp_servers.agentdiet` is already defined by hand"));
+            return Err(conflict(
+                "`mcp_servers.agentdiet` is already defined by hand",
+            ));
         }
         Some(_) => return Err(conflict("`mcp_servers` is not a table; cannot extend it")),
     }
@@ -221,7 +223,9 @@ pub fn unpatch(text: &str) -> Result<Option<String>, PatchError> {
     // Only our entry may disappear.
     let outside = format!("{}{}", lines[..start].concat(), lines[end + 1..].concat());
     if parse(&cleaned)? != parse(&outside)? {
-        return Err(conflict("removing the agentdiet block would change other settings"));
+        return Err(conflict(
+            "removing the agentdiet block would change other settings",
+        ));
     }
     Ok(Some(cleaned))
 }
@@ -262,7 +266,9 @@ mod tests {
     #[test]
     fn replaces_stale_block_in_place() {
         let first = patch(Some("a = 1\n"), &exe()).unwrap().unwrap();
-        let updated = patch(Some(&first), &PathBuf::from("/new/agentdiet")).unwrap().unwrap();
+        let updated = patch(Some(&first), &PathBuf::from("/new/agentdiet"))
+            .unwrap()
+            .unwrap();
         assert_eq!(updated.matches(START).count(), 1);
         assert!(updated.contains("/new/agentdiet"));
         assert!(!updated.contains("/opt/bin"));
@@ -286,11 +292,20 @@ mod tests {
     #[test]
     fn hand_written_table_is_a_conflict() {
         let text = "[mcp_servers.agentdiet]\ncommand = \"x\"\n";
-        assert!(matches!(patch(Some(text), &exe()), Err(PatchError::Conflict(_))));
+        assert!(matches!(
+            patch(Some(text), &exe()),
+            Err(PatchError::Conflict(_))
+        ));
         let dotted = "[mcp_servers]\nagentdiet.command = \"x\"\n";
-        assert!(matches!(patch(Some(dotted), &exe()), Err(PatchError::Conflict(_))));
+        assert!(matches!(
+            patch(Some(dotted), &exe()),
+            Err(PatchError::Conflict(_))
+        ));
         let inline = "mcp_servers = { a = { command = \"x\" } }\n";
-        assert!(matches!(patch(Some(inline), &exe()), Err(PatchError::Conflict(_))));
+        assert!(matches!(
+            patch(Some(inline), &exe()),
+            Err(PatchError::Conflict(_))
+        ));
     }
 
     #[test]
@@ -304,12 +319,17 @@ mod tests {
     #[test]
     fn unbalanced_markers_are_a_conflict() {
         let text = format!("{START}\nstuff\n");
-        assert!(matches!(patch(Some(&text), &exe()), Err(PatchError::Conflict(_))));
+        assert!(matches!(
+            patch(Some(&text), &exe()),
+            Err(PatchError::Conflict(_))
+        ));
     }
 
     #[test]
     fn windows_paths_are_escaped() {
-        let out = patch(None, &PathBuf::from("C:\\bin\\agentdiet.exe")).unwrap().unwrap();
+        let out = patch(None, &PathBuf::from("C:\\bin\\agentdiet.exe"))
+            .unwrap()
+            .unwrap();
         assert!(out.contains("command = \"C:\\\\bin\\\\agentdiet.exe\""));
     }
 
@@ -324,7 +344,8 @@ mod tests {
     #[test]
     fn trailing_comment_on_a_hand_written_table_is_a_conflict() {
         // Reproduced bug: this used to get a second `[mcp_servers.agentdiet]` appended.
-        let text = "[mcp_servers.agentdiet] # existing user config\ncommand = \"existing-binary\"\n";
+        let text =
+            "[mcp_servers.agentdiet] # existing user config\ncommand = \"existing-binary\"\n";
         assert!(is_conflict(patch(Some(text), &exe())));
     }
 
@@ -350,14 +371,22 @@ mod tests {
 
     #[test]
     fn an_inline_or_non_table_mcp_servers_is_a_conflict_not_a_corruption() {
-        for text in ["mcp_servers = { other = { command = \"x\" } }\n", "mcp_servers = 3\n"] {
+        for text in [
+            "mcp_servers = { other = { command = \"x\" } }\n",
+            "mcp_servers = 3\n",
+        ] {
             assert!(is_conflict(patch(Some(text), &exe())), "{text:?}");
         }
     }
 
     #[test]
     fn invalid_toml_is_never_touched() {
-        for text in ["this is = = not toml", "a = 1\na = 2\n", "[t\nx = 1\n", "s = \"\"\"unterminated\n"] {
+        for text in [
+            "this is = = not toml",
+            "a = 1\na = 2\n",
+            "[t\nx = 1\n",
+            "s = \"\"\"unterminated\n",
+        ] {
             assert!(is_conflict(patch(Some(text), &exe())), "{text:?}");
             assert!(is_conflict(unpatch(text)), "{text:?}");
             assert!(!has_block(text));
@@ -402,7 +431,9 @@ mod tests {
         assert!(is_conflict(patch(Some(&edited), &exe())));
         assert!(is_conflict(unpatch(&edited)));
         // Foreign content wedged between the markers is not ours to delete.
-        let wedge = format!("{START}\n[mcp_servers.agentdiet]\ncommand = \"a\"\nargs = [\"mcp\"]\n[other]\nkeep = true\n{END}\n");
+        let wedge = format!(
+            "{START}\n[mcp_servers.agentdiet]\ncommand = \"a\"\nargs = [\"mcp\"]\n[other]\nkeep = true\n{END}\n"
+        );
         assert!(is_conflict(unpatch(&wedge)));
     }
 
@@ -411,7 +442,10 @@ mod tests {
         // Root-level keys can only follow the block if they were already ours to
         // lose; refuse rather than re-scope them into [mcp_servers.agentdiet].
         let text = format!("{}stray = 1\n", block(&exe()));
-        assert!(is_conflict(patch(Some(&text), &PathBuf::from("/new/agentdiet"))));
+        assert!(is_conflict(patch(
+            Some(&text),
+            &PathBuf::from("/new/agentdiet")
+        )));
     }
 
     #[test]
@@ -444,18 +478,26 @@ mod tests {
             assert!(has_block(&patched));
             // Idempotent, and a refresh keeps user content and validity.
             assert!(patch(Some(&patched), &exe()).unwrap().is_none());
-            let refreshed = patch(Some(&patched), &PathBuf::from("/new/agentdiet")).unwrap().unwrap();
+            let refreshed = patch(Some(&patched), &PathBuf::from("/new/agentdiet"))
+                .unwrap()
+                .unwrap();
             valid(&refreshed);
             assert!(refreshed.starts_with(original));
             // And removal restores the original document.
-            assert_eq!(valid(&unpatch(&patched).unwrap().unwrap()), before, "{original:?}");
+            assert_eq!(
+                valid(&unpatch(&patched).unwrap().unwrap()),
+                before,
+                "{original:?}"
+            );
         }
     }
 
     #[test]
     fn replacing_a_block_in_the_middle_keeps_what_follows() {
         let text = format!("a = 1\n\n{}\n[later]\nz = 3 # keep\n", block(&exe()));
-        let out = patch(Some(&text), &PathBuf::from("/new/agentdiet")).unwrap().unwrap();
+        let out = patch(Some(&text), &PathBuf::from("/new/agentdiet"))
+            .unwrap()
+            .unwrap();
         assert!(out.contains("/new/agentdiet") && !out.contains("/opt/bin"));
         assert!(out.ends_with("[later]\nz = 3 # keep\n"));
         valid(&out);

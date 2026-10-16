@@ -241,7 +241,12 @@ mod tests {
         atomic_write_private(&link, b"new").unwrap();
 
         assert_eq!(fs::read(&victim).unwrap(), b"precious");
-        assert!(!fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(
+            !fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         assert_eq!(fs::read(&link).unwrap(), b"new");
     }
 
@@ -261,7 +266,12 @@ mod tests {
         create_private_empty(&link).unwrap();
         assert_eq!(fs::read(&victim).unwrap(), b"precious");
         assert_eq!(fs::metadata(&link).unwrap().len(), 0);
-        assert!(!fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(
+            !fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 
     #[cfg(unix)]
@@ -293,7 +303,12 @@ mod tests {
 
         atomic_write(&link, b"new").unwrap();
 
-        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         assert_eq!(fs::read(&real).unwrap(), b"new");
         let mode = fs::metadata(&real).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);

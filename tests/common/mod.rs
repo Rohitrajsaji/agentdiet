@@ -16,7 +16,8 @@ pub struct Env {
 /// Deliberately awkward formatting and key order, so any rewrite of an
 /// untouched file would show up as a byte difference.
 pub const CLAUDE_SETTINGS: &str = "{\n    \"theme\":   \"dark\",\n  \"hooks\": {\"PreToolUse\": [ {\"matcher\":\"Bash\",\"hooks\":[{\"type\":\"command\",\"command\":\"echo mine\"}]} ]},\n\"model\": \"x\" }";
-pub const CLAUDE_JSON: &str = "{ \"numStartups\":   3,\n  \"mcpServers\": {\"context7\": {\"command\": \"npx\"}} }\n";
+pub const CLAUDE_JSON: &str =
+    "{ \"numStartups\":   3,\n  \"mcpServers\": {\"context7\": {\"command\": \"npx\"}} }\n";
 pub const CURSOR_MCP: &str = "{\"mcpServers\":{\"other\":{\"command\":\"o\"}}}";
 pub const GEMINI_SETTINGS: &str = "{\n\t\"theme\": \"GitHub\"\n}\n";
 pub const COPILOT_MCP: &str = "{ \"servers\": {}, \"inputs\": [] }";
@@ -73,13 +74,22 @@ impl Env {
 
     /// Like [`snapshot`], without anything under `~/.agentdiet/backups`.
     pub fn snapshot_without_backups(&self) -> BTreeMap<PathBuf, Vec<u8>> {
-        let skip = self.backups().strip_prefix(self.dir.path()).unwrap().to_path_buf();
-        self.snapshot().into_iter().filter(|(p, _)| !p.starts_with(&skip)).collect()
+        let skip = self
+            .backups()
+            .strip_prefix(self.dir.path())
+            .unwrap()
+            .to_path_buf();
+        self.snapshot()
+            .into_iter()
+            .filter(|(p, _)| !p.starts_with(&skip))
+            .collect()
     }
 }
 
 fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         let rel = path.strip_prefix(root).unwrap().to_path_buf();

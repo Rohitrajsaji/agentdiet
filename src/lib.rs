@@ -54,7 +54,8 @@ impl Paths {
         use anyhow::Context;
         let home = dirs::home_dir().context("could not determine the home directory")?;
         let config_dir = dirs::config_dir().unwrap_or_else(|| home.join(".config"));
-        let project_root = std::env::current_dir().context("could not read the current directory")?;
+        let project_root =
+            std::env::current_dir().context("could not read the current directory")?;
         let exe = std::env::current_exe().context("could not locate the agentdiet executable")?;
         Ok(Self::new(home, config_dir, project_root, exe))
     }

@@ -45,7 +45,11 @@ impl EjectReport {
 
 /// Eject `only` (or everything when `None`). `purge` additionally deletes the
 /// vault, project memory and the state ledger; it is honoured only for a full eject.
-pub fn eject(paths: &Paths, only: Option<&[Target]>, purge: bool) -> Result<EjectReport, InitError> {
+pub fn eject(
+    paths: &Paths,
+    only: Option<&[Target]>,
+    purge: bool,
+) -> Result<EjectReport, InitError> {
     let wanted = |t: Target| only.is_none_or(|list| list.contains(&t));
     let mut report = EjectReport::default();
 
@@ -57,7 +61,10 @@ pub fn eject(paths: &Paths, only: Option<&[Target]>, purge: bool) -> Result<Ejec
     for (mi, loaded) in manifests.iter().enumerate() {
         for (ei, entry) in loaded.manifest.entries.iter().enumerate() {
             if !entry.ejected && wanted(entry.target) {
-                groups.entry(entry.original_path.clone()).or_default().push((mi, ei));
+                groups
+                    .entry(entry.original_path.clone())
+                    .or_default()
+                    .push((mi, ei));
             }
         }
     }
@@ -149,7 +156,12 @@ fn remove_created_dirs(dirs: &[PathBuf]) {
 }
 
 /// Surgically remove agentdiet's entries from `bytes`, leaving the rest.
-fn strip_entries(path: &Path, entry: &Entry, bytes: &[u8], report: &mut EjectReport) -> Result<(), InitError> {
+fn strip_entries(
+    path: &Path,
+    entry: &Entry,
+    bytes: &[u8],
+    report: &mut EjectReport,
+) -> Result<(), InitError> {
     let Ok(text) = std::str::from_utf8(bytes) else {
         report
             .warnings
@@ -174,21 +186,31 @@ fn strip_entries(path: &Path, entry: &Entry, bytes: &[u8], report: &mut EjectRep
 }
 
 /// Strip agentdiet entries from every known config location, manifest or not.
-fn sweep(paths: &Paths, wanted: &impl Fn(Target) -> bool, report: &mut EjectReport) -> Result<(), InitError> {
+fn sweep(
+    paths: &Paths,
+    wanted: &impl Fn(Target) -> bool,
+    report: &mut EjectReport,
+) -> Result<(), InitError> {
     for target in Target::ALL.into_iter().filter(|&t| wanted(t)) {
         for project in [false, true] {
             for file in targets::files(paths, target, project).into_iter().flatten() {
-                let Some(bytes) = fsutil::read_optional(&file.path).map_err(io_err(&file.path))? else {
+                let Some(bytes) = fsutil::read_optional(&file.path).map_err(io_err(&file.path))?
+                else {
                     continue;
                 };
-                let Ok(text) = std::str::from_utf8(&bytes) else { continue };
+                let Ok(text) = std::str::from_utf8(&bytes) else {
+                    continue;
+                };
                 if !file.kind.is_present(text) {
                     continue;
                 }
                 match file.kind.unpatch(text) {
                     Ok(Some(cleaned)) => {
-                        fsutil::atomic_write(&file.path, cleaned.as_bytes()).map_err(io_err(&file.path))?;
-                        if !report.cleaned.contains(&file.path) && !report.restored.contains(&file.path) {
+                        fsutil::atomic_write(&file.path, cleaned.as_bytes())
+                            .map_err(io_err(&file.path))?;
+                        if !report.cleaned.contains(&file.path)
+                            && !report.restored.contains(&file.path)
+                        {
                             report.cleaned.push(file.path.clone());
                         }
                     }

@@ -48,7 +48,9 @@ pub enum CasError {
     },
     #[error("invalid ID {0:?}: expected at least {MIN_ID_LEN} hex characters, e.g. #4f9a")]
     InvalidId(String),
-    #[error("invalid line range {0:?}: expected <start>..<end>, 1-based and inclusive, start <= end")]
+    #[error(
+        "invalid line range {0:?}: expected <start>..<end>, 1-based and inclusive, start <= end"
+    )]
     InvalidRange(String),
     #[error("vault I/O error: {0}")]
     Io(#[from] io::Error),
@@ -117,7 +119,10 @@ impl LineRange {
 /// Normalise a user-supplied ID: `#4F9A` / `4f9a` -> `4f9a`.
 pub fn normalize_id(input: &str) -> Result<String, CasError> {
     let trimmed = input.trim();
-    let id = trimmed.strip_prefix('#').unwrap_or(trimmed).to_ascii_lowercase();
+    let id = trimmed
+        .strip_prefix('#')
+        .unwrap_or(trimmed)
+        .to_ascii_lowercase();
     if id.len() < MIN_ID_LEN || id.len() > SHA_LEN || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(CasError::InvalidId(input.to_string()));
     }
@@ -207,7 +212,10 @@ impl Cas {
         self.gc(now)?;
         let entries = self.scan()?;
 
-        let matches: Vec<&Entry> = entries.iter().filter(|e| e.sha.starts_with(&prefix)).collect();
+        let matches: Vec<&Entry> = entries
+            .iter()
+            .filter(|e| e.sha.starts_with(&prefix))
+            .collect();
         match matches.as_slice() {
             [] => Err(CasError::NotFound(prefix)),
             [one] if one.kind == Kind::Live => Ok(one.sha.clone()),
@@ -277,7 +285,9 @@ impl Cas {
             let item = item?;
             let name = item.file_name();
             let Some(name) = name.to_str() else { continue };
-            let Some((sha, ext)) = name.split_once('.') else { continue };
+            let Some((sha, ext)) = name.split_once('.') else {
+                continue;
+            };
             let kind = match ext {
                 "log" => Kind::Live,
                 "expired" => Kind::Tombstone,
@@ -291,7 +301,9 @@ impl Cas {
             if !meta.file_type().is_file() {
                 continue;
             }
-            let Ok(modified) = meta.modified() else { continue };
+            let Ok(modified) = meta.modified() else {
+                continue;
+            };
             let entry = Entry {
                 sha: sha.to_string(),
                 kind,
@@ -359,16 +371,28 @@ mod tests {
     #[test]
     fn normalize_rejects_short_and_non_hex() {
         for bad in ["4f9", "#", "", "xyz!", "#4f9g", &"a".repeat(65)] {
-            assert!(matches!(normalize_id(bad), Err(CasError::InvalidId(_))), "{bad}");
+            assert!(
+                matches!(normalize_id(bad), Err(CasError::InvalidId(_))),
+                "{bad}"
+            );
         }
     }
 
     #[test]
     fn range_parsing() {
-        assert_eq!(LineRange::parse("2..5").unwrap(), LineRange { start: 2, end: 5 });
-        assert_eq!(LineRange::parse("3..3").unwrap(), LineRange { start: 3, end: 3 });
+        assert_eq!(
+            LineRange::parse("2..5").unwrap(),
+            LineRange { start: 2, end: 5 }
+        );
+        assert_eq!(
+            LineRange::parse("3..3").unwrap(),
+            LineRange { start: 3, end: 3 }
+        );
         for bad in ["0..3", "5..2", "3", "a..b", "..", "1..", "-1..3"] {
-            assert!(matches!(LineRange::parse(bad), Err(CasError::InvalidRange(_))), "{bad}");
+            assert!(
+                matches!(LineRange::parse(bad), Err(CasError::InvalidRange(_))),
+                "{bad}"
+            );
         }
     }
 

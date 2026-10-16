@@ -79,10 +79,14 @@ mod tests {
     #[test]
     fn handshake_and_empty_tool_list() {
         let replies = exchange(concat!(
-            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}"#, "\n",
-            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#, "\n",
-            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#, "\n",
-            r#"{"jsonrpc":"2.0","id":3,"method":"ping"}"#, "\n",
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","id":3,"method":"ping"}"#,
+            "\n",
         ));
         assert_eq!(replies.len(), 3, "the notification gets no reply");
         assert_eq!(replies[0]["result"]["protocolVersion"], "2025-03-26");

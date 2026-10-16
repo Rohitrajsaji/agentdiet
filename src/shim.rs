@@ -46,8 +46,10 @@ pub fn resolve_real(name: &str, path_var: &OsStr, shims_dir: &Path) -> Option<Pa
         if !is_executable(&candidate) {
             continue;
         }
-        let is_symlink = std::fs::symlink_metadata(&candidate).is_ok_and(|m| m.file_type().is_symlink());
-        if is_symlink && std::fs::canonicalize(&candidate).is_ok_and(|real| is_agentdiet_exe(&real)) {
+        let is_symlink =
+            std::fs::symlink_metadata(&candidate).is_ok_and(|m| m.file_type().is_symlink());
+        if is_symlink && std::fs::canonicalize(&candidate).is_ok_and(|real| is_agentdiet_exe(&real))
+        {
             continue;
         }
         return Some(candidate);
@@ -62,7 +64,11 @@ pub fn passthrough(name: &str, args: Vec<OsString>) -> ! {
     let shims_dir = home.map(|h| PathBuf::from(h).join(".agentdiet").join("shims"));
     let path_var = std::env::var_os("PATH").unwrap_or_default();
 
-    let real = resolve_real(name, &path_var, shims_dir.as_deref().unwrap_or(Path::new("")));
+    let real = resolve_real(
+        name,
+        &path_var,
+        shims_dir.as_deref().unwrap_or(Path::new("")),
+    );
     let Some(real) = real else {
         eprintln!("agentdiet shim: could not find the real `{name}` on PATH");
         std::process::exit(127);
@@ -106,7 +112,10 @@ mod tests {
 
     #[test]
     fn shim_name_matches_basename_only() {
-        assert_eq!(shim_name(OsStr::new("/h/.agentdiet/shims/git")), Some("git"));
+        assert_eq!(
+            shim_name(OsStr::new("/h/.agentdiet/shims/git")),
+            Some("git")
+        );
         assert_eq!(shim_name(OsStr::new("gh")), Some("gh"));
         assert_eq!(shim_name(OsStr::new("docker")), Some("docker"));
         assert_eq!(shim_name(OsStr::new("ruff")), Some("ruff"));

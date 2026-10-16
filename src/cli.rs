@@ -51,9 +51,7 @@ pub enum Command {
     /// Start the MCP server on stdio
     Mcp,
     /// Scan SKILL.md files and MCP configs for risks (not available yet)
-    Scan {
-        paths: Vec<std::path::PathBuf>,
-    },
+    Scan { paths: Vec<std::path::PathBuf> },
     /// Restore original configs from backups and remove AgentDiet
     #[command(visible_alias = "uninstall")]
     Eject {
@@ -78,12 +76,18 @@ mod tests {
 
     #[test]
     fn bare_invocation_has_no_subcommand() {
-        assert!(Cli::try_parse_from(["agentdiet"]).unwrap().command.is_none());
+        assert!(
+            Cli::try_parse_from(["agentdiet"])
+                .unwrap()
+                .command
+                .is_none()
+        );
     }
 
     #[test]
     fn only_parses_comma_separated_targets() {
-        let cli = Cli::try_parse_from(["agentdiet", "init", "--only", "claude,codex,claude-code"]).unwrap();
+        let cli = Cli::try_parse_from(["agentdiet", "init", "--only", "claude,codex,claude-code"])
+            .unwrap();
         let Some(Command::Init { only, .. }) = cli.command else {
             panic!("expected init");
         };

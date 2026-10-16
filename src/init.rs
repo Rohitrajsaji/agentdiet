@@ -144,7 +144,9 @@ fn run_shims(paths: &Paths, dry_run: bool, report: &mut InitReport) -> Result<()
             .iter()
             .map(|l| format!("+ {} -> {}", l.display(), paths.exe.display()))
             .collect();
-        report.diffs.push(format!("--- shims\n{}\n", lines.join("\n")));
+        report
+            .diffs
+            .push(format!("--- shims\n{}\n", lines.join("\n")));
     }
     report.changed.extend(outcome.linked);
     report.skipped.extend(outcome.skipped);
@@ -160,13 +162,16 @@ pub fn installed(paths: &Paths) -> Vec<Target> {
         .into_iter()
         .filter(|&t| match t {
             Target::Shims => shims::is_installed(paths),
-            _ => targets::files(paths, t, false).into_iter().flatten().any(|f| {
-                fsutil::read_optional(&f.path)
-                    .ok()
-                    .flatten()
-                    .and_then(|b| String::from_utf8(b).ok())
-                    .is_some_and(|text| f.kind.is_present(&text))
-            }),
+            _ => targets::files(paths, t, false)
+                .into_iter()
+                .flatten()
+                .any(|f| {
+                    fsutil::read_optional(&f.path)
+                        .ok()
+                        .flatten()
+                        .and_then(|b| String::from_utf8(b).ok())
+                        .is_some_and(|text| f.kind.is_present(&text))
+                }),
         })
         .collect()
 }
@@ -178,7 +183,9 @@ fn is_interactive() -> bool {
 /// Interactive checklist of detected assistants.
 pub fn choose_interactively(paths: &Paths, project: bool) -> anyhow::Result<Vec<Target>> {
     if !is_interactive() {
-        bail!("not a terminal: pass --all or --only <targets> (claude,cursor,windsurf,gemini,copilot,codex,shims)");
+        bail!(
+            "not a terminal: pass --all or --only <targets> (claude,cursor,windsurf,gemini,copilot,codex,shims)"
+        );
     }
     let detected = targets::detect(paths, project);
     let options: Vec<Target> = Target::ALL

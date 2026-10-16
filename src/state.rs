@@ -90,7 +90,10 @@ pub fn load(paths: &Paths) -> State {
             State::default()
         }),
         Err(e) => {
-            eprintln!("agentdiet: cannot read {} ({e}); using defaults", path.display());
+            eprintln!(
+                "agentdiet: cannot read {} ({e}); using defaults",
+                path.display()
+            );
             State::default()
         }
     }
@@ -122,7 +125,11 @@ pub fn update(paths: &Paths, f: impl FnOnce(&mut State)) -> Result<(State, Chang
         return Ok((after, Change::Unchanged));
     }
     save(paths, &after)?;
-    let change = if after == before { Change::Unchanged } else { Change::Changed };
+    let change = if after == before {
+        Change::Unchanged
+    } else {
+        Change::Changed
+    };
     Ok((after, change))
 }
 

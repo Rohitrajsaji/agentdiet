@@ -163,7 +163,9 @@ fn show_reports_expired_and_not_found_differently() {
 
     let env = Env::empty();
     let old = SystemTime::now() - Duration::from_secs(8 * 24 * 60 * 60);
-    let put = Cas::new(env.paths.cas_dir()).put(&scrub(b"stale\n"), old).unwrap();
+    let put = Cas::new(env.paths.cas_dir())
+        .put(&scrub(b"stale\n"), old)
+        .unwrap();
 
     let expired = run(&env, &["show", &format!("#{}", put.short_id)]);
     assert!(!expired.status.success());
@@ -191,7 +193,11 @@ fn init_all_dry_run_writes_nothing() {
     let env = Env::with_existing_configs();
     let before = env.snapshot();
     let out = run(&env, &["init", "--all", "--dry-run"]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(stdout(&out).contains("would change"));
     assert_eq!(env.snapshot(), before);
 }
@@ -206,17 +212,26 @@ fn init_thrice_then_eject_via_the_binary() {
     for _ in 0..2 {
         let out = run(&env, &["init", "--all"]);
         assert!(out.status.success());
-        assert!(stdout(&out).contains("changed 0 file(s)"), "{}", stdout(&out));
+        assert!(
+            stdout(&out).contains("changed 0 file(s)"),
+            "{}",
+            stdout(&out)
+        );
         assert_eq!(env.snapshot(), after_first);
     }
     assert!(stdout(&run(&env, &["init", "--all"])).contains("export PATH="));
 
     // Registered commands point at the real binary and contain no shell-rc edits.
-    let claude: Value = serde_json::from_str(&env.read(&env.paths.home.join(".claude.json"))).unwrap();
+    let claude: Value =
+        serde_json::from_str(&env.read(&env.paths.home.join(".claude.json"))).unwrap();
     assert_eq!(claude["mcpServers"]["agentdiet"]["args"][0], "mcp");
 
     let out = run(&env, &["eject"]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let mut restored = env.snapshot();
     restored.retain(|p, _| !p.starts_with("home/.agentdiet"));
     let mut expected = pristine;
@@ -230,7 +245,11 @@ fn init_thrice_then_eject_via_the_binary() {
 fn only_restricts_targets() {
     let env = Env::empty();
     let out = run(&env, &["init", "--only", "cursor,gemini"]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(env.paths.home.join(".cursor/mcp.json").exists());
     assert!(env.paths.home.join(".gemini/settings.json").exists());
     assert!(!env.paths.home.join(".claude").exists());
@@ -253,7 +272,13 @@ fn shim_passes_through_to_the_real_binary() {
     fs::write(&script, "#!/bin/sh\necho \"real make: $@\"\nexit 3\n").unwrap();
     fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
 
-    let path = std::env::join_paths([shims.as_path(), real_dir.as_path(), Path::new("/usr/bin"), Path::new("/bin")]).unwrap();
+    let path = std::env::join_paths([
+        shims.as_path(),
+        real_dir.as_path(),
+        Path::new("/usr/bin"),
+        Path::new("/bin"),
+    ])
+    .unwrap();
     let out = Command::new(shims.join("make"))
         .args(["-j", "4"])
         .env("HOME", &env.paths.home)
@@ -262,7 +287,11 @@ fn shim_passes_through_to_the_real_binary() {
         .output()
         .unwrap();
     assert_eq!(stdout(&out).trim(), "real make: -j 4");
-    assert_eq!(out.status.code(), Some(3), "exit status is the real command's");
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "exit status is the real command's"
+    );
 }
 
 #[cfg(unix)]

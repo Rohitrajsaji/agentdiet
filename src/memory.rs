@@ -228,10 +228,29 @@ mod tests {
     fn hostile_queries_never_error() {
         let dir = tempfile::TempDir::new().unwrap();
         let db = MemoryDb::open(&dir.path().join("m.db")).unwrap();
-        db.index(Kind::Command, &scrub(b"full-stack build"), &scrub(b"ok"), None, None)
-            .unwrap();
-        for q in ["full-stack", "a:b", "NOT", "AND OR", "\"", "(", "col:*", "-x", "*", "^a", ""] {
-            db.search(q, 10).unwrap_or_else(|e| panic!("query {q:?} failed: {e}"));
+        db.index(
+            Kind::Command,
+            &scrub(b"full-stack build"),
+            &scrub(b"ok"),
+            None,
+            None,
+        )
+        .unwrap();
+        for q in [
+            "full-stack",
+            "a:b",
+            "NOT",
+            "AND OR",
+            "\"",
+            "(",
+            "col:*",
+            "-x",
+            "*",
+            "^a",
+            "",
+        ] {
+            db.search(q, 10)
+                .unwrap_or_else(|e| panic!("query {q:?} failed: {e}"));
         }
         assert_eq!(db.search("full-stack", 10).unwrap().len(), 1);
     }

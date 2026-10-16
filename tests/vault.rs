@@ -23,9 +23,9 @@ fn synthetic_secrets() -> Vec<String> {
         ["sk-", "ant-", "api03-"].concat() + &"Ab1_-".repeat(19) + "AA",
         ["sk-", &"a1B2".repeat(5), "T3Blbk", "FJ", &"c3D4".repeat(5)].concat(),
         ["sk-", "proj-", &half, "T3Blbk", "FJ", &half].concat(),
-        "aB3/".repeat(10), // AWS secret access key value
-        "abcdefghijklmnop1234567890".to_string(), // bearer token
-        "hunter2hunter2".to_string(), // dotenv value
+        "aB3/".repeat(10),                            // AWS secret access key value
+        "abcdefghijklmnop1234567890".to_string(),     // bearer token
+        "hunter2hunter2".to_string(),                 // dotenv value
         "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC".repeat(6), // PEM body
     ]
 }
@@ -34,7 +34,14 @@ fn dirty_output(secrets: &[String]) -> String {
     format!(
         "$ deploy\nid={}\nkey: {}\nOPENAI={}\nproj={}\nAWS_SECRET_ACCESS_KEY={}\n\
          Authorization: Bearer {}\nDB_PASSWORD={}\n-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\ndone\n",
-        secrets[0], secrets[1], secrets[2], secrets[3], secrets[4], secrets[5], secrets[6], secrets[7]
+        secrets[0],
+        secrets[1],
+        secrets[2],
+        secrets[3],
+        secrets[4],
+        secrets[5],
+        secrets[6],
+        secrets[7]
     )
 }
 
@@ -43,12 +50,19 @@ fn files_in(dir: &Path) -> Vec<(String, Vec<u8>)> {
         .unwrap()
         .map(|e| e.unwrap())
         .filter(|e| e.path().is_file())
-        .map(|e| (e.file_name().to_string_lossy().into_owned(), fs::read(e.path()).unwrap()))
+        .map(|e| {
+            (
+                e.file_name().to_string_lossy().into_owned(),
+                fs::read(e.path()).unwrap(),
+            )
+        })
         .collect()
 }
 
 fn contains(haystack: &[u8], needle: &str) -> bool {
-    haystack.windows(needle.len()).any(|w| w == needle.as_bytes())
+    haystack
+        .windows(needle.len())
+        .any(|w| w == needle.as_bytes())
 }
 
 fn backdate(path: &Path, by: Duration) {
@@ -65,7 +79,10 @@ fn put_text(cas: &Cas, text: &str, now: SystemTime) -> agentdiet::cas::PutResult
 }
 
 fn live_logs(dir: &Path) -> usize {
-    files_in(dir).iter().filter(|(n, _)| n.ends_with(".log")).count()
+    files_in(dir)
+        .iter()
+        .filter(|(n, _)| n.ends_with(".log"))
+        .count()
 }
 
 #[test]
@@ -126,7 +143,10 @@ fn identical_output_dedupes_and_refreshes_the_ttl() {
     put_text(&cas, "same output\n", SystemTime::now());
     // Two days later it would be 8 days old without the refresh.
     let later = SystemTime::now() + 2 * DAY;
-    assert_eq!(cas.read(&first.short_id, None, later).unwrap(), b"same output\n");
+    assert_eq!(
+        cas.read(&first.short_id, None, later).unwrap(),
+        b"same output\n"
+    );
 }
 
 #[test]
@@ -171,9 +191,18 @@ fn prefix_recovery_and_ambiguity() {
     // A longer prefix disambiguates.
     assert_eq!(cas.read("#ab120", None, now).unwrap(), b"a");
 
-    assert!(matches!(cas.read("#0000", None, now), Err(CasError::NotFound(_))));
-    assert!(matches!(cas.read("#xyz1", None, now), Err(CasError::InvalidId(_))));
-    assert!(matches!(cas.read("#4f9", None, now), Err(CasError::InvalidId(_))));
+    assert!(matches!(
+        cas.read("#0000", None, now),
+        Err(CasError::NotFound(_))
+    ));
+    assert!(matches!(
+        cas.read("#xyz1", None, now),
+        Err(CasError::InvalidId(_))
+    ));
+    assert!(matches!(
+        cas.read("#4f9", None, now),
+        Err(CasError::InvalidId(_))
+    ));
 }
 
 #[test]
@@ -183,7 +212,8 @@ fn line_slicing_is_one_based_and_inclusive() {
     let now = SystemTime::now();
     let put = put_text(&cas, "l1\nl2\nl3\nl4\nl5\n", now);
     let read = |range: &str| {
-        cas.read(&put.short_id, Some(LineRange::parse(range).unwrap()), now).unwrap()
+        cas.read(&put.short_id, Some(LineRange::parse(range).unwrap()), now)
+            .unwrap()
     };
     assert_eq!(read("2..4"), b"l2\nl3\nl4\n");
     assert_eq!(read("1..1"), b"l1\n");
@@ -209,7 +239,10 @@ fn expired_entries_report_expired_not_not_found() {
     assert!(!dir.join(format!("{}.log", stale.sha)).exists());
     assert!(dir.join(format!("{}.expired", stale.sha)).exists());
     // Still "expired" on the next call, and never "not found".
-    assert!(matches!(cas.read(&stale.sha, None, now), Err(CasError::Expired(_))));
+    assert!(matches!(
+        cas.read(&stale.sha, None, now),
+        Err(CasError::Expired(_))
+    ));
 
     // GC on write: a put deletes another stale entry.
     let older = put_text(&cas, "older\n", now - 9 * DAY);
@@ -220,7 +253,10 @@ fn expired_entries_report_expired_not_not_found() {
     assert_eq!(cas.read(&fresh.short_id, None, now).unwrap(), b"fresh\n");
 
     // A never-seen ID is a different error.
-    assert!(matches!(cas.read("#0000", None, now), Err(CasError::NotFound(_))));
+    assert!(matches!(
+        cas.read("#0000", None, now),
+        Err(CasError::NotFound(_))
+    ));
 
     // Storing the same content again revives it and clears the tombstone.
     let again = put_text(&cas, "stale\n", now);
@@ -239,7 +275,10 @@ fn vault_files_are_private() {
         let put = put_text(&cas, "private\n", SystemTime::now());
         let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&env.paths.cas_dir()), 0o700);
-        assert_eq!(mode(&env.paths.cas_dir().join(format!("{}.log", put.sha))), 0o600);
+        assert_eq!(
+            mode(&env.paths.cas_dir().join(format!("{}.log", put.sha))),
+            0o600
+        );
     }
 }
 
@@ -259,7 +298,9 @@ fn memory_search_is_ranked_by_bm25() {
         db.index(
             Kind::Read,
             &s(&format!("notes {i}")),
-            &s(&format!("unrelated chatter about topic number {i} and nothing else")),
+            &s(&format!(
+                "unrelated chatter about topic number {i} and nothing else"
+            )),
             None,
             None,
         )
@@ -271,9 +312,17 @@ fn memory_search_is_ranked_by_bm25() {
         "consectetur adipiscing elit ".repeat(12),
         "sed do eiusmod tempor ".repeat(12)
     );
-    let body_only = db.index(Kind::Read, &s("build log"), &s(&long_body), None, None).unwrap();
+    let body_only = db
+        .index(Kind::Read, &s("build log"), &s(&long_body), None, None)
+        .unwrap();
     let title_only = db
-        .index(Kind::Decision, &s("cargo test notes"), &s("remember to check flags"), None, None)
+        .index(
+            Kind::Decision,
+            &s("cargo test notes"),
+            &s("remember to check flags"),
+            None,
+            None,
+        )
         .unwrap();
     let dense = db
         .index(
@@ -285,13 +334,23 @@ fn memory_search_is_ranked_by_bm25() {
         )
         .unwrap();
     // Only one of the two terms: excluded by the implicit AND.
-    db.index(Kind::Command, &s("cargo build"), &s("compiled fine"), None, None).unwrap();
+    db.index(
+        Kind::Command,
+        &s("cargo build"),
+        &s("compiled fine"),
+        None,
+        None,
+    )
+    .unwrap();
 
     let hits = db.search("cargo test", 10).unwrap();
     let ids: Vec<i64> = hits.iter().map(|h| h.id).collect();
     assert_eq!(ids, vec![dense, title_only, body_only], "{hits:#?}");
     // bm25() is lower-is-better, so scores must be strictly ascending.
-    assert!(hits.windows(2).all(|w| w[0].score < w[1].score), "{hits:#?}");
+    assert!(
+        hits.windows(2).all(|w| w[0].score < w[1].score),
+        "{hits:#?}"
+    );
 
     assert_eq!(hits[0].kind, "command");
     assert_eq!(hits[0].cas_sha.as_deref(), Some("deadbeef"));
@@ -354,11 +413,20 @@ fn an_expired_id_never_returns_a_different_live_entry() {
         [("abcd1".to_string(), true), ("abcd2".to_string(), false)]
     );
     let msg = cas.read("#abcd", None, now).unwrap_err().to_string();
-    assert!(msg.contains("#abcd1 (expired)") && msg.contains("#abcd2"), "{msg}");
+    assert!(
+        msg.contains("#abcd1 (expired)") && msg.contains("#abcd2"),
+        "{msg}"
+    );
 
     // The hint prefixes work: one is expired, the other is the live entry.
-    assert!(matches!(cas.read("abcd1", None, now), Err(CasError::Expired(_))));
-    assert_eq!(cas.read("abcd2", None, now).unwrap(), b"unrelated live output\n");
+    assert!(matches!(
+        cas.read("abcd1", None, now),
+        Err(CasError::Expired(_))
+    ));
+    assert_eq!(
+        cas.read("abcd2", None, now).unwrap(),
+        b"unrelated live output\n"
+    );
 
     // For every prefix length of the expired sha, the live decoy is never returned.
     for len in 4..=64 {
@@ -366,7 +434,11 @@ fn an_expired_id_never_returns_a_different_live_entry() {
         let result = cas.read(id, None, now);
         assert!(result.is_err(), "prefix {len} returned {result:?}");
     }
-    assert_eq!(files_in(&dir).len(), 2, "lookups must not create or delete entries");
+    assert_eq!(
+        files_in(&dir).len(),
+        2,
+        "lookups must not create or delete entries"
+    );
 }
 
 #[test]
@@ -380,22 +452,37 @@ fn collisions_between_live_and_expired_entries_are_classified() {
     plant_live(&dir, &sha_like("1111", 'a'), "one");
     plant_live(&dir, &sha_like("1111", 'b'), "two");
     let (_, c) = ambiguity(cas.read("1111", None, now).unwrap_err());
-    assert_eq!(c, [("1111a".to_string(), false), ("1111b".to_string(), false)]);
+    assert_eq!(
+        c,
+        [("1111a".to_string(), false), ("1111b".to_string(), false)]
+    );
 
     // expired / live
     plant_tombstone(&dir, &sha_like("2222", 'a'));
     plant_live(&dir, &sha_like("2222", 'b'), "three");
     let (_, c) = ambiguity(cas.read("2222", None, now).unwrap_err());
-    assert_eq!(c, [("2222a".to_string(), true), ("2222b".to_string(), false)]);
+    assert_eq!(
+        c,
+        [("2222a".to_string(), true), ("2222b".to_string(), false)]
+    );
 
     // expired / expired: every meaning is gone, so "expired", and no content.
     plant_tombstone(&dir, &sha_like("3333", 'a'));
     plant_tombstone(&dir, &sha_like("3333", 'b'));
-    assert!(matches!(cas.read("3333", None, now), Err(CasError::Expired(_))));
-    assert!(matches!(cas.read("3333a", None, now), Err(CasError::Expired(_))));
+    assert!(matches!(
+        cas.read("3333", None, now),
+        Err(CasError::Expired(_))
+    ));
+    assert!(matches!(
+        cas.read("3333a", None, now),
+        Err(CasError::Expired(_))
+    ));
 
     // A never-issued prefix is still "not found".
-    assert!(matches!(cas.read("4444", None, now), Err(CasError::NotFound(_))));
+    assert!(matches!(
+        cas.read("4444", None, now),
+        Err(CasError::NotFound(_))
+    ));
 }
 
 #[test]
@@ -411,9 +498,16 @@ fn new_entries_get_short_ids_that_are_unique_against_tombstones() {
 
     let put = put_text(&cas, "fresh output\n", now);
     assert_eq!(put.sha, sha);
-    assert!(put.short_id.len() > 4, "short id {} collides with a tombstone", put.short_id);
+    assert!(
+        put.short_id.len() > 4,
+        "short id {} collides with a tombstone",
+        put.short_id
+    );
     assert!(put.sha.starts_with(&put.short_id));
-    assert_eq!(cas.read(&put.short_id, None, now).unwrap(), b"fresh output\n");
+    assert_eq!(
+        cas.read(&put.short_id, None, now).unwrap(),
+        b"fresh output\n"
+    );
     // The old 4-char breadcrumb can no longer silently mean the new entry.
     assert!(matches!(
         cas.read(&sha[..4], None, now),
@@ -434,23 +528,41 @@ fn reputting_identical_content_revives_it_and_hints_stay_deterministic() {
 
     // Expire it, then put the same bytes again.
     let first = put_text(&cas, "comes back\n", now - 8 * DAY);
-    assert!(matches!(cas.read(&first.sha, None, now), Err(CasError::Expired(_))));
+    assert!(matches!(
+        cas.read(&first.sha, None, now),
+        Err(CasError::Expired(_))
+    ));
     let again = put_text(&cas, "comes back\n", now);
     assert_eq!(again.sha, first.sha);
     assert!(!dir.join(format!("{}.expired", sha)).exists());
-    assert_eq!(files_in(&dir).iter().filter(|(n, _)| n.ends_with(".log")).count(), 2);
+    assert_eq!(
+        files_in(&dir)
+            .iter()
+            .filter(|(n, _)| n.ends_with(".log"))
+            .count(),
+        2
+    );
 
     // Its (longer) new ID works; the old 4-char one is an ambiguity with the rival.
     assert!(again.short_id.len() > 4);
-    assert_eq!(cas.read(&again.short_id, None, now).unwrap(), b"comes back\n");
+    assert_eq!(
+        cas.read(&again.short_id, None, now).unwrap(),
+        b"comes back\n"
+    );
     let first_err = cas.read(&sha[..4], None, now).unwrap_err().to_string();
     for _ in 0..5 {
-        assert_eq!(cas.read(&sha[..4], None, now).unwrap_err().to_string(), first_err);
+        assert_eq!(
+            cas.read(&sha[..4], None, now).unwrap_err().to_string(),
+            first_err
+        );
     }
     let (_, candidates) = ambiguity(cas.read(&sha[..4], None, now).unwrap_err());
     let ids: Vec<&str> = candidates.iter().map(|(id, _)| id.as_str()).collect();
     assert_eq!(ids.len(), 2);
-    assert!(ids.windows(2).all(|w| w[0] < w[1]), "hints are sorted: {ids:?}");
+    assert!(
+        ids.windows(2).all(|w| w[0] < w[1]),
+        "hints are sorted: {ids:?}"
+    );
     assert!(candidates.iter().all(|(_, expired)| !expired));
 }
 
@@ -463,7 +575,10 @@ fn a_log_with_a_leftover_tombstone_is_live() {
     let sha = sha_like("9a9a", 'c');
     plant_live(&dir, &sha, "still here");
     plant_tombstone(&dir, &sha);
-    assert_eq!(cas.read("9a9a", None, SystemTime::now()).unwrap(), b"still here");
+    assert_eq!(
+        cas.read("9a9a", None, SystemTime::now()).unwrap(),
+        b"still here"
+    );
 }
 
 // ---- vault entries are plain files: symlinks are never followed ------------
@@ -498,11 +613,18 @@ mod symlinks {
         symlink(&victim, dir.join(format!("{sha}.log"))).unwrap();
 
         // Before the put, the symlink is not an entry at all.
-        assert!(matches!(cas.read(&sha[..8], None, SystemTime::now()), Err(CasError::NotFound(_))));
+        assert!(matches!(
+            cas.read(&sha[..8], None, SystemTime::now()),
+            Err(CasError::NotFound(_))
+        ));
 
         let put = put_text(&cas, "payload\n", SystemTime::now());
         assert_eq!(fs::read(&victim).unwrap(), b"precious");
-        assert_eq!(mtime(&victim), before, "the symlink target's mtime was touched");
+        assert_eq!(
+            mtime(&victim),
+            before,
+            "the symlink target's mtime was touched"
+        );
         let log = dir.join(format!("{}.log", put.sha));
         assert!(!fs::symlink_metadata(&log).unwrap().file_type().is_symlink());
         assert_eq!(fs::read(&log).unwrap(), b"payload\n");
@@ -538,9 +660,17 @@ mod symlinks {
         assert_eq!(fs::read(&victim).unwrap(), b"precious");
         assert_eq!(mtime(&victim), before);
         let tomb = dir.join(format!("{}.expired", stale.sha));
-        assert!(!fs::symlink_metadata(&tomb).unwrap().file_type().is_symlink());
+        assert!(
+            !fs::symlink_metadata(&tomb)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         assert_eq!(fs::metadata(&tomb).unwrap().len(), 0);
-        assert!(matches!(cas.read(&stale.sha, None, now), Err(CasError::Expired(_))));
+        assert!(matches!(
+            cas.read(&stale.sha, None, now),
+            Err(CasError::Expired(_))
+        ));
     }
 
     #[test]
