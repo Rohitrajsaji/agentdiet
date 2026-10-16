@@ -11,6 +11,7 @@ pub mod cli;
 pub mod compress;
 pub mod control;
 pub mod diet;
+pub mod folding;
 pub mod fsutil;
 pub mod init;
 pub mod mcp;

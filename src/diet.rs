@@ -295,8 +295,9 @@ fn select_candidate(sel: &Selection<'_>) -> Option<Candidate> {
             crate::compress::compress(argv, *exit, sel.scrubbed, sel.mode)
         }
         Source::ModelJson => crate::toon::encode(sel.scrubbed),
-        // Folding plugs in here.
-        Source::Read { .. } => None,
+        Source::Read { path, extent } => {
+            crate::folding::fold(path, *extent, sel.scrubbed, sel.mode)
+        }
     }
 }
 

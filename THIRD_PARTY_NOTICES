@@ -72,3 +72,22 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+--------------------------------------------------------------------------------
+tree-sitter and its grammars — https://github.com/tree-sitter
+License: MIT (streaming-iterator: MIT OR Apache-2.0, used under MIT)
+
+Used in: src/folding.rs. Statically linked (compiled into the binary; no runtime grammar
+loading, no wasm):
+
+  - tree-sitter             Copyright (c) 2018 Max Brunsfeld
+  - tree-sitter-language    Copyright (c) 2018 Max Brunsfeld
+  - tree-sitter-rust        Copyright (c) 2017 Maxim Sokolov
+  - tree-sitter-python      Copyright (c) 2016 Max Brunsfeld
+  - tree-sitter-javascript  Copyright (c) 2014 Max Brunsfeld
+  - tree-sitter-typescript  Copyright (c) 2017 Max Brunsfeld (TypeScript and TSX grammars)
+  - streaming-iterator      Copyright (c) 2016 Steven Fackler
+
+Each is distributed under the MIT License, whose text is the same as the Secretlint notice
+above apart from the copyright line.
+

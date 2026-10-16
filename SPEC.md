@@ -385,7 +385,7 @@ lesser form):
   vendored or linked; `tests/toon_reference.rs`, opt-in) agreed with this encoder on 305,000 generated
   documents with no difference, every decline being explained by the document.
 
-#### Signature folding **[3B]**
+#### Signature folding
 
 - Applies to a `Read` whose `extent` is `Complete`, whose scrubbed text has more than 300 lines, with
   the language taken from the file extension: Rust, TypeScript/TSX, JavaScript and Python, via
@@ -637,7 +637,7 @@ Notes:
 | 1 | scaffold, state ledger, Control Center, `init`/`eject` | done |
 | 2 | scrubber, Vault, FTS5 memory | done |
 | 3A | dependency cleanup, this specification, shim benchmark | done (B1 requirement still NOT MET) |
-| 3B | Diet Engine library: pipeline, compression, TOON, folding, `show`/ID/memory/state changes marked **[3B]** | in progress: storage prerequisites and the `diet.rs` pipeline (library only, no transforms yet) are implemented; shell compression (`compress.rs`) and the TOON subset (`toon.rs`) are implemented; folding is not |
+| 3B | Diet Engine library: pipeline, compression, TOON, folding, `show`/ID/memory/state changes marked **[3B]** | in progress: storage prerequisites and the `diet.rs` pipeline (library only, no transforms yet) are implemented; shell compression (`compress.rs`), the TOON subset (`toon.rs`) and signature folding (`folding.rs`) are implemented; the Slice 3B performance numbers (§7) are still to be measured |
 | 4 | hooks **and** PPID shims, wiring the engine to real entry points, shim redesign question (B1) | not started |
 | 5 | MCP tools (`diet_exec` etc.), scanner, `agentdiet top` | not started |
 
