@@ -291,8 +291,11 @@ pub struct Selection<'a> {
 /// Production candidate selection: dispatch on the source.
 fn select_candidate(sel: &Selection<'_>) -> Option<Candidate> {
     match sel.input.source {
-        // Command-aware compression, TOON and folding plug in here, one source each.
-        Source::Shell { .. } | Source::ModelJson | Source::Read { .. } => None,
+        Source::Shell { argv, exit } => {
+            crate::compress::compress(argv, *exit, sel.scrubbed, sel.mode)
+        }
+        // TOON and folding plug in here, one source each.
+        Source::ModelJson | Source::Read { .. } => None,
     }
 }
 

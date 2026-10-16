@@ -1,0 +1,44 @@
+npm http fetch GET 200 https://registry.npmjs.org/pkg-0 20ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-1 21ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-2 22ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-3 23ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-4 24ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-5 25ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-6 26ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-7 27ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-8 28ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-9 29ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-10 30ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-11 31ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-12 32ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-13 33ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-14 34ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-15 35ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-16 36ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-17 37ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-18 38ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-19 39ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-20 40ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-21 41ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-22 42ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-23 43ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-24 44ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-25 45ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-26 46ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-27 47ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-28 48ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-29 49ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-30 50ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-31 51ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-32 52ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-33 53ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-34 54ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-35 55ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-36 56ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-37 57ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-38 58ms
+npm http fetch GET 200 https://registry.npmjs.org/pkg-39 59ms
+npm error code E404
+npm error 404 Not Found - GET https://registry.npmjs.org/@acme%2fmissing - Not found
+npm error 404
+npm error 404  '@acme/missing@^1.0.0' is not in this registry.

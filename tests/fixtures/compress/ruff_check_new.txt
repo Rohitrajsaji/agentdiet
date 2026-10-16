@@ -1,0 +1,201 @@
+F401 [*] `os0` imported but unused
+ --> src/mod0.py:3:8
+  |
+3 | import os0
+  |        ^^^
+  |
+help: Remove unused import: `os0`
+
+F401 [*] `os1` imported but unused
+ --> src/mod1.py:4:8
+  |
+4 | import os1
+  |        ^^^
+  |
+help: Remove unused import: `os1`
+
+F401 [*] `os2` imported but unused
+ --> src/mod2.py:5:8
+  |
+5 | import os2
+  |        ^^^
+  |
+help: Remove unused import: `os2`
+
+F401 [*] `os3` imported but unused
+ --> src/mod3.py:6:8
+  |
+6 | import os3
+  |        ^^^
+  |
+help: Remove unused import: `os3`
+
+F401 [*] `os4` imported but unused
+ --> src/mod4.py:7:8
+  |
+7 | import os4
+  |        ^^^
+  |
+help: Remove unused import: `os4`
+
+F401 [*] `os5` imported but unused
+ --> src/mod5.py:8:8
+  |
+8 | import os5
+  |        ^^^
+  |
+help: Remove unused import: `os5`
+
+F401 [*] `os6` imported but unused
+ --> src/mod6.py:9:8
+  |
+9 | import os6
+  |        ^^^
+  |
+help: Remove unused import: `os6`
+
+F401 [*] `os7` imported but unused
+ --> src/mod7.py:10:8
+  |
+10 | import os7
+  |        ^^^
+  |
+help: Remove unused import: `os7`
+
+F401 [*] `os8` imported but unused
+ --> src/mod8.py:11:8
+  |
+11 | import os8
+  |        ^^^
+  |
+help: Remove unused import: `os8`
+
+F401 [*] `os9` imported but unused
+ --> src/mod9.py:12:8
+  |
+12 | import os9
+  |        ^^^
+  |
+help: Remove unused import: `os9`
+
+F401 [*] `os10` imported but unused
+ --> src/mod10.py:13:8
+  |
+13 | import os10
+  |        ^^^
+  |
+help: Remove unused import: `os10`
+
+F401 [*] `os11` imported but unused
+ --> src/mod11.py:14:8
+  |
+14 | import os11
+  |        ^^^
+  |
+help: Remove unused import: `os11`
+
+F401 [*] `os12` imported but unused
+ --> src/mod12.py:15:8
+  |
+15 | import os12
+  |        ^^^
+  |
+help: Remove unused import: `os12`
+
+F401 [*] `os13` imported but unused
+ --> src/mod13.py:16:8
+  |
+16 | import os13
+  |        ^^^
+  |
+help: Remove unused import: `os13`
+
+F401 [*] `os14` imported but unused
+ --> src/mod14.py:17:8
+  |
+17 | import os14
+  |        ^^^
+  |
+help: Remove unused import: `os14`
+
+F401 [*] `os15` imported but unused
+ --> src/mod15.py:18:8
+  |
+18 | import os15
+  |        ^^^
+  |
+help: Remove unused import: `os15`
+
+F401 [*] `os16` imported but unused
+ --> src/mod16.py:19:8
+  |
+19 | import os16
+  |        ^^^
+  |
+help: Remove unused import: `os16`
+
+F401 [*] `os17` imported but unused
+ --> src/mod17.py:20:8
+  |
+20 | import os17
+  |        ^^^
+  |
+help: Remove unused import: `os17`
+
+F401 [*] `os18` imported but unused
+ --> src/mod18.py:21:8
+  |
+21 | import os18
+  |        ^^^
+  |
+help: Remove unused import: `os18`
+
+F401 [*] `os19` imported but unused
+ --> src/mod19.py:22:8
+  |
+22 | import os19
+  |        ^^^
+  |
+help: Remove unused import: `os19`
+
+F401 [*] `os20` imported but unused
+ --> src/mod20.py:23:8
+  |
+23 | import os20
+  |        ^^^
+  |
+help: Remove unused import: `os20`
+
+F401 [*] `os21` imported but unused
+ --> src/mod21.py:24:8
+  |
+24 | import os21
+  |        ^^^
+  |
+help: Remove unused import: `os21`
+
+F401 [*] `os22` imported but unused
+ --> src/mod22.py:25:8
+  |
+25 | import os22
+  |        ^^^
+  |
+help: Remove unused import: `os22`
+
+F401 [*] `os23` imported but unused
+ --> src/mod23.py:26:8
+  |
+26 | import os23
+  |        ^^^
+  |
+help: Remove unused import: `os23`
+
+F401 [*] `os24` imported but unused
+ --> src/mod24.py:27:8
+  |
+27 | import os24
+  |        ^^^
+  |
+help: Remove unused import: `os24`
+
+Found 25 errors.

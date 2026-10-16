@@ -1,0 +1,124 @@
+=== RUN   TestPkg0Case0
+--- PASS: TestPkg0Case0 (0.00s)
+=== RUN   TestPkg0Case1
+--- PASS: TestPkg0Case1 (0.01s)
+=== RUN   TestPkg0Case2
+--- PASS: TestPkg0Case2 (0.02s)
+=== RUN   TestPkg0Case3
+--- PASS: TestPkg0Case3 (0.03s)
+=== RUN   TestPkg0Case4
+--- PASS: TestPkg0Case4 (0.04s)
+=== RUN   TestPkg0Case5
+--- PASS: TestPkg0Case5 (0.05s)
+=== RUN   TestPkg0Case6
+--- PASS: TestPkg0Case6 (0.06s)
+=== RUN   TestPkg0Case7
+--- PASS: TestPkg0Case7 (0.07s)
+PASS
+ok  	example.com/demo/pkg0	0.112s
+=== RUN   TestPkg1Case0
+--- PASS: TestPkg1Case0 (0.00s)
+=== RUN   TestPkg1Case1
+--- PASS: TestPkg1Case1 (0.01s)
+=== RUN   TestPkg1Case2
+--- PASS: TestPkg1Case2 (0.02s)
+=== RUN   TestPkg1Case3
+--- PASS: TestPkg1Case3 (0.03s)
+=== RUN   TestPkg1Case4
+--- PASS: TestPkg1Case4 (0.04s)
+=== RUN   TestPkg1Case5
+--- PASS: TestPkg1Case5 (0.05s)
+=== RUN   TestPkg1Case6
+--- PASS: TestPkg1Case6 (0.06s)
+=== RUN   TestPkg1Case7
+--- PASS: TestPkg1Case7 (0.07s)
+PASS
+ok  	example.com/demo/pkg1	0.212s
+=== RUN   TestPkg2Case0
+--- PASS: TestPkg2Case0 (0.00s)
+=== RUN   TestPkg2Case1
+--- PASS: TestPkg2Case1 (0.01s)
+=== RUN   TestPkg2Case2
+--- PASS: TestPkg2Case2 (0.02s)
+=== RUN   TestPkg2Case3
+--- PASS: TestPkg2Case3 (0.03s)
+=== RUN   TestPkg2Case4
+--- PASS: TestPkg2Case4 (0.04s)
+=== RUN   TestPkg2Case5
+--- PASS: TestPkg2Case5 (0.05s)
+=== RUN   TestPkg2Case6
+--- PASS: TestPkg2Case6 (0.06s)
+=== RUN   TestPkg2Case7
+--- PASS: TestPkg2Case7 (0.07s)
+PASS
+ok  	example.com/demo/pkg2	0.312s
+=== RUN   TestPkg3Case0
+--- PASS: TestPkg3Case0 (0.00s)
+=== RUN   TestPkg3Case1
+--- PASS: TestPkg3Case1 (0.01s)
+=== RUN   TestPkg3Case2
+--- PASS: TestPkg3Case2 (0.02s)
+=== RUN   TestPkg3Case3
+--- PASS: TestPkg3Case3 (0.03s)
+=== RUN   TestPkg3Case4
+--- PASS: TestPkg3Case4 (0.04s)
+=== RUN   TestPkg3Case5
+--- PASS: TestPkg3Case5 (0.05s)
+=== RUN   TestPkg3Case6
+--- PASS: TestPkg3Case6 (0.06s)
+=== RUN   TestPkg3Case7
+--- PASS: TestPkg3Case7 (0.07s)
+PASS
+ok  	example.com/demo/pkg3	0.412s
+=== RUN   TestPkg4Case0
+--- PASS: TestPkg4Case0 (0.00s)
+=== RUN   TestPkg4Case1
+--- PASS: TestPkg4Case1 (0.01s)
+=== RUN   TestPkg4Case2
+--- PASS: TestPkg4Case2 (0.02s)
+=== RUN   TestPkg4Case3
+--- PASS: TestPkg4Case3 (0.03s)
+=== RUN   TestPkg4Case4
+--- PASS: TestPkg4Case4 (0.04s)
+=== RUN   TestPkg4Case5
+--- PASS: TestPkg4Case5 (0.05s)
+=== RUN   TestPkg4Case6
+--- PASS: TestPkg4Case6 (0.06s)
+=== RUN   TestPkg4Case7
+--- PASS: TestPkg4Case7 (0.07s)
+PASS
+ok  	example.com/demo/pkg4	0.512s
+=== RUN   TestPkg5Case0
+--- PASS: TestPkg5Case0 (0.00s)
+=== RUN   TestPkg5Case1
+--- PASS: TestPkg5Case1 (0.01s)
+=== RUN   TestPkg5Case2
+--- PASS: TestPkg5Case2 (0.02s)
+=== RUN   TestPkg5Case3
+--- PASS: TestPkg5Case3 (0.03s)
+=== RUN   TestPkg5Case4
+--- PASS: TestPkg5Case4 (0.04s)
+=== RUN   TestPkg5Case5
+--- PASS: TestPkg5Case5 (0.05s)
+=== RUN   TestPkg5Case6
+--- PASS: TestPkg5Case6 (0.06s)
+=== RUN   TestPkg5Case7
+--- PASS: TestPkg5Case7 (0.07s)
+PASS
+ok  	example.com/demo/pkg5	0.612s
+=== RUN   TestWidget
+=== RUN   TestWidget/empty
+=== RUN   TestWidget/negative
+    widget_test.go:31: got -1, want 0
+--- FAIL: TestWidget/negative (0.00s)
+--- FAIL: TestWidget (0.00s)
+=== RUN   TestOther
+--- PASS: TestOther (0.00s)
+FAIL
+FAIL	example.com/demo/widget	0.015s
+panic: runtime error: index out of range [3] with length 3
+
+goroutine 7 [running]:
+example.com/demo/widget.Render(...)
+	/home/dev/demo/widget/render.go:57
+FAIL

@@ -1,0 +1,13 @@
+make[1]: Entering directory '/home/dev/proj/.'
+cc -O2 -c a.c -o a.o
+a.c:10:5: warning: implicit declaration of function 'foo'
+make[1]: Leaving directory '/home/dev/proj/.'
+make[1]: Entering directory '/home/dev/proj/sub1'
+cc -O2 -c a.c -o a.o
+a.c:10:5: warning: implicit declaration of function 'foo'
+make[1]: Leaving directory '/home/dev/proj/sub1'
+make[1]: Entering directory '/home/dev/proj/sub2'
+cc -O2 -c a.c -o a.o
+a.c:10:5: warning: implicit declaration of function 'foo'
+make[1]: Leaving directory '/home/dev/proj/sub2'
+make: *** [Makefile:12: all] Error 1

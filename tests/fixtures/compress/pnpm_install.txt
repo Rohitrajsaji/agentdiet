@@ -1,0 +1,66 @@
+Lockfile is up to date, resolution step is skipped
+Progress: resolved 0, reused 0, downloaded 0, added 0
+Progress: resolved 5, reused 4, downloaded 1, added 4
+Progress: resolved 10, reused 8, downloaded 2, added 8
+Progress: resolved 15, reused 12, downloaded 3, added 12
+Progress: resolved 20, reused 16, downloaded 4, added 16
+Progress: resolved 25, reused 20, downloaded 5, added 20
+Progress: resolved 30, reused 24, downloaded 6, added 24
+Progress: resolved 35, reused 28, downloaded 7, added 28
+Progress: resolved 40, reused 32, downloaded 8, added 32
+Progress: resolved 45, reused 36, downloaded 9, added 36
+Progress: resolved 50, reused 40, downloaded 10, added 40
+Progress: resolved 55, reused 44, downloaded 11, added 44
+Progress: resolved 60, reused 48, downloaded 12, added 48
+Progress: resolved 65, reused 52, downloaded 13, added 52
+Progress: resolved 70, reused 56, downloaded 14, added 56
+Progress: resolved 75, reused 60, downloaded 15, added 60
+Progress: resolved 80, reused 64, downloaded 16, added 64
+Progress: resolved 85, reused 68, downloaded 17, added 68
+Progress: resolved 90, reused 72, downloaded 18, added 72
+Progress: resolved 95, reused 76, downloaded 19, added 76
+Progress: resolved 100, reused 80, downloaded 20, added 80
+Progress: resolved 105, reused 84, downloaded 21, added 84
+Progress: resolved 110, reused 88, downloaded 22, added 88
+Progress: resolved 115, reused 92, downloaded 23, added 92
+Progress: resolved 120, reused 96, downloaded 24, added 96
+Progress: resolved 125, reused 100, downloaded 25, added 100
+Progress: resolved 130, reused 104, downloaded 26, added 104
+Progress: resolved 135, reused 108, downloaded 27, added 108
+Progress: resolved 140, reused 112, downloaded 28, added 112
+Progress: resolved 145, reused 116, downloaded 29, added 116
+Progress: resolved 150, reused 120, downloaded 30, added 120
+Progress: resolved 155, reused 124, downloaded 31, added 124
+Progress: resolved 160, reused 128, downloaded 32, added 128
+Progress: resolved 165, reused 132, downloaded 33, added 132
+Progress: resolved 170, reused 136, downloaded 34, added 136
+Progress: resolved 175, reused 140, downloaded 35, added 140
+Progress: resolved 180, reused 144, downloaded 36, added 144
+Progress: resolved 185, reused 148, downloaded 37, added 148
+Progress: resolved 190, reused 152, downloaded 38, added 152
+Progress: resolved 195, reused 156, downloaded 39, added 156
+Progress: resolved 200, reused 160, downloaded 40, added 160
+Progress: resolved 205, reused 164, downloaded 41, added 164
+Progress: resolved 210, reused 168, downloaded 42, added 168
+Progress: resolved 215, reused 172, downloaded 43, added 172
+Progress: resolved 220, reused 176, downloaded 44, added 176
+Progress: resolved 225, reused 180, downloaded 45, added 180
+Progress: resolved 230, reused 184, downloaded 46, added 184
+Progress: resolved 235, reused 188, downloaded 47, added 188
+Progress: resolved 240, reused 192, downloaded 48, added 192
+Progress: resolved 245, reused 196, downloaded 49, added 196
+Progress: resolved 250, reused 200, downloaded 50, added 200
+Progress: resolved 255, reused 204, downloaded 51, added 204
+Progress: resolved 260, reused 208, downloaded 52, added 208
+Progress: resolved 265, reused 212, downloaded 53, added 212
+Progress: resolved 270, reused 216, downloaded 54, added 216
+Progress: resolved 275, reused 220, downloaded 55, added 220
+Progress: resolved 280, reused 224, downloaded 56, added 224
+Progress: resolved 285, reused 228, downloaded 57, added 228
+Progress: resolved 290, reused 232, downloaded 58, added 232
+Progress: resolved 295, reused 236, downloaded 59, added 236
+Packages: +311
++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ WARN  deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported
+ WARN  deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported
+Done in 9.8s

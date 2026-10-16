@@ -1,0 +1,77 @@
+Using default tag: latest
+latest: Pulling from library/demo
+f2a752e6b438: Pulling fs layer
+f2a752e6b438: Waiting
+f2a752e6b438: Downloading [==>                  ]  1.0MB/10MB
+f2a752e6b438: Downloading [========>            ]  4.0MB/10MB
+f2a752e6b438: Downloading [==================>  ]  9.0MB/10MB
+f2a752e6b438: Verifying Checksum
+f2a752e6b438: Download complete
+f2a752e6b438: Extracting [==================================================>]  10MB/10MB
+f2a752e6b438: Pull complete
+6513269e0d37: Pulling fs layer
+6513269e0d37: Waiting
+6513269e0d37: Downloading [==>                  ]  1.0MB/10MB
+6513269e0d37: Downloading [========>            ]  4.0MB/10MB
+6513269e0d37: Downloading [==================>  ]  9.0MB/10MB
+6513269e0d37: Verifying Checksum
+6513269e0d37: Download complete
+6513269e0d37: Extracting [==================================================>]  10MB/10MB
+6513269e0d37: Pull complete
+0c5ca6a3a450: Pulling fs layer
+0c5ca6a3a450: Waiting
+0c5ca6a3a450: Downloading [==>                  ]  1.0MB/10MB
+0c5ca6a3a450: Downloading [========>            ]  4.0MB/10MB
+0c5ca6a3a450: Downloading [==================>  ]  9.0MB/10MB
+0c5ca6a3a450: Verifying Checksum
+0c5ca6a3a450: Download complete
+0c5ca6a3a450: Extracting [==================================================>]  10MB/10MB
+0c5ca6a3a450: Pull complete
+d23f128b2f33: Pulling fs layer
+d23f128b2f33: Waiting
+d23f128b2f33: Downloading [==>                  ]  1.0MB/10MB
+d23f128b2f33: Downloading [========>            ]  4.0MB/10MB
+d23f128b2f33: Downloading [==================>  ]  9.0MB/10MB
+d23f128b2f33: Verifying Checksum
+d23f128b2f33: Download complete
+d23f128b2f33: Extracting [==================================================>]  10MB/10MB
+d23f128b2f33: Pull complete
+1818892f902b: Pulling fs layer
+1818892f902b: Waiting
+1818892f902b: Downloading [==>                  ]  1.0MB/10MB
+1818892f902b: Downloading [========>            ]  4.0MB/10MB
+1818892f902b: Downloading [==================>  ]  9.0MB/10MB
+1818892f902b: Verifying Checksum
+1818892f902b: Download complete
+1818892f902b: Extracting [==================================================>]  10MB/10MB
+1818892f902b: Pull complete
+95315d9dc9f8: Pulling fs layer
+95315d9dc9f8: Waiting
+95315d9dc9f8: Downloading [==>                  ]  1.0MB/10MB
+95315d9dc9f8: Downloading [========>            ]  4.0MB/10MB
+95315d9dc9f8: Downloading [==================>  ]  9.0MB/10MB
+95315d9dc9f8: Verifying Checksum
+95315d9dc9f8: Download complete
+95315d9dc9f8: Extracting [==================================================>]  10MB/10MB
+95315d9dc9f8: Pull complete
+e8e20ed90475: Pulling fs layer
+e8e20ed90475: Waiting
+e8e20ed90475: Downloading [==>                  ]  1.0MB/10MB
+e8e20ed90475: Downloading [========>            ]  4.0MB/10MB
+e8e20ed90475: Downloading [==================>  ]  9.0MB/10MB
+e8e20ed90475: Verifying Checksum
+e8e20ed90475: Download complete
+e8e20ed90475: Extracting [==================================================>]  10MB/10MB
+e8e20ed90475: Pull complete
+36f681e74ef5: Pulling fs layer
+36f681e74ef5: Waiting
+36f681e74ef5: Downloading [==>                  ]  1.0MB/10MB
+36f681e74ef5: Downloading [========>            ]  4.0MB/10MB
+36f681e74ef5: Downloading [==================>  ]  9.0MB/10MB
+36f681e74ef5: Verifying Checksum
+36f681e74ef5: Download complete
+36f681e74ef5: Extracting [==================================================>]  10MB/10MB
+36f681e74ef5: Pull complete
+Digest: sha256:abababababababababababababababababababababababababababababababab
+Status: Downloaded newer image for demo:latest
+docker.io/library/demo:latest

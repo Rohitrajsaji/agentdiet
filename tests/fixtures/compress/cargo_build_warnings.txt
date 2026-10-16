@@ -1,0 +1,79 @@
+    Updating crates.io index
+  Downloaded serde v1.0.200
+  Downloaded serde_derive v1.0.200
+  Downloaded proc-macro2 v1.0.82
+  Downloaded quote v1.0.36
+  Downloaded syn v2.0.63
+  Downloaded unicode-ident v1.0.12
+  Downloaded itoa v1.0.11
+  Downloaded ryu v1.0.18
+  Downloaded serde_json v1.0.117
+  Downloaded libc v0.2.154
+  Downloaded cfg-if v1.0.0
+  Downloaded memchr v2.7.2
+  Downloaded regex-syntax v0.8.3
+  Downloaded aho-corasick v1.1.3
+  Downloaded regex v1.10.4
+  Downloaded clap_lex v0.7.0
+  Downloaded clap_builder v4.5.4
+  Downloaded clap_derive v4.5.4
+  Downloaded clap v4.5.4
+  Downloaded anyhow v1.0.83
+  Downloaded thiserror v1.0.60
+  Downloaded thiserror-impl v1.0.60
+  Downloaded once_cell v1.19.0
+  Downloaded log v0.4.21
+  Downloaded bitflags v2.5.0
+  Downloaded smallvec v1.13.2
+  Downloaded tempfile v3.10.1
+  Downloaded fastrand v2.1.0
+  Downloaded rustix v0.38.34
+  Downloaded errno v0.3.9
+  Downloaded 30 crates (3.1 MB) in 1.84s
+   Compiling serde v1.0.200
+   Compiling serde_derive v1.0.200
+   Compiling proc-macro2 v1.0.82
+   Compiling quote v1.0.36
+   Compiling syn v2.0.63
+   Compiling unicode-ident v1.0.12
+   Compiling itoa v1.0.11
+   Compiling ryu v1.0.18
+   Compiling serde_json v1.0.117
+   Compiling libc v0.2.154
+   Compiling cfg-if v1.0.0
+   Compiling memchr v2.7.2
+   Compiling regex-syntax v0.8.3
+   Compiling aho-corasick v1.1.3
+   Compiling regex v1.10.4
+   Compiling clap_lex v0.7.0
+   Compiling clap_builder v4.5.4
+   Compiling clap_derive v4.5.4
+   Compiling clap v4.5.4
+   Compiling anyhow v1.0.83
+   Compiling thiserror v1.0.60
+   Compiling thiserror-impl v1.0.60
+   Compiling once_cell v1.19.0
+   Compiling log v0.4.21
+   Compiling bitflags v2.5.0
+   Compiling smallvec v1.13.2
+   Compiling tempfile v3.10.1
+   Compiling fastrand v2.1.0
+   Compiling rustix v0.38.34
+   Compiling errno v0.3.9
+   Compiling demo v0.3.1 (/home/dev/demo)
+warning: unused variable: `retries`
+ --> src/net.rs:41:9
+  |
+41 |     let retries = 3;
+  |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_retries`
+  |
+  = note: `#[warn(unused_variables)]` on by default
+
+warning: function `connect` is never used
+ --> src/net.rs:12:4
+  |
+12 | fn connect() {}
+  |    ^^^^^^^
+
+warning: `demo` (bin "demo") generated 2 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 8.52s

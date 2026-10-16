@@ -1,0 +1,27 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-8.2.0, pluggy-1.5.0
+rootdir: /home/dev/app
+collected 120 items
+
+tests/test_api.py ..............................      [ 25%]
+tests/test_db.py ............F.................      [ 50%]
+tests/test_utils.py ..............................      [ 75%]
+tests/test_auth.py .....Es.......................      [100%]
+
+=================================== FAILURES ===================================
+_______________________________ test_insert_dupe _______________________________
+
+    def test_insert_dupe(db):
+        db.insert(1)
+>       assert db.insert(1) is False
+E       assert True is False
+E        +  where True = <bound method Db.insert of <Db>>(1)
+
+tests/test_db.py:44: AssertionError
+=================================== ERRORS =====================================
+___________________ ERROR at setup of test_login_token ______________________
+E   fixture 'client' not found
+=========================== short test summary info ============================
+FAILED tests/test_db.py::test_insert_dupe - assert True is False
+ERROR tests/test_auth.py::test_login_token - fixture 'client' not found
+============= 1 failed, 117 passed, 1 skipped, 1 error in 3.42s ==============

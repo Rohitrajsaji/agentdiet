@@ -1,0 +1,98 @@
+   Compiling serde v1.0.200
+   Compiling serde_derive v1.0.200
+   Compiling proc-macro2 v1.0.82
+   Compiling quote v1.0.36
+   Compiling syn v2.0.63
+   Compiling unicode-ident v1.0.12
+   Compiling itoa v1.0.11
+   Compiling ryu v1.0.18
+   Compiling serde_json v1.0.117
+   Compiling libc v0.2.154
+   Compiling cfg-if v1.0.0
+   Compiling memchr v2.7.2
+   Compiling demo v0.3.1 (/home/dev/demo)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.10s
+     Running unittests src/lib.rs (target/debug/deps/demo-0123456789abcdef)
+
+running 60 tests
+test parser::tests::case_00 ... ok
+test parser::tests::case_01 ... ok
+test parser::tests::case_02 ... ok
+test parser::tests::case_03 ... ok
+test parser::tests::case_04 ... ok
+test parser::tests::case_05 ... ok
+test parser::tests::case_06 ... ok
+test parser::tests::case_07 ... ok
+test parser::tests::case_08 ... ok
+test parser::tests::case_09 ... ok
+test parser::tests::case_10 ... ok
+test parser::tests::case_11 ... ok
+test parser::tests::case_12 ... ok
+test parser::tests::case_13 ... ok
+test parser::tests::case_14 ... ok
+test parser::tests::case_15 ... ok
+test parser::tests::case_16 ... ok
+test parser::tests::case_17 ... FAILED
+test parser::tests::case_18 ... ok
+test parser::tests::case_19 ... ok
+test parser::tests::case_20 ... ok
+test parser::tests::case_21 ... ok
+test parser::tests::case_22 ... ok
+test parser::tests::case_23 ... ok
+test parser::tests::case_24 ... ok
+test parser::tests::case_25 ... ok
+test parser::tests::case_26 ... ok
+test parser::tests::case_27 ... ok
+test parser::tests::case_28 ... ok
+test parser::tests::case_29 ... ok
+test parser::tests::case_30 ... ok
+test parser::tests::case_31 ... ok
+test parser::tests::case_32 ... ok
+test parser::tests::case_33 ... ok
+test parser::tests::case_34 ... ok
+test parser::tests::case_35 ... ok
+test parser::tests::case_36 ... ok
+test parser::tests::case_37 ... ok
+test parser::tests::case_38 ... ok
+test parser::tests::case_39 ... ok
+test parser::tests::case_40 ... ok
+test parser::tests::case_41 ... FAILED
+test parser::tests::case_42 ... ok
+test parser::tests::case_43 ... ok
+test parser::tests::case_44 ... ok
+test parser::tests::case_45 ... ok
+test parser::tests::case_46 ... ok
+test parser::tests::case_47 ... ok
+test parser::tests::case_48 ... ok
+test parser::tests::case_49 ... ok
+test parser::tests::case_50 ... ignored
+test parser::tests::case_51 ... ok
+test parser::tests::case_52 ... ok
+test parser::tests::case_53 ... ok
+test parser::tests::case_54 ... ok
+test parser::tests::case_55 ... ok
+test parser::tests::case_56 ... ok
+test parser::tests::case_57 ... ok
+test parser::tests::case_58 ... ok
+test parser::tests::case_59 ... ok
+
+failures:
+
+---- parser::tests::case_17 stdout ----
+thread 'parser::tests::case_17' panicked at src/parser.rs:88:9:
+assertion `left == right` failed: unexpected token
+  left: Ident("x")
+ right: Number(1)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- parser::tests::case_41 stdout ----
+thread 'parser::tests::case_41' panicked at src/parser.rs:130:14:
+called `Result::unwrap()` on an `Err` value: ParseError { line: 3 }
+
+failures:
+    parser::tests::case_17
+    parser::tests::case_41
+
+test result: FAILED. 57 passed; 2 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+error: test failed, to rerun pass `--lib`

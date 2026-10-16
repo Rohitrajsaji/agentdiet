@@ -1,0 +1,101 @@
+npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory.
+npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported
+npm http fetch GET 200 https://registry.npmjs.org/pkg-0 20ms (cache miss)
+npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory.
+npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported
+npm http fetch GET 200 https://registry.npmjs.org/pkg-1 21ms (cache miss)
+npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory.
+npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported
+npm http fetch GET 200 https://registry.npmjs.org/pkg-2 22ms (cache miss)
+npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory.
+npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported
+npm http fetch GET 200 https://registry.npmjs.org/pkg-3 23ms (cache miss)
+npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory.
+npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported
+npm http fetch GET 200 https://registry.npmjs.org/pkg-4 24ms (cache miss)
+npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory.
+npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported
+npm http fetch GET 200 https://registry.npmjs.org/pkg-5 25ms (cache miss)
+npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory.
+npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported
+npm http fetch GET 200 https://registry.npmjs.org/pkg-6 26ms (cache miss)
+npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory.
+npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported
+npm http fetch GET 200 https://registry.npmjs.org/pkg-7 27ms (cache miss)
+npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory.
+npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported
+npm http fetch GET 200 https://registry.npmjs.org/pkg-8 28ms (cache miss)
+npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory.
+npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported
+npm http fetch GET 200 https://registry.npmjs.org/pkg-9 29ms (cache miss)
+npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory.
+npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported
+npm http fetch GET 200 https://registry.npmjs.org/pkg-10 30ms (cache miss)
+npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory.
+npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported
+npm http fetch GET 200 https://registry.npmjs.org/pkg-11 31ms (cache miss)
+npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory.
+npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported
+npm http fetch GET 200 https://registry.npmjs.org/pkg-12 32ms (cache miss)
+npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory.
+npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported
+npm http fetch GET 200 https://registry.npmjs.org/pkg-13 33ms (cache miss)
+npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory.
+npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported
+npm http fetch GET 200 https://registry.npmjs.org/pkg-14 34ms (cache miss)
+npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory.
+npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported
+npm http fetch GET 200 https://registry.npmjs.org/pkg-15 35ms (cache miss)
+npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory.
+npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported
+npm http fetch GET 200 https://registry.npmjs.org/pkg-16 36ms (cache miss)
+npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory.
+npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported
+npm http fetch GET 200 https://registry.npmjs.org/pkg-17 37ms (cache miss)
+npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory.
+npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported
+npm http fetch GET 200 https://registry.npmjs.org/pkg-18 38ms (cache miss)
+npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory.
+npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported
+npm http fetch GET 200 https://registry.npmjs.org/pkg-19 39ms (cache miss)
+npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory.
+npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported
+npm http fetch GET 200 https://registry.npmjs.org/pkg-20 40ms (cache miss)
+npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory.
+npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported
+npm http fetch GET 200 https://registry.npmjs.org/pkg-21 41ms (cache miss)
+npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory.
+npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported
+npm http fetch GET 200 https://registry.npmjs.org/pkg-22 42ms (cache miss)
+npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory.
+npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported
+npm http fetch GET 200 https://registry.npmjs.org/pkg-23 43ms (cache miss)
+npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory.
+npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported
+npm http fetch GET 200 https://registry.npmjs.org/pkg-24 44ms (cache miss)
+npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory.
+npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported
+npm http fetch GET 200 https://registry.npmjs.org/pkg-25 45ms (cache miss)
+npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory.
+npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported
+npm http fetch GET 200 https://registry.npmjs.org/pkg-26 46ms (cache miss)
+npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory.
+npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported
+npm http fetch GET 200 https://registry.npmjs.org/pkg-27 47ms (cache miss)
+npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory.
+npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported
+npm http fetch GET 200 https://registry.npmjs.org/pkg-28 48ms (cache miss)
+npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory.
+npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported
+npm http fetch GET 200 https://registry.npmjs.org/pkg-29 49ms (cache miss)
+npm warn deprecated rimraf@3.0.2: Rimraf versions prior to v4 are no longer supported
+
+added 312 packages, and audited 313 packages in 14s
+
+48 packages are looking for funding
+  run `npm fund` for details
+
+2 high severity vulnerabilities
+
+To address all issues, run:
+  npm audit fix

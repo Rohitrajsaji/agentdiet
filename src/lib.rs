@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 pub mod cas;
 pub mod cli;
+pub mod compress;
 pub mod control;
 pub mod diet;
 pub mod fsutil;
