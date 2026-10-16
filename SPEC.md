@@ -333,7 +333,7 @@ breadcrumb. A large number of warnings is never a reason to drop them.
 - Rules informed by other tools are recorded in code as `// pattern ref: <repo>/<path> (behavior
   only)` and follow the clean-room rules in `CLAUDE.md`.
 
-#### TOON encoding **[3B]**
+#### TOON encoding
 
 Output that parses, as a whole, as one JSON document is a TOON candidate. AgentDiet targets
 **`toon-spec: 4.4`** (§9 pins the exact source). TOON output is not byte-identical to the input, so
@@ -344,17 +344,19 @@ The encoder implements a **subset**, and where the normative spec would require 
 does not implement, the encoder **declines and the output is left unchanged** (it never emits a
 lesser form):
 
-- Supported: a non-empty root object (§8), a root primitive array or a root tabular array (§9.1,
-  §9.3) and the empty root array `[]`; nested and empty objects (`key:`); primitive values; empty
-  arrays as `key: []`; inline primitive arrays `key[N]: a,b`; and flat tabular arrays
-  `key[N]{f1,f2}:` whose elements are all non-empty objects with **identical key sequences** and
-  only primitive values. Comma delimiter, 2-space indent, LF.
-- Declined (output unchanged): keyed tabular objects, including at the root (§9.5, any object with
-  two or more entries whose values are all non-empty objects); nested field groups (§9.3, an
-  object-valued column); every list form (§9.2, §9.4 and §10: arrays of arrays, mixed arrays, arrays
-  with empty or non-uniform objects, array-valued columns); arrays of objects with the same key
-  *set* in a different order (the spec requires tabular form there, which would reorder keys);
-  a root primitive or an empty root object.
+- Supported: a root object (§8; the empty one is the empty document, which the engine never
+  replaces anything with), a root primitive (a root string starting with U+FEFF is quoted), a root
+  primitive array or a root tabular array (§9.1, §9.3) and the empty root array `[]`; nested and
+  empty objects (`key:`); primitive values; empty arrays as `key: []`; inline primitive arrays
+  `key[N]: a,b`; and flat tabular arrays `key[N]{f1,f2}:` whose elements are all non-empty objects
+  with **identical key sequences** and only primitive values. Comma delimiter, 2-space indent, LF.
+- Declined (output unchanged): keyed tabular objects, including at the root (§9.5, decided by the
+  spec's exact test: at least two entries, every value a non-empty object, one key set, every
+  column uniform-primitive or nested-uniform; an object that fails the test nests as §8 says and is
+  encoded); nested field groups (§9.3, an object-valued column); every list form (§9.2, §9.4 and
+  §10: arrays of arrays, mixed arrays, arrays with empty or non-uniform objects, array-valued
+  columns); arrays of objects with the same key *set* in a different order (the spec requires
+  tabular form there, which would reorder keys).
 - Strings are quoted per §7.2 and escaped per §7.1 (only those escapes, `\uXXXX` in lowercase hex
   for other control characters); keys per §7.3 (non-ASCII keys are quoted).
 - Numbers: the JSON number's **original text** is emitted only if it is already canonical (§2):
@@ -376,7 +378,12 @@ lesser form):
   encoder must either reproduce the expected output byte for byte or decline, and every fixture
   inside the supported subset must be reproduced, and the test fails if the supported set shrinks
   below a recorded count (declining everything must not pass). No decoder is written: the evidence is
-  the official expected outputs plus targeted independent checks of the encoder's output.
+  the official expected outputs plus a differential test against the official reference encoder.
+  Measured: of the 160 official `encode` fixtures, 94 are reproduced byte for byte, 45 are declined
+  (each one checked to be a documented unsupported form, option or number) and 21 use non-default
+  options (tab/pipe delimiters, other indents). The reference encoder (`@toon-format/toon` 4.4.0, not
+  vendored or linked; `tests/toon_reference.rs`, opt-in) agreed with this encoder on 305,000 generated
+  documents with no difference, every decline being explained by the document.
 
 #### Signature folding **[3B]**
 
@@ -630,7 +637,7 @@ Notes:
 | 1 | scaffold, state ledger, Control Center, `init`/`eject` | done |
 | 2 | scrubber, Vault, FTS5 memory | done |
 | 3A | dependency cleanup, this specification, shim benchmark | done (B1 requirement still NOT MET) |
-| 3B | Diet Engine library: pipeline, compression, TOON, folding, `show`/ID/memory/state changes marked **[3B]** | in progress: storage prerequisites and the `diet.rs` pipeline (library only, no transforms yet) are implemented; shell compression (`compress.rs`) is implemented; TOON and folding are not |
+| 3B | Diet Engine library: pipeline, compression, TOON, folding, `show`/ID/memory/state changes marked **[3B]** | in progress: storage prerequisites and the `diet.rs` pipeline (library only, no transforms yet) are implemented; shell compression (`compress.rs`) and the TOON subset (`toon.rs`) are implemented; folding is not |
 | 4 | hooks **and** PPID shims, wiring the engine to real entry points, shim redesign question (B1) | not started |
 | 5 | MCP tools (`diet_exec` etc.), scanner, `agentdiet top` | not started |
 

@@ -294,8 +294,9 @@ fn select_candidate(sel: &Selection<'_>) -> Option<Candidate> {
         Source::Shell { argv, exit } => {
             crate::compress::compress(argv, *exit, sel.scrubbed, sel.mode)
         }
-        // TOON and folding plug in here, one source each.
-        Source::ModelJson | Source::Read { .. } => None,
+        Source::ModelJson => crate::toon::encode(sel.scrubbed),
+        // Folding plugs in here.
+        Source::Read { .. } => None,
     }
 }
 

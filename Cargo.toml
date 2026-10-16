@@ -19,8 +19,10 @@ clap = { version = "4", features = ["derive"] }
 dirs = "6"
 inquire = "0.7"
 serde = { version = "1", features = ["derive"] }
-# preserve_order: re-serialised user configs keep their key order.
-serde_json = { version = "1", features = ["preserve_order"] }
+# preserve_order: re-serialised user configs keep their key order. raw_value: toon.rs keeps each JSON
+# number's original text via `RawValue`; unlike `arbitrary_precision` it adds a type and changes nothing
+# about `Value`/`Number`, so state.json and the assistant configs parse and serialise exactly as before.
+serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
 # regex: secret-scrubber patterns; regex::bytes keeps non-UTF-8 output lossless. Pure Rust, linear time.
 regex = "1"
 # rusqlite: bundled SQLite for memory.db (mandated by CLAUDE.md); no system SQLite. `bundled` alone

@@ -18,6 +18,7 @@ pub mod memory;
 pub mod scrubber;
 pub mod shim;
 pub mod state;
+pub mod toon;
 
 /// Every filesystem location the library touches, injected by the caller.
 ///
