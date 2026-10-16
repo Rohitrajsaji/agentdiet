@@ -1,9 +1,11 @@
 use std::ffi::OsString;
 use std::process::ExitCode;
+use std::time::SystemTime;
 
 use anyhow::Context;
 use clap::Parser;
 
+use agentdiet::cas::{Cas, LineRange};
 use agentdiet::cli::{Cli, Command};
 use agentdiet::{Paths, control, init, mcp, shim};
 
@@ -37,6 +39,18 @@ fn not_yet(what: &str) -> ExitCode {
     ExitCode::from(2)
 }
 
+/// `agentdiet show #id [--lines a..b]`: print a vault entry (or a slice of it) raw.
+fn show(paths: &Paths, id: &str, lines: Option<&str>) -> anyhow::Result<()> {
+    use std::io::Write;
+
+    let range = lines.map(LineRange::parse).transpose()?;
+    let cas = Cas::new(paths.cas_dir());
+    let bytes = cas.read(id, range, SystemTime::now())?;
+    let mut out = std::io::stdout().lock();
+    out.write_all(&bytes).context("could not write to stdout")?;
+    out.flush().context("could not write to stdout")
+}
+
 fn run() -> anyhow::Result<ExitCode> {
     let cli = Cli::parse();
     let paths = Paths::from_env()?;
@@ -56,7 +70,7 @@ fn run() -> anyhow::Result<ExitCode> {
             let stdin = std::io::stdin();
             mcp::serve(stdin.lock(), std::io::stdout().lock()).context("MCP server failed")?;
         }
-        Some(Command::Show { .. }) => return Ok(not_yet("show")),
+        Some(Command::Show { id, lines }) => show(&paths, &id, lines.as_deref())?,
         Some(Command::Top) => return Ok(not_yet("top")),
         Some(Command::Scan { .. }) => return Ok(not_yet("scan")),
         // Normally intercepted above; kept so the match stays exhaustive.

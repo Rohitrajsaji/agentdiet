@@ -21,6 +21,10 @@ inquire = "0.7"
 serde = { version = "1", features = ["derive"] }
 # preserve_order: re-serialised user configs keep their key order.
 serde_json = { version = "1", features = ["preserve_order"] }
+# regex: secret-scrubber patterns; regex::bytes keeps non-UTF-8 output lossless. Pure Rust, linear time.
+regex = "1"
+# rusqlite: bundled SQLite with FTS5/BM25 for memory.db (mandated by CLAUDE.md); no system SQLite.
+rusqlite = { version = "0.37", features = ["bundled", "bundled-full"] }
 sha2 = "0.10"
 thiserror = "2"
 

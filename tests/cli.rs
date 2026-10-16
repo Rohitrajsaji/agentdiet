@@ -125,11 +125,56 @@ fn mcp_server_completes_the_handshake() {
 #[test]
 fn later_slice_commands_fail_cleanly() {
     let env = Env::empty();
-    for args in [vec!["show", "#4f9a"], vec!["top"], vec!["scan"]] {
+    for args in [vec!["top"], vec!["scan"]] {
         let out = run(&env, &args);
         assert_eq!(out.status.code(), Some(2), "{args:?}");
         assert!(String::from_utf8_lossy(&out.stderr).contains("not available yet"));
     }
+}
+
+#[test]
+fn show_prints_the_entry_and_slices_lines() {
+    use agentdiet::cas::Cas;
+    use agentdiet::scrubber::scrub;
+    use std::time::SystemTime;
+
+    let env = Env::empty();
+    let put = Cas::new(env.paths.cas_dir())
+        .put(&scrub(b"one\ntwo\nthree\n"), SystemTime::now())
+        .unwrap();
+    let id = format!("#{}", put.short_id);
+
+    let all = run(&env, &["show", &id]);
+    assert!(all.status.success());
+    assert_eq!(all.stdout, b"one\ntwo\nthree\n");
+
+    let slice = run(&env, &["show", &id, "--lines", "2..3"]);
+    assert_eq!(slice.stdout, b"two\nthree\n");
+
+    let bare = run(&env, &["show", &put.short_id, "--lines", "1..1"]);
+    assert_eq!(bare.stdout, b"one\n");
+}
+
+#[test]
+fn show_reports_expired_and_not_found_differently() {
+    use agentdiet::cas::Cas;
+    use agentdiet::scrubber::scrub;
+    use std::time::{Duration, SystemTime};
+
+    let env = Env::empty();
+    let old = SystemTime::now() - Duration::from_secs(8 * 24 * 60 * 60);
+    let put = Cas::new(env.paths.cas_dir()).put(&scrub(b"stale\n"), old).unwrap();
+
+    let expired = run(&env, &["show", &format!("#{}", put.short_id)]);
+    assert!(!expired.status.success());
+    assert!(String::from_utf8_lossy(&expired.stderr).contains("expired"));
+
+    let missing = run(&env, &["show", "#0000"]);
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("no vault entry"));
+
+    let bad = run(&env, &["show", &put.short_id, "--lines", "5..2"]);
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("invalid line range"));
 }
 
 #[test]

@@ -1,16 +1,19 @@
 //! AgentDiet — a context firewall for AI coding agents.
 //!
 //! Slice 1: workspace scaffold, state ledger (pause/resume), Control Center,
-//! and `init` / `eject`. Heavier subsystems (vault, diet engine, TUI) land in
-//! later slices.
+//! and `init` / `eject`. Slice 2: secret scrubber, CAS vault and project
+//! memory index. The diet engine and TUI land in later slices.
 
 use std::path::{Path, PathBuf};
 
+pub mod cas;
 pub mod cli;
 pub mod control;
 pub mod fsutil;
 pub mod init;
 pub mod mcp;
+pub mod memory;
+pub mod scrubber;
 pub mod shim;
 pub mod state;
 
@@ -70,6 +73,11 @@ impl Paths {
 
     pub fn cas_dir(&self) -> PathBuf {
         self.agentdiet_home.join("cas")
+    }
+
+    /// Project-local `memory.db` (SQLite, WAL, FTS5).
+    pub fn memory_db(&self) -> PathBuf {
+        self.project_data_dir().join("memory.db")
     }
 
     /// Project-local `.agentdiet/` directory.

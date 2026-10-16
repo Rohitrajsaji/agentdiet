@@ -143,6 +143,24 @@ Global state lives in `~/.agentdiet/state.json`:
 7. **Index summaries** into `.agentdiet/memory.db` (project-local SQLite, WAL, FTS5 + BM25).
    PreCompact recovery uses this index to re-surface relevant context.
 
+#### Tier 3 details (Slice 2)
+
+- **Redaction:** a secret span is replaced by `[REDACTED:<rule-id>]`; surrounding text (e.g. the
+  variable name) is kept. PEM private-key blocks are replaced whole.
+- **CAS files** are `<64hex>.log` (dir mode 0700, files 0600). Writing identical content again
+  refreshes the file's mtime instead of rewriting it; the 7-day TTL counts from the last write.
+- **GC** runs on `put` and on `show`. Deleting an expired file leaves a zero-byte
+  `<64hex>.expired` tombstone, which is how `show` tells "expired" from "not found". A new `put`
+  of the same content removes the tombstone.
+- **ID input** is accepted as `#4f9a` or bare `4f9a` (an unquoted `#...` is a shell comment).
+  Case-insensitive, hex only, at least 4 characters.
+- **Slicing** splits on `\n` and keeps line endings (CRLF and a missing trailing newline survive).
+  A start of 0 or start > end is an error; an end past EOF clamps; a start past EOF yields nothing.
+- **memory.db** has one `entries` table (`kind` is `command` | `read` | `decision`) mirrored into
+  an FTS5 table over `title` and `body`. Results are ordered by `bm25()` ascending (lower is
+  better) with title weighted above body. Query tokens are quoted as FTS5 phrases and ANDed, so
+  user text can never produce an FTS syntax error.
+
 ### 3b. Interfaces & Tools (outside the hot path)
 
 - **`agentdiet mcp`** — stdio JSON-RPC 2.0 MCP server exposing three tools:
