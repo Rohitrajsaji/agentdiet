@@ -35,6 +35,32 @@ Running bare `agentdiet` opens an interactive Control Center menu (`inquire`), i
   differ from its current bytes, so a no-op run creates no backup directory.
 - A config that cannot be parsed (e.g. JSONC with comments or trailing commas) is **skipped with
   a warning and never rewritten**.
+- **Config backups are a separate contract from the Vault.** A backup is a byte-exact copy of the
+  user's original config, because `eject` must restore it byte-for-byte. It is therefore **not
+  scrubbed** and may contain secrets the user already had in that file. It is protected by
+  permissions instead: every directory under `~/.agentdiet/backups/` is created `0700` and every
+  file in it (backups, `manifest.json`, and the temporary files used to write them) is created
+  `0600`, regardless of the original file's mode or the process umask. "Created" means from the
+  first instant: nothing is written with default permissions and tightened afterwards.
+- Rewriting an existing config keeps that file's permissions and, where intentionally supported,
+  writes through a symlink to its target (dotfile managers). The temporary file used for the
+  rewrite is created `0600`, so a `0600` config is never exposed, even briefly, at a wider mode.
+  A config that did not exist before `init` is created `0600`.
+- **Codex `config.toml` patching is conservative and validated.** `init` appends or refreshes one
+  marker-delimited block (`# >>> agentdiet >>>` … `# <<< agentdiet <<<`) defining
+  `[mcp_servers.agentdiet]`. The file is parsed with a real TOML parser, not matched line by line:
+  - A file that is not valid TOML is skipped with a warning and left byte-identical.
+  - Any existing `mcp_servers.agentdiet` outside our block is a conflict, however it is spelled
+    (`[mcp_servers.agentdiet] # note`, quoted keys, dotted keys, an inline `mcp_servers = {…}`).
+    It is skipped with a warning and left byte-identical.
+  - Marker lines count only when they are real comments. A marker inside a multi-line string, a
+    duplicated marker, a missing or reversed marker, or a block whose body is not exactly an
+    agentdiet entry is a conflict: the file is skipped and never partially edited or stripped.
+  - The patched text is parsed again before it is written. It must be valid TOML and must equal the
+    original document plus the one `mcp_servers.agentdiet` entry. Otherwise the file is skipped.
+  - All edits are byte edits on the original text (append, or replace the block's own lines), so
+    the user's comments and formatting are untouched.
+  - `eject` applies the same marker validation and removes nothing it cannot prove is ours.
 - Shell rc files are never edited; `init` prints the `PATH` line for the shims directory instead.
 - Slice 1 writes, per target (user scope / `--project` scope):
 
@@ -151,7 +177,26 @@ Global state lives in `~/.agentdiet/state.json`:
   refreshes the file's mtime instead of rewriting it; the 7-day TTL counts from the last write.
 - **GC** runs on `put` and on `show`. Deleting an expired file leaves a zero-byte
   `<64hex>.expired` tombstone, which is how `show` tells "expired" from "not found". A new `put`
-  of the same content removes the tombstone.
+  of the same content removes the tombstone. Tombstones are kept until the vault is purged: they
+  are the vault's memory of which IDs were once issued.
+- **An old ID never resolves to an unrelated entry.** The short ID shown for an entry is the
+  shortest prefix (at least 4 hex) that no *other* entry shares, counting both live entries and
+  tombstones. Resolving an input prefix looks at live entries **and** tombstones:
+  - one match, live: that entry;
+  - one match, tombstone: `expired`;
+  - several matches, all tombstones: `expired` (every candidate is gone; nothing is returned);
+  - several matches, at least one live: an ambiguity error listing every candidate, in sorted
+    order, as the shortest prefix that distinguishes it, with expired ones marked `(expired)`.
+    Content is never returned for an ambiguous prefix.
+  So an old breadcrumb whose entry has expired reports `expired` or an ambiguity, even if a
+  different entry has since landed on the same first characters. Re-putting identical content
+  revives its entry (its tombstone is removed); an old shorter ID that is now shared with another
+  entry reports an ambiguity, and the new, longer ID is the one to use.
+- **Vault entries are plain files, never links.** Only regular files named `<64hex>.log` /
+  `<64hex>.expired` count as entries. A symlink (or other non-regular file) in the vault directory
+  is never read, written or followed: it is ignored by lookups and replaced by a regular file when
+  its name is needed. A dedupe hit re-checks the stored bytes against the sha256 before reusing
+  them; a mismatch is rewritten.
 - **ID input** is accepted as `#4f9a` or bare `4f9a` (an unquoted `#...` is a shell comment).
   Case-insensitive, hex only, at least 4 characters.
 - **Slicing** splits on `\n` and keeps line endings (CRLF and a missing trailing newline survive).
@@ -205,5 +250,6 @@ Global state lives in `~/.agentdiet/state.json`:
 - Never inflate: emitted output is never larger than the raw output.
 - Fail open: internal errors pass raw output / exec the real binary.
 - Thinking blocks are never touched.
-- Secrets are never written to disk unscrubbed.
+- Secrets are never written to disk unscrubbed. The one exception is the byte-exact backup of a
+  user's own config file made by `init` (see §2.2), which is kept `0700`/`0600`.
 - Hooks never block on stdin or a TTY.

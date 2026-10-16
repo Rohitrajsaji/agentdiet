@@ -6,10 +6,21 @@
 //! and on every read). GC leaves a zero-byte `<sha>.expired` tombstone so an
 //! expired ID reports "expired" instead of "not found".
 //!
+//! Identity: tombstones are part of the ID space. A short ID is unique among
+//! live entries *and* tombstones, and resolving a prefix looks at both, so an
+//! old breadcrumb whose entry expired can report "expired" or an ambiguity but
+//! can never silently return a different entry that later landed on the same
+//! first characters.
+//!
+//! Entries are plain regular files. Symlinks and other non-regular files in the
+//! directory are never read, written or followed; see [`fsutil::open_regular`].
+//!
 //! Every operation takes `now` explicitly so expiry is deterministic in tests.
 
-use std::fs::{self, File, OpenOptions};
-use std::io;
+use std::collections::BTreeMap;
+use std::fmt;
+use std::fs;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -30,10 +41,10 @@ pub enum CasError {
     NotFound(String),
     #[error("#{0} has expired (vault entries are kept 7 days)")]
     Expired(String),
-    #[error("#{prefix} is ambiguous; candidates: {}", .candidates.iter().map(|c| format!("#{c}")).collect::<Vec<_>>().join(", "))]
+    #[error("#{prefix} is ambiguous; candidates: {}", .candidates.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "))]
     Ambiguous {
         prefix: String,
-        candidates: Vec<String>,
+        candidates: Vec<Candidate>,
     },
     #[error("invalid ID {0:?}: expected at least {MIN_ID_LEN} hex characters, e.g. #4f9a")]
     InvalidId(String),
@@ -41,6 +52,25 @@ pub enum CasError {
     InvalidRange(String),
     #[error("vault I/O error: {0}")]
     Io(#[from] io::Error),
+}
+
+/// One entry an ambiguous prefix could mean.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    /// Shortest prefix (at least [`MIN_ID_LEN`]) that tells it apart from every other entry.
+    pub id: String,
+    /// Only a tombstone remains; the content is gone.
+    pub expired: bool,
+}
+
+impl fmt::Display for Candidate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "#{}", self.id)?;
+        if self.expired {
+            f.write_str(" (expired)")?;
+        }
+        Ok(())
+    }
 }
 
 /// The result of storing an output.
@@ -133,21 +163,24 @@ impl Cas {
 
     /// Store `data`, refresh its TTL, run GC, and return its IDs.
     pub fn put(&self, data: &Scrubbed, now: SystemTime) -> Result<PutResult, CasError> {
-        ensure_private_dir(&self.dir)?;
+        fsutil::create_private_dir_all(&self.dir)?;
         let sha = fsutil::sha256_hex(data.as_bytes());
         let path = self.log_path(&sha);
-        if !path.exists() {
-            fsutil::atomic_write(&path, data.as_bytes())?;
-            restrict_file(&path)?;
-        }
+        let file = match intact_entry(&path, &sha) {
+            Some(file) => file,
+            None => {
+                fsutil::atomic_write_private(&path, data.as_bytes())?;
+                fsutil::open_regular(&path, true)?
+            }
+        };
         // Dedupe hit or fresh write: the entry's 7 days restart now.
-        OpenOptions::new().write(true).open(&path)?.set_modified(now)?;
+        file.set_modified(now)?;
         remove_if_present(&self.tombstone_path(&sha))?;
 
         self.gc(now)?;
-        let live = self.live_shas()?;
+        let known = self.known_shas()?;
         Ok(PutResult {
-            short_id: shortest_unique_prefix(&sha, &live),
+            short_id: shortest_unique_prefix(&sha, &known),
             sha,
         })
     }
@@ -157,7 +190,7 @@ impl Cas {
         let mut removed = 0;
         for entry in self.scan()? {
             if entry.kind == Kind::Live && self.is_stale(entry.modified, now) {
-                File::create(self.tombstone_path(&entry.sha))?;
+                fsutil::create_private_empty(&self.tombstone_path(&entry.sha))?;
                 remove_if_present(&self.log_path(&entry.sha))?;
                 removed += 1;
             }
@@ -166,37 +199,34 @@ impl Cas {
     }
 
     /// Resolve a (short) ID to the full sha of a live entry.
+    ///
+    /// Tombstones take part: a prefix that is shared by an expired entry and a
+    /// live one is ambiguous, never silently the live one.
     pub fn resolve(&self, input: &str, now: SystemTime) -> Result<String, CasError> {
         let prefix = normalize_id(input)?;
         self.gc(now)?;
         let entries = self.scan()?;
 
-        let live: Vec<&str> = entries
-            .iter()
-            .filter(|e| e.kind == Kind::Live && e.sha.starts_with(&prefix))
-            .map(|e| e.sha.as_str())
-            .collect();
-        match live.as_slice() {
-            [one] => return Ok((*one).to_string()),
-            [] => {}
+        let matches: Vec<&Entry> = entries.iter().filter(|e| e.sha.starts_with(&prefix)).collect();
+        match matches.as_slice() {
+            [] => Err(CasError::NotFound(prefix)),
+            [one] if one.kind == Kind::Live => Ok(one.sha.clone()),
+            // Every possible meaning is gone, so nothing can be returned.
+            all if all.iter().all(|e| e.kind == Kind::Tombstone) => Err(CasError::Expired(prefix)),
             many => {
-                let all = self.live_shas()?;
-                // read_dir order is arbitrary; keep the message stable.
-                let mut candidates: Vec<String> = many
+                let known: Vec<String> = entries.iter().map(|e| e.sha.clone()).collect();
+                // `scan` is sorted by sha, so the hints are stable.
+                let mut candidates: Vec<Candidate> = many
                     .iter()
-                    .map(|sha| shortest_unique_prefix(sha, &all))
+                    .map(|e| Candidate {
+                        id: shortest_unique_prefix(&e.sha, &known),
+                        expired: e.kind == Kind::Tombstone,
+                    })
                     .collect();
-                candidates.sort();
-                return Err(CasError::Ambiguous { prefix, candidates });
+                candidates.sort_by(|a, b| a.id.cmp(&b.id));
+                Err(CasError::Ambiguous { prefix, candidates })
             }
         }
-        if entries
-            .iter()
-            .any(|e| e.kind == Kind::Tombstone && e.sha.starts_with(&prefix))
-        {
-            return Err(CasError::Expired(prefix));
-        }
-        Err(CasError::NotFound(prefix))
     }
 
     /// The raw (scrubbed) bytes of an entry, optionally sliced by line.
@@ -207,7 +237,7 @@ impl Cas {
         now: SystemTime,
     ) -> Result<Vec<u8>, CasError> {
         let sha = self.resolve(input, now)?;
-        let bytes = match fs::read(self.log_path(&sha)) {
+        let bytes = match read_entry(&self.log_path(&sha)) {
             Ok(bytes) => bytes,
             // Removed by a concurrent GC between resolve and read.
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -226,24 +256,23 @@ impl Cas {
         now.duration_since(modified).is_ok_and(|age| age > self.ttl)
     }
 
-    fn live_shas(&self) -> Result<Vec<String>, CasError> {
-        Ok(self
-            .scan()?
-            .into_iter()
-            .filter(|e| e.kind == Kind::Live)
-            .map(|e| e.sha)
-            .collect())
+    /// Every sha the vault knows, live or expired: the ID space short IDs must
+    /// be unique within.
+    fn known_shas(&self) -> Result<Vec<String>, CasError> {
+        Ok(self.scan()?.into_iter().map(|e| e.sha).collect())
     }
 
-    /// Strict scan: only `<64 lowercase hex>.log` / `.expired` names count, so
-    /// `atomic_write` temp files and stray files are ignored.
+    /// Strict scan, sorted by sha: only regular files named
+    /// `<64 lowercase hex>.log` / `.expired` count, so `atomic_write` temp
+    /// files, stray files and symlinks are ignored. A sha with both a log and
+    /// a tombstone (an interrupted GC) is live.
     fn scan(&self) -> Result<Vec<Entry>, CasError> {
         let reader = match fs::read_dir(&self.dir) {
             Ok(reader) => reader,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(e.into()),
         };
-        let mut entries = Vec::new();
+        let mut entries: BTreeMap<String, Entry> = BTreeMap::new();
         for item in reader {
             let item = item?;
             let name = item.file_name();
@@ -257,17 +286,43 @@ impl Cas {
             if !is_sha(sha) {
                 continue;
             }
-            let Ok(modified) = item.metadata().and_then(|m| m.modified()) else {
+            // `DirEntry::metadata` does not follow symlinks.
+            let Ok(meta) = item.metadata() else { continue };
+            if !meta.file_type().is_file() {
                 continue;
-            };
-            entries.push(Entry {
+            }
+            let Ok(modified) = meta.modified() else { continue };
+            let entry = Entry {
                 sha: sha.to_string(),
                 kind,
                 modified,
-            });
+            };
+            match entries.get(sha) {
+                Some(existing) if existing.kind == Kind::Live => {}
+                _ => {
+                    entries.insert(sha.to_string(), entry);
+                }
+            }
         }
-        Ok(entries)
+        Ok(entries.into_values().collect())
     }
+}
+
+/// An existing entry that really holds the bytes its name claims, opened
+/// writable (to refresh its mtime). A symlink, a non-regular file, a read
+/// error or a hash mismatch all mean "not intact": the caller rewrites it.
+fn intact_entry(path: &Path, sha: &str) -> Option<fs::File> {
+    let mut file = fsutil::open_regular(path, true).ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    (fsutil::sha256_hex(&bytes) == sha).then_some(file)
+}
+
+/// Read an entry's bytes without following a symlink.
+fn read_entry(path: &Path) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    fsutil::open_regular(path, false)?.read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 fn is_sha(s: &str) -> bool {
@@ -288,33 +343,6 @@ fn remove_if_present(path: &Path) -> io::Result<()> {
         Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
         _ => Ok(()),
     }
-}
-
-#[cfg(unix)]
-fn ensure_private_dir(dir: &Path) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let existed = dir.is_dir();
-    fs::create_dir_all(dir)?;
-    if !existed {
-        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn ensure_private_dir(dir: &Path) -> io::Result<()> {
-    fs::create_dir_all(dir)
-}
-
-#[cfg(unix)]
-fn restrict_file(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-}
-
-#[cfg(not(unix))]
-fn restrict_file(_: &Path) -> io::Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]

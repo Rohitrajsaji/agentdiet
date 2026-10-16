@@ -3,6 +3,12 @@
 //!
 //! Backup directories are created lazily — only once a file is actually going
 //! to change — so a no-op `init` leaves no trace on disk.
+//!
+//! A backup is a byte-exact copy of the user's original config (so `eject` can
+//! restore it exactly), which means it is **not scrubbed** and may hold secrets
+//! the user already had. SPEC.md §2.2 documents this as a separate contract from
+//! the vault: instead of redaction, everything here is `0700` directories and
+//! `0600` files from the moment of creation, temp files included.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -79,7 +85,7 @@ fn write_manifest_as(dir: &Path, name: &str, manifest: &Manifest) -> Result<(), 
         message: e.to_string(),
     })?;
     json.push('\n');
-    fsutil::atomic_write(&path, json.as_bytes()).map_err(io_err(&path))
+    fsutil::atomic_write_private(&path, json.as_bytes()).map_err(io_err(&path))
 }
 
 /// Load every active manifest, oldest first. Unreadable ones are skipped with
@@ -133,7 +139,7 @@ impl<'a> Session<'a> {
             return Ok(dir.clone());
         }
         let root = self.paths.backups_dir();
-        fs::create_dir_all(&root).map_err(io_err(&root))?;
+        fsutil::create_private_dir_all(&root).map_err(io_err(&root))?;
         let stamp = self.manifest.created_ms;
         let mut attempt = 0u32;
         loop {
@@ -143,7 +149,7 @@ impl<'a> Session<'a> {
                 format!("{stamp}-{attempt}")
             };
             let candidate = root.join(name);
-            match fs::create_dir(&candidate) {
+            match fsutil::create_private_dir(&candidate) {
                 Ok(()) => {
                     self.dir = Some(candidate.clone());
                     return Ok(candidate);
@@ -187,7 +193,7 @@ fn store_backup(dir: &Path, target: Target, original: &Path, bytes: &[u8]) -> Re
         .file_name()
         .map_or_else(|| "file".to_string(), |n| n.to_string_lossy().into_owned());
     let sub = dir.join(target.slug());
-    fs::create_dir_all(&sub).map_err(io_err(&sub))?;
+    fsutil::create_private_dir_all(&sub).map_err(io_err(&sub))?;
     let mut rel = format!("{}/{name}", target.slug());
     let mut n = 1;
     while dir.join(&rel).exists() {
@@ -195,7 +201,7 @@ fn store_backup(dir: &Path, target: Target, original: &Path, bytes: &[u8]) -> Re
         n += 1;
     }
     let dest = dir.join(&rel);
-    fsutil::atomic_write(&dest, bytes).map_err(io_err(&dest))?;
+    fsutil::atomic_write_private(&dest, bytes).map_err(io_err(&dest))?;
     Ok(rel)
 }
 

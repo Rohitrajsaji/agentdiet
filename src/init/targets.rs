@@ -94,7 +94,7 @@ impl PatchKind {
         match self {
             PatchKind::ClaudeHooks => json_patch::unpatch_claude_hooks(text),
             PatchKind::Mcp { key, .. } => json_patch::unpatch_mcp(text, key),
-            PatchKind::CodexBlock => Ok(toml_block::unpatch(text)),
+            PatchKind::CodexBlock => toml_block::unpatch(text),
         }
     }
 

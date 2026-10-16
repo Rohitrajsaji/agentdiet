@@ -27,6 +27,9 @@ regex = "1"
 rusqlite = { version = "0.37", features = ["bundled", "bundled-full"] }
 sha2 = "0.10"
 thiserror = "2"
+# toml: parse-only (no `display`/writer); Codex config.toml edits are validated against a real TOML
+# parser before being written, while the edit itself stays a byte edit that keeps comments.
+toml = { version = "1", default-features = false, features = ["parse", "serde", "std"] }
 
 [dev-dependencies]
 # tempfile: isolated TempDir homes/projects for tests only.

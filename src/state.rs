@@ -101,7 +101,13 @@ pub fn save(paths: &Paths, state: &State) -> Result<(), StateError> {
     let mut json = serde_json::to_string_pretty(state)?;
     json.push('\n');
     let path = paths.state_file();
-    fsutil::atomic_write(&path, json.as_bytes()).map_err(|source| StateError::Write {
+    let write = || {
+        if let Some(parent) = path.parent() {
+            fsutil::create_private_dir_all(parent)?;
+        }
+        fsutil::atomic_write(&path, json.as_bytes())
+    };
+    write().map_err(|source| StateError::Write {
         path: path.display().to_string(),
         source,
     })
