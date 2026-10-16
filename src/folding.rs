@@ -24,7 +24,9 @@ use crate::diet::{
 };
 use crate::state::Mode;
 
-/// A parse that takes longer than this is abandoned and the file is left alone.
+/// A hostile input that keeps the parser busy without ever reporting an error is abandoned after
+/// this long. It is a guard, not a tuning knob: the parse otherwise stops at the first syntax error
+/// (any error means "unchanged"), and a valid 256 KiB source takes about 20 ms (SPEC §7, B4).
 pub const PARSE_BUDGET: Duration = Duration::from_millis(300);
 
 /// The ID used to size markers before the real one exists (the shortest an emitted ID can be).
@@ -96,8 +98,9 @@ pub fn parse(language: Language, text: &str) -> Option<tree_sitter::Tree> {
     let mut parser = Parser::new();
     parser.set_language(&language.grammar()).ok()?;
     let deadline = Instant::now() + PARSE_BUDGET;
-    let mut progress = |_: &tree_sitter::ParseState| {
-        if Instant::now() >= deadline {
+    let mut progress = |state: &tree_sitter::ParseState| {
+        // A parse error already decides the answer ("unchanged"): do not spend time recovering.
+        if state.has_error() || Instant::now() >= deadline {
             ControlFlow::Break(())
         } else {
             ControlFlow::Continue(())
@@ -271,6 +274,14 @@ pub fn fold(path: &str, extent: Extent, scrubbed: &[u8], mode: Mode) -> Option<C
         return None;
     }
     let text = std::str::from_utf8(scrubbed).ok()?;
+    // Text with control characters other than tab, line breaks and form feed is not source code
+    // (terminal escape sequences, binary-ish data). Parsing it is the slow way to find that out.
+    if scrubbed
+        .iter()
+        .any(|b| *b < 0x20 && !matches!(*b, b'\t' | b'\n' | b'\r' | 0x0c))
+    {
+        return None;
+    }
     let tree = parse(language, text)?;
     let params = ModeParams::for_mode(mode);
     let regions = collect(language, tree.root_node(), text, &params);

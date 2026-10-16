@@ -251,8 +251,11 @@ impl Cas {
         file.set_modified(now)?;
         remove_if_present(&self.tombstone_path(&sha))?;
 
-        self.gc_locked(now)?;
-        let known = self.known_shas()?;
+        // One directory scan serves both the GC and the ID selection. Entries the GC just removed
+        // stay in the ID space as tombstones, so `known` is the whole scan.
+        let entries = self.scan()?;
+        self.gc_entries(&entries, now)?;
+        let known: Vec<String> = entries.into_iter().map(|e| e.sha).collect();
         Ok(PutResult {
             short_id: shortest_unique_prefix(&sha, &known),
             sha,
@@ -268,18 +271,24 @@ impl Cas {
     }
 
     /// GC with the vault lock already held by the caller.
-    ///
-    /// Tombstones are created and made durable *before* any log is removed, so a
-    /// crash can never leave an issued ID that is neither a log nor a tombstone.
     fn gc_locked(&self, now: SystemTime) -> Result<usize, CasError> {
-        let stale: Vec<String> = self
-            .scan()?
-            .into_iter()
+        let entries = self.scan()?;
+        Ok(self.gc_entries(&entries, now)?.len())
+    }
+
+    /// Delete the stale live entries among `entries` (a scan taken under the lock), leaving
+    /// tombstones, and return their shas. A removed entry stays in the ID space as a tombstone.
+    ///
+    /// Tombstones are created and made durable *before* any log is removed, so a crash can never
+    /// leave an issued ID that is neither a log nor a tombstone.
+    fn gc_entries(&self, entries: &[Entry], now: SystemTime) -> Result<Vec<String>, CasError> {
+        let stale: Vec<String> = entries
+            .iter()
             .filter(|e| e.kind == Kind::Live && self.is_stale(e.modified, now))
-            .map(|e| e.sha)
+            .map(|e| e.sha.clone())
             .collect();
         if stale.is_empty() {
-            return Ok(0);
+            return Ok(stale);
         }
         for sha in &stale {
             fsutil::create_private_empty(&self.tombstone_path(sha))?;
@@ -289,7 +298,7 @@ impl Cas {
             remove_if_present(&self.log_path(sha))?;
         }
         fsutil::sync_dir(&self.dir)?;
-        Ok(stale.len())
+        Ok(stale)
     }
 
     /// Resolve a (short) ID to the full sha of a live entry.
@@ -370,12 +379,6 @@ impl Cas {
     fn is_stale(&self, modified: SystemTime, now: SystemTime) -> bool {
         // A modified time in the future (clock skew) counts as fresh.
         now.duration_since(modified).is_ok_and(|age| age > self.ttl)
-    }
-
-    /// Every sha the vault knows, live or expired: the ID space short IDs must
-    /// be unique within.
-    fn known_shas(&self) -> Result<Vec<String>, CasError> {
-        Ok(self.scan()?.into_iter().map(|e| e.sha).collect())
     }
 
     /// Strict scan, sorted by sha: only regular files named

@@ -624,6 +624,17 @@ fn unsupported_or_doubtful_input_is_left_alone() {
         )
         .is_none()
     );
+    // Terminal escape sequences or other control characters: not source, not even parsed.
+    let with_escape = rs.replacen("pub struct Item {", "pub struct Item {\u{1b}[0m", 1);
+    assert!(
+        fold(
+            "inventory.rs",
+            Extent::Complete,
+            with_escape.as_bytes(),
+            Mode::UltraLean
+        )
+        .is_none()
+    );
     // Empty and tiny.
     assert!(fold("a.rs", Extent::Complete, b"", Mode::UltraLean).is_none());
     assert!(fold("a.rs", Extent::Complete, b"fn main() {}\n", Mode::UltraLean).is_none());

@@ -488,8 +488,41 @@ fn encode_fields(out: &mut String, depth: usize, fields: &Fields) -> Result<(), 
     Ok(())
 }
 
+/// `true` if brackets nest deeper than `limit` anywhere outside a string. One pass over the bytes,
+/// no allocation: it decides hostile nesting before any parser (or recursion) touches the input.
+/// Malformed input is left to the real parser; this only counts `{`/`[` against `}`/`]`.
+fn nesting_exceeds(bytes: &[u8], limit: usize) -> bool {
+    let (mut depth, mut in_string, mut escaped) = (0usize, false, false);
+    for &b in bytes {
+        if in_string {
+            match (escaped, b) {
+                (true, _) => escaped = false,
+                (false, b'\\') => escaped = true,
+                (false, b'"') => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' | b'[' => {
+                depth += 1;
+                if depth > limit + 1 {
+                    return true;
+                }
+            }
+            b'}' | b']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Encode one JSON document as TOON, byte for byte as the spec prescribes, or decline.
 pub fn encode_json(bytes: &[u8]) -> Result<String, Decline> {
+    if nesting_exceeds(bytes, MAX_DEPTH) {
+        return Err(Decline::TooDeep);
+    }
     let raw: Box<RawValue> = serde_json::from_slice(bytes).map_err(|e| map_error(&e))?;
     let root = parse(raw.get(), 0)?;
     let mut out = String::new();
@@ -655,9 +688,19 @@ mod tests {
         ));
         // serde_json's own recursion guard, far beyond any realistic input.
         let deep = format!("{}{}", "[".repeat(200_000), "]".repeat(200_000));
-        assert!(enc(&deep).is_err());
+        assert_eq!(enc(&deep), Err(Decline::TooDeep));
         let deep_obj = "{\"a\":".repeat(200_000);
-        assert!(enc(&deep_obj).is_err());
+        assert_eq!(
+            enc(&deep_obj),
+            Err(Decline::TooDeep),
+            "even when it is also truncated"
+        );
+        // Brackets inside strings (escaped quotes included) are not nesting.
+        let brackets = format!("{{\"a\":\"{}\\\"{}\"}}", "[".repeat(5000), "{".repeat(5000));
+        assert_eq!(
+            enc(&brackets).unwrap(),
+            format!("a: \"{}\\\"{}\"", "[".repeat(5000), "{".repeat(5000))
+        );
     }
 
     #[test]
