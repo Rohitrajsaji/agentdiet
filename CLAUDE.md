@@ -63,7 +63,7 @@ Reference repos live at `../agentdiet-refs/{rtk,context-mode,toon}`. Read them t
 | `rtk/engine/**`, `rtk/proxy/**` | BUSL-1.1 | **Never copy** code, tests, regexes or data. Behavior lookup only. |
 | `context-mode/**` (whole repo) | Elastic-2.0 (ELv2) | **Never copy** anything. Behavior lookup only. |
 | `rtk/src/**` and the rest of rtk | Apache-2.0 | Clean-room by default. If anything is ever adapted, keep the license notice and attribution (NOTICE). |
-| `toon/**` | MIT | Clean-room by default. `toon/SPEC.md` is our TOON encoding reference. Adapted code keeps the MIT copyright line. |
+| `toon/**` | MIT | Clean-room by default. `toon/SPEC.md` is only a pointer; the normative TOON text is the revision pinned in `SPEC.md` §9 (toon-format/spec). Adapted code keeps the MIT copyright line. |
 
 - Never paste reference code into this repo, or into prompts that generate code here.
 - When a design is informed by a reference, note it in a comment as

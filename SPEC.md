@@ -4,9 +4,14 @@
 
 AgentDiet (`agentdiet`) is a context firewall for AI coding agents. It sits between an agent
 and tool output — via agent hooks and PATH shims — and trims what the agent sees. It never
-loses data: everything trimmed is stored raw in the Vault and can be recovered by short ID.
+loses data: everything trimmed is stored in the Vault (after secret scrubbing, §3 Tier 3) and can be recovered by short ID. Redacted secrets are never recoverable.
 
 Build rules live in `CLAUDE.md`. This file defines behavior.
+
+**Status tags.** Text with no tag describes behavior that exists today. **[3B]** marks behavior that
+this file specifies for Slice 3B (the Diet Engine library) and that is **not implemented yet**; code
+and tests that contradict a **[3B]** rule are expected until that slice lands. **[4]** and **[5]**
+mark later slices (§8). Nothing tagged here may be described as shipped.
 
 ## 2. UX Rules
 
@@ -15,7 +20,7 @@ Build rules live in `CLAUDE.md`. This file defines behavior.
 Running bare `agentdiet` opens an interactive Control Center menu (`inquire`), in this order:
 
 1. **Pause / Resume** — a toggle; the label reflects the current status.
-2. **Inspect last trimmed output** — shows the most recent short ID (e.g. `#4f9a`) and its content.
+2. **Inspect last trimmed output** — shows the most recent ID (e.g. `#4f9a1b2c`) and its content.
 3. **Switch Diet Mode** — Light / Balanced / Ultra-Lean.
 4. **Manage Connected Assistants** — add or remove the integrations that `init` manages.
 5. **Open `agentdiet top`** — the ratatui TUI.
@@ -99,7 +104,7 @@ Global state lives in `~/.agentdiet/state.json`:
 | `mode` | `"light"` \| `"balanced"` \| `"ultra-lean"` |
 | `raw_tokens_passed_while_paused` | non-negative integer |
 | `on_session_start` | `"prompt"` \| `"auto_resume"` (default `"prompt"`) |
-| `last_trimmed_id` | short ID (e.g. `"4f9a"`) of the most recently trimmed output, or `null` (default). Read by the Control Center's "Inspect last trimmed output". |
+| `last_trimmed_id` | ID without the `#` (e.g. `"4f9a1b2c"`) of the most recently trimmed output, or `null` (default). Read by the Control Center's "Inspect last trimmed output". Any value of at least 4 hex is accepted on read. |
 
 - A missing, unreadable or corrupt `state.json` loads as defaults (fail open); unknown fields are ignored.
 
@@ -108,21 +113,31 @@ Global state lives in `~/.agentdiet/state.json`:
   (detected in UserPromptSubmit).
 - Once paused, it **stays paused** until manually resumed via `agentdiet resume`, the
   Control Center toggle, or typing `@diet resume` in chat (detected in UserPromptSubmit).
-- While paused, all output passes through raw and `raw_tokens_passed_while_paused` accumulates.
+- While paused, the Diet Engine performs **no trimming, TOON encoding or folding**, and
+  `raw_tokens_passed_while_paused` accumulates the estimated tokens (§3 Tier 2, "Estimated tokens")
+  of the output passed. Secret scrubbing still applies (precedence rule P3): "raw" means
+  *untransformed*, not *unscrubbed*. Only the exclusions listed under P3 (human shim path, binary and
+  oversize output) bypass scrubbing.
 - **SessionStart while paused never blocks.** Hooks have no interactive TTY, so nothing ever
   reads stdin for confirmation.
   - `prompt` (default): emit exactly one line to hook stdout:
     `⏸ AgentDiet is paused. Run 'agentdiet resume' or type '@diet resume' to re-enable.`
   - `auto_resume`: set `status` to `"active"` and emit a one-line notice that it resumed.
-- **Paused whisper:** while paused, any raw tool output exceeding **3,000 tokens** gets that
-  same one-line paused notice appended.
+- **Paused whisper:** while paused, any output whose estimated token count exceeds **3,000** gets
+  that same one-line paused notice appended. This is the one sanctioned exception to "never
+  inflate" (§6): the notice is not counted against any saving. Binary and oversize output (P3) never
+  get a notice, because they are passed through byte-identical.
 
 ### 2.4 Escape Hatches
 
 - If a UserPromptSubmit contains `raw`, `full` or `unfiltered`, compression is bypassed for the
   **next turn only**. Matching is whole-word and case-insensitive, so "fully" or "full-stack"
   do not trigger it.
-- Running the exact same command twice in a row auto-expands the output on the retry.
+- Running the exact same command twice in a row auto-expands the output on the retry. "Same" means
+  identical structured argv (and working directory) as the immediately preceding engine invocation
+  in the same session; how that is tracked is decided with the hook wiring **[4]**.
+- Every bypass skips trimming, TOON and folding and writes nothing to the Vault. None of them skips
+  secret scrubbing (precedence rule P3).
 
 ## 3. Architecture — 3 Tiers
 
@@ -130,44 +145,231 @@ Global state lives in `~/.agentdiet/state.json`:
 
 - `main.rs` inspects `argv[0]`. If invoked as `git`, `pytest`, `cargo` (and so on) through
   `~/.agentdiet/shims/`, it runs in shim mode.
-- Shim mode walks the parent process tree (PPID chain):
+- Shim mode walks the parent process tree (PPID chain) **[4]**:
   - **No AI-agent ancestor (human shell):** `execv` straight through to the real binary
-    (resolved from `PATH` with the shims directory excluded) in **< 0.2 ms**.
+    (resolved from `PATH` with the shims directory excluded). The requirement is **< 0.2 ms** of
+    added end-to-end time; it is currently **NOT MET** (§7).
+    This path is *transparent*: the real command writes straight to the user's terminal, so
+    nothing is captured, scrubbed, stored or measured. AgentDiet makes no privacy claim about it.
   - **AI-agent ancestor:** run the command and route its output through the Diet Engine.
+- Until the PPID walk and Engine wiring ship, shim mode always execs the real binary.
 - Hook mode (`agentdiet hook <event>`) handles SessionStart, UserPromptSubmit, PreToolUse,
-  PostToolUse and PreCompact.
+  PostToolUse and PreCompact **[4]**. Whether and how a PostToolUse hook may *replace* a tool's
+  output (Claude Code's `updatedToolOutput`) must be verified against the current official docs and
+  version-tested before it is relied on; nothing here assumes it.
 - **PreToolUse must protect interleaved thinking blocks:** it never modifies, reorders or
   strips them.
 
-### Tier 2 — Fast-Path Diet Engine (< 10 ms)
+### Tier 2 — Fast-Path Diet Engine
 
-- **Shell output compression.** If the compressed token count is **≥ the raw token count**,
-  refuse to replace the output and emit the raw output unchanged. This fixes the `ls`
-  token-inflation bug.
-- **TOON encoding.** Uniform / tabular JSON is encoded to TOON losslessly.
-- **Signature folding.** For `Read` on files over **300 lines**, tree-sitter folds function
-  bodies down to their signatures.
-- **Diet Mode** (Light / Balanced / Ultra-Lean) sets how aggressive the thresholds are. Exact
-  thresholds are decided during implementation and recorded here when fixed.
+Slice 3B delivers the engine as a **library API** with no user-facing entry point: nothing in the
+CLI, shims or hooks calls it before Slice 4, and no document may claim end-to-end integration
+until then. Its tests call it directly. **[3B]**
+
+#### Output pipeline and precedence **[3B]**
+
+The engine takes the captured bytes of one tool output (plus structured metadata: argv, exit
+status, tool kind) and returns the bytes to emit. When rules conflict, the **lower-numbered rule
+wins**.
+
+- **P1 — Nothing unscrubbed reaches disk.** The Vault, `memory.db`, `state.json`, breadcrumbs,
+  summaries and diagnostics hold only scrubbed text. This covers recorded command lines and
+  arguments too (token-bearing git URLs, `curl -H "Authorization: Bearer …"`). The one exception is
+  the byte-exact config backup made by `init` (§2.2).
+- **P2 — Never break the caller (fail open).** Any error or panic inside the engine yields the best
+  safe output: the scrubbed output if scrubbing finished, otherwise the raw output (a scrubber
+  failure is the one case where privacy yields to delivering the command's output). The engine only
+  ever sees output of a command that has already run; **no processing error may cause a command to
+  run again.**
+- **P3 — Redact on emit, in every mode.** Detected secrets are replaced (§3 Tier 3) even when
+  paused, in raw mode, bypassed or in identity mode. A redaction can make text longer
+  (`[REDACTED:aws-access-key-id]` replaces a 20-byte key with 28 bytes), so "never inflate" (P5) is
+  measured against the *scrubbed* original. Redacted spans are not stored anywhere and are
+  **never recoverable**. Detection is pattern based and best effort: AgentDiet does not claim to find
+  every secret. Three exclusions are explicit:
+  1. the transparent human shim path (Tier 1);
+  2. **binary output** (a NUL byte in the first 8 KiB): passed through byte-identical, neither
+     scrubbed, transformed nor stored, because rewriting inside binary data corrupts it. Text in
+     UTF-16 contains NULs and is therefore treated as binary;
+  3. **oversize output**: more than 8 MiB (initial value, to be re-evaluated with measurements). It
+     is scrubbed but never transformed or stored.
+- **P4 — Identity.** If nothing was redacted and no transform was applied, the output is the exact
+  input bytes, including non-UTF-8 bytes, CRLF line endings and a missing final newline.
+- **P5 — Never inflate (final check).** A replacement (trimmed text, TOON or folded text) is emitted
+  only if the **complete final text**, including the actual breadcrumb, folding markers and any
+  notices, is strictly smaller than the scrubbed original in **bytes** and in **estimated tokens**,
+  and also meets the mode's required saving (below). Otherwise the scrubbed original is emitted with
+  no breadcrumb. The check runs again after persisting (P6), when the real ID length is known; a
+  cheaper pre-check with an 8-hex ID decides whether to persist at all, so most hopeless candidates
+  never touch the Vault. An entry persisted for a candidate that then fails the final check is
+  harmless: nothing references it and GC removes it.
+- **P6 — Recoverability, persist first.** Before a replacement is emitted, the full scrubbed
+  original is written to the Vault durably (temp file, `fsync` of the file, rename, `fsync` of the
+  directory). Durability is never traded for latency: skipping `fsync` is not an acceptable
+  optimisation.
+  - Vault write fails: emit the scrubbed original, no breadcrumb.
+  - Vault write succeeded but the `state.json` or `memory.db` update fails: still emit the
+    replacement, and write one bounded (≤ 200 bytes), scrubbed note to **stderr**. Diagnostics never
+    go to stdout of `agentdiet mcp`, nor to a hook's output channel.
+  - Reading an entry whose bytes no longer hash to its name reports a distinct **corrupt** outcome
+    that is neither "not found" nor "expired", and returns no content. **[3B]**
+    Today `show` returns the bytes without re-hashing, and `put` fsyncs the file but not its
+    directory; both gaps are closed in 3B.
+- **P7 — Bypass.** Paused status, a `raw`/`full`/`unfiltered` prompt (next turn only), and the same
+  command run twice in a row (§2.4) skip trimming, TOON and folding, and write nothing to the
+  Vault. Scrubbing still applies (P3).
+
+Evaluation order: classify (binary / oversize / bypass) → scrub → build candidate → pre-check →
+persist → final check → emit → best-effort index and state update.
+
+#### Estimated tokens **[3B]**
+
+`estimate_tokens(bytes)` is a deterministic *estimate*, defined only on the bytes:
+
+- a maximal run of ASCII letters, digits or `_` counts `ceil(len / 4)`;
+- a maximal run of `\n` and `\r` bytes that contains at least one `\n` counts 1;
+- any other space, tab, or `\r` run without a `\n` counts 0;
+- every other UTF-8 scalar value, and every invalid byte, counts 1.
+
+It is used for the mode thresholds, `raw_tokens_passed_while_paused` and the 3,000-token notice. It
+says nothing about any provider's tokenizer: a shorter string can have more provider tokens, and no
+tokenizer is bundled. The only cross-provider guarantee AgentDiet makes is in bytes (P5), and the
+estimate is an additional gate, never a replacement for the byte comparison.
+
+#### Diet Modes **[3B]**
+
+| Setting | Light | Balanced | Ultra-Lean |
+|---|---|---|---|
+| Minimum estimated tokens before any trimming or TOON is attempted | 1500 | 600 | 250 |
+| Required saving, in bytes and in estimated tokens, breadcrumb included | ≥ 40% | ≥ 20% | ≥ 10% |
+| Context lines kept around each error/warning line | 5 | 3 | 1 |
+| Last lines always kept | 20 | 10 | 5 |
+| Minimum body lines for folding (a file must also exceed 300 lines, in every mode) | 20 | 8 | 3 |
+
+Diagnostics are not mode-dependent. Every mode keeps **every meaningful warning and error line
+verbatim**. A warning may be collapsed only if it is an exact duplicate of another line (kept once,
+with a count) or matches an explicit, per-tool noise rule below; the count is reported in the
+breadcrumb. A large number of warnings is never a reason to drop them.
+
+#### Shell output compression **[3B]**
+
+- **Dispatch uses structured data, never substrings of shell text.** The engine is given the
+  executable and arguments as an argv vector. A hook's shell string qualifies only if it parses as
+  exactly one simple command (no pipe, `;`, `&`, `&&`, `||`, redirection, subshell, command
+  substitution or newline outside quotes). Anything else is left unchanged. Known miss: compound
+  commands such as `cd app && cargo test` are not compressed.
+- **Machine-readable output is never altered:** `--porcelain`, `-z`, `--format`/`--pretty`/
+  `--template`, `--json`, `--message-format=json`, `--output-format` and similar flags; `git diff`,
+  `git log`, `git show`, `git blame` and `git status --short`; and any invocation whose stdout is
+  redirected to a file or piped onward. Detecting a redirected stdout in shim mode is a Slice 4
+  concern **[4]**.
+- A line is removed only if it matches an explicit noise rule for the detected tool. Everything
+  else stays. Always kept: error and failure lines with their context lines, the last N lines, the
+  exit status, and every line not covered by a noise rule. Unknown tools, unparseable output and
+  binary output are left unchanged (scrubbed only). Processing is byte-based, so non-UTF-8 output
+  is safe; line endings are preserved; carriage-return progress bars collapse to their final state;
+  colour codes are stripped only for supported tools.
+
+  | Tool | Noise that may be removed or counted |
+  |---|---|
+  | cargo | `Compiling`/`Checking`/`Downloaded`/`Fresh` lines; passing `test … ok` lines collapsed to a count. Failure sections are kept. |
+  | pytest | progress dots and `PASSED` lines. FAILURES/ERRORS sections and the short summary are kept. |
+  | go test | `=== RUN`, `--- PASS`, `ok pkg` lines. `--- FAIL` blocks and panics are kept. |
+  | npm, pnpm, yarn | progress lines; repeated `warn deprecated` lines grouped with a count. `ERR!` lines are kept. |
+  | git | transfer progress only. |
+  | make | `make[N]: Entering/Leaving directory` lines. |
+  | docker | layer pull/download progress. Step headers and errors are kept. |
+  | ruff | in Ultra-Lean only, the source-snippet lines under a diagnostic; every diagnostic line is kept. |
+  | gh | JSON output is a TOON candidate (below); otherwise unchanged. |
+
+- Rules informed by other tools are recorded in code as `// pattern ref: <repo>/<path> (behavior
+  only)` and follow the clean-room rules in `CLAUDE.md`.
+
+#### TOON encoding **[3B]**
+
+Output that parses, as a whole, as one JSON document is a TOON candidate. AgentDiet targets
+**`toon-spec: 4.4`** (§9 pins the exact source). TOON output is not byte-identical to the input, so
+it always goes through the Vault and carries a breadcrumb; the breadcrumb is a separate line
+*outside* the TOON document, which itself has no trailing newline (spec §12).
+
+The encoder implements a **subset**, and where the normative spec would require a form AgentDiet
+does not implement, the encoder **declines and the output is left unchanged** (it never emits a
+lesser form):
+
+- Supported: a non-empty root object (§8), a root primitive array or a root tabular array (§9.1,
+  §9.3) and the empty root array `[]`; nested and empty objects (`key:`); primitive values; empty
+  arrays as `key: []`; inline primitive arrays `key[N]: a,b`; and flat tabular arrays
+  `key[N]{f1,f2}:` whose elements are all non-empty objects with **identical key sequences** and
+  only primitive values. Comma delimiter, 2-space indent, LF.
+- Declined (output unchanged): keyed tabular objects, including at the root (§9.5, any object with
+  two or more entries whose values are all non-empty objects); nested field groups (§9.3, an
+  object-valued column); every list form (§9.2, §9.4 and §10: arrays of arrays, mixed arrays, arrays
+  with empty or non-uniform objects, array-valued columns); arrays of objects with the same key
+  *set* in a different order (the spec requires tabular form there, which would reorder keys);
+  a root primitive or an empty root object.
+- Strings are quoted per §7.2 and escaped per §7.1 (only those escapes, `\uXXXX` in lowercase hex
+  for other control characters); keys per §7.3 (non-ASCII keys are quoted).
+- Numbers: the JSON number's **original text** is emitted only if it is already canonical (§2):
+  plain decimal, no exponent, no leading or trailing zeros, not `-0`, at most 15 significant digits,
+  and zero or within [1e-6, 1e21). Any other number (`1.10`, `1e5`, `-0`, a 17-digit id) makes the
+  whole document decline. Known miss: 64-bit ids above 15 digits keep such documents out of TOON.
+  How the original text is retained while parsing (for example `serde_json`'s
+  `arbitrary_precision`, or raw values) is an implementation choice that must keep existing
+  `state.json` and config handling unchanged and be recorded in the commit that makes it.
+- The JSON reader is strict RFC 8259. Duplicate object keys, a lone surrogate escape, a byte order
+  mark, trailing content, or nesting deeper than 64 make the document decline.
+- **Conformance evidence** is the official MIT-licensed fixtures at the pinned revision (§9),
+  vendored with their copyright notice in `THIRD_PARTY_NOTICES`: for every `encode` fixture the
+  encoder must either reproduce the expected output byte for byte or decline, and every fixture
+  inside the supported subset must be reproduced. A test-only decoder is used for round trips only
+  after it passes the official `decode` fixtures; a decoder that merely mirrors the encoder is not
+  evidence.
+
+#### Signature folding **[3B]**
+
+- Applies to `Read` output of more than 300 lines, with the language taken from the file extension:
+  Rust, TypeScript/TSX, JavaScript and Python, via statically linked tree-sitter grammars. Input
+  that is not valid UTF-8, has an unknown extension, or parses with any error is left unchanged.
+- Only function and method **bodies** are replaced. Signatures, attributes, doc comments,
+  docstrings, classes, impls, traits, types, imports and constants stay, and the result keeps valid
+  indentation.
+- A body is folded only if it has at least the mode's minimum number of lines and its marker is
+  shorter than the body. A marker looks like
+  `{ /* folded L120-188: agentdiet show '#4f9a1b2c' --lines 120..188 */ }`. Line numbers refer to
+  the scrubbed Vault copy; a multi-line redaction (a private key) shifts them relative to the
+  file on disk, which a test must cover.
+- A folded view is not the file. How an agent edits a file after a folded `Read` is an open
+  question for the hook slice **[4]**.
 
 ### Tier 3 — Persistent Vault
 
-1. **Scrub secrets** before storing or emitting anything, using regexes ported from Secretlint's
-   rule set. Secretlint is MIT-licensed; ported patterns keep attribution in a
-   `THIRD_PARTY_NOTICES` file.
-2. **Store raw output losslessly** at `~/.agentdiet/cas/<full_sha256>.log`. The 64-hex sha256 is
+1. **Scrub secrets** before storing or emitting anything the engine handles, using regexes ported
+   from Secretlint's rule set. Secretlint is MIT-licensed; ported patterns keep attribution in a
+   `THIRD_PARTY_NOTICES` file. The explicit exclusions (human shim path, binary and oversize
+   output) are listed under precedence rule P3 in Tier 2. Detection is best effort, not a guarantee.
+2. **Store the scrubbed output losslessly** (byte-exact apart from redactions) at `~/.agentdiet/cas/<full_sha256>.log`. The 64-hex sha256 is
    computed over the scrubbed output. Storage is content-addressed, so identical output dedupes.
 3. **7-day auto-GC.** CAS files older than 7 days are deleted opportunistically (on writes, or by
    `agentdiet top`). `show` on an expired ID reports "expired" rather than "not found".
-4. **Short IDs** are shown as `#4f9a`: the shortest unique prefix of the sha256, minimum 4 hex
-   chars. Input IDs are resolved by unique prefix match against the CAS filenames; an ambiguous
-   prefix is an error that lists the candidates.
-5. **Slicing:** `agentdiet show #4f9a --lines <start>..<end>` returns only those lines
+4. **IDs.** An ID that AgentDiet **emits** (breadcrumbs, fold markers, `state.json`, ambiguity
+   candidates) is the shortest prefix of the sha256 that is unique among every live entry **and
+   every tombstone**, but never shorter than **8** hex characters; the full 64 hex if nothing
+   shorter is unique. It is written `#4f9a1b2c`. **[3B]** (Today the minimum is 4, in
+   `cas::MIN_ID_LEN`.) Input IDs are resolved by unique prefix match against the CAS filenames and
+   may be as short as 4 hex; an ambiguous prefix is an error that lists the candidates. Uniqueness
+   is a property of the vault at emission time: an older ID can later become ambiguous, and then
+   reports the ambiguity rather than returning a different entry.
+5. **Slicing:** `agentdiet show '#4f9a' --lines <start>..<end>` returns only those lines
    (1-based, inclusive).
-6. **Breadcrumb.** Append one line to the trimmed output:
-   `🥗 Diet: <summary of what was trimmed> Run: agentdiet show #4f9a`
+6. **Breadcrumb.** Append one line to the trimmed output **[3B]**:
+   `🥗 Diet: <summary of what was trimmed> Run: agentdiet show '#4f9a1b2c'`
+   The ID is always single-quoted, because an unquoted `#…` starts a shell comment in `sh`, `bash`
+   and `zsh`. The summary is scrubbed and at most 160 bytes, e.g. `kept 42/1830 lines; cargo test:
+   1780 passing lines collapsed; exit 101; 2 secrets redacted (not recoverable)`. The whole line
+   counts against the no-inflation check (P5).
 7. **Index summaries** into `.agentdiet/memory.db` (project-local SQLite, WAL, FTS5 + BM25).
-   PreCompact recovery uses this index to re-surface relevant context.
+   PreCompact recovery uses this index to re-surface relevant context. Index rows hold scrubbed
+   text only (P1).
 
 #### Tier 3 details (Slice 2)
 
@@ -197,14 +399,27 @@ Global state lives in `~/.agentdiet/state.json`:
   is never read, written or followed: it is ignored by lookups and replaced by a regular file when
   its name is needed. A dedupe hit re-checks the stored bytes against the sha256 before reusing
   them; a mismatch is rewritten.
-- **ID input** is accepted as `#4f9a` or bare `4f9a` (an unquoted `#...` is a shell comment).
-  Case-insensitive, hex only, at least 4 characters.
+- **ID input** is accepted as `#4f9a` or bare `4f9a` (quote it: an unquoted `#...` is a shell
+  comment). Case-insensitive, hex only, at least 4 characters.
 - **Slicing** splits on `\n` and keeps line endings (CRLF and a missing trailing newline survive).
   A start of 0 or start > end is an error; an end past EOF clamps; a start past EOF yields nothing.
 - **memory.db** has one `entries` table (`kind` is `command` | `read` | `decision`) mirrored into
   an FTS5 table over `title` and `body`. Results are ordered by `bm25()` ascending (lower is
   better) with title weighted above body. Query tokens are quoted as FTS5 phrases and ANDed, so
   user text can never produce an FTS syntax error.
+- **memory.db rows are events, not content.** The same output produced by different commands or
+  sessions is separate rows, so retrieval keeps its provenance; a row is a duplicate only if its
+  `cas_sha`, kind, scrubbed title and session all match, which a repeated identical run in one
+  session is. This is enforced by a unique index plus `INSERT OR IGNORE` in a single statement, not
+  by a read-then-insert check, so concurrent inserts cannot duplicate. **[3B]** (schema v2)
+- **`state.json` updates are serialised.** Every read-modify-write takes a bounded advisory lock
+  (an exclusive lock on a sibling lock file, waiting at most about 2 s). Engine telemetry that cannot
+  take the lock is dropped; an explicit `pause`/`resume`/mode change that cannot take it fails with
+  an error. Atomic rename alone is not enough: it makes a write whole, not the
+  read-modify-write exclusive. Required before any hook or engine path writes state. **[3B]**
+- **Persistence order and durability.** A write goes to a temp file, is `fsync`ed, and is renamed
+  into place; the directory `fsync` after the rename is **[3B]**. Reads verify the sha256 and report
+  a corrupt entry distinctly (P6) **[3B]**.
 
 ### 3b. Interfaces & Tools (outside the hot path)
 
@@ -237,7 +452,7 @@ Global state lives in `~/.agentdiet/state.json`:
 | `agentdiet init [--only <targets>] [--all] [--project] [--dry-run]` | Connects assistants |
 | `agentdiet pause` | Pauses trimming |
 | `agentdiet resume` | Resumes trimming |
-| `agentdiet show #id [--lines a..b]` | Prints the full raw output, or a line slice |
+| `agentdiet show '#id' [--lines a..b]` | Prints the full stored (scrubbed) output, or a line slice |
 | `agentdiet top` | Opens the TUI |
 | `agentdiet mcp` | Starts the MCP server |
 | `agentdiet scan [paths]` | Runs the security scanner |
@@ -246,10 +461,82 @@ Global state lives in `~/.agentdiet/state.json`:
 
 ## 6. Invariants
 
-- Never lose data: anything trimmed is recoverable through `show`.
-- Never inflate: emitted output is never larger than the raw output.
-- Fail open: internal errors pass raw output / exec the real binary.
+Precedence between them is fixed by rules P1–P7 (§3 Tier 2).
+
+- Never lose data: anything the engine trims is recoverable through `show` from the Vault, **except
+  secrets, which are redacted before storage and are never recoverable**. A replacement is emitted
+  only after its original is durably stored (P6).
+- Never inflate: emitted output is never larger than the **scrubbed** original, in bytes and in
+  estimated tokens, counting the breadcrumb, fold markers and notices (P5). Redaction can make text
+  longer, which is why the baseline is the scrubbed original. The one sanctioned exception is the
+  3,000-token paused notice (§2.3).
+- Fail open: an internal error emits the best safe output (scrubbed if scrubbing finished) or, in
+  shim mode, execs the real binary. Processing errors never re-run a command that has already run
+  (P2).
 - Thinking blocks are never touched.
-- Secrets are never written to disk unscrubbed. The one exception is the byte-exact backup of a
-  user's own config file made by `init` (see §2.2), which is kept `0700`/`0600`.
+- Secrets are never written to disk unscrubbed (P1). The one exception is the byte-exact backup of
+  a user's own config file made by `init` (see §2.2), which is kept `0700`/`0600`. Secret
+  detection is best effort and does not cover the human shim path, binary output or oversize
+  output (P3).
 - Hooks never block on stdin or a TTY.
+
+## 7. Performance
+
+A budget is only reported against the boundary it was measured at, and a miss is recorded as a miss.
+Requirements are not redefined to match a measurement.
+
+| Boundary | What it covers | Requirement | Status |
+|---|---|---|---|
+| **B1 — shim end-to-end overhead** | Wall time of spawning a shimmed command until it exits, minus the same command spawned directly (`E2 − E0`), human path, warm | < 0.2 ms | **NOT MET.** Independent baseline (macOS arm64, release, n = 100): median difference 3.70 ms (direct 2.02 ms, shim 5.72 ms; p95 2.56 / 6.17 ms). Reproduce with `tests/perf.rs` (below). |
+| B2 — process launch | Spawning `agentdiet hook noop` minus spawning the direct command (`E1 − E0`) | none; context for B1 | measured by `tests/perf.rs` |
+| B3 — in-process routing | `shim_name` + `resolve_real` on a synthetic `PATH`, up to the `exec` call | none; context for B1 | measured by `tests/perf.rs` |
+| **B4 — Diet Engine fast path** | Pure transform (classify, scrub, candidate, checks) of an input of up to 256 KiB, in process, warm, no I/O | < 10 ms | not measured yet **[3B]** |
+| **B5 — persistence** | Durable Vault write (`fsync` file and directory), GC, ID selection, index and state update; measured with 0, 100 and 1000 entries in the Vault | reported with B4; the engine's end-to-end budget is B4 + B5 + process launch (B2) < 10 ms | not measured yet **[3B]** |
+
+Notes:
+
+- B1 is currently dominated by launching a second executable (B2), not by routing (B3). Closing the
+  gap needs a different shim design (for example a tiny dedicated shim, or fewer exec hops) and is
+  a Slice 4 design question. It is not closed by a faster `resolve_real` and not by redefining B1.
+- Durable writes will not be removed to hit B5. Candidates that keep the write-ahead guarantee are
+  amortised GC (today `put` scans the vault on every call), no redundant directory creation, and
+  doing the transform and the write in one pass. If B5 still misses, it is recorded as a miss.
+- Benchmarks are opt-in (`cargo test --release --test perf -- --ignored --nocapture`), use only
+  `TempDir` homes and a synthetic `PATH` (never the user's real assistant configs), alternate
+  baseline and shim runs, discard a warm-up, and report sample count with p50, p95 and p99. Debug
+  builds are refused: their numbers would be meaningless.
+- Known misses to keep honest: B1 above; macOS `fsync` (`F_FULLFSYNC`) may by itself cost more than
+  B5 allows; the first call in a cold process pays regex compilation in the scrubber.
+
+## 8. Roadmap and status
+
+| Slice | Content | Status |
+|---|---|---|
+| 1 | scaffold, state ledger, Control Center, `init`/`eject` | done |
+| 2 | scrubber, Vault, FTS5 memory | done |
+| 3A | dependency cleanup, this specification, shim benchmark | in progress (build + spec committed; benchmark next) |
+| 3B | Diet Engine library: pipeline, compression, TOON, folding, `show`/ID/memory/state changes marked **[3B]** | specified, not implemented |
+| 4 | hooks **and** PPID shims, wiring the engine to real entry points, shim redesign question (B1) | not started |
+| 5 | MCP tools (`diet_exec` etc.), scanner, `agentdiet top` | not started |
+
+Also open: reconciling the module docs in `lib.rs`/`main.rs` and the Control Center "inspect"
+action with the final behavior; the project license (a user decision, not made here).
+
+## 9. Reference pins
+
+**TOON** — canonical specification, pinned:
+
+- Repository: https://github.com/toon-format/spec (MIT, Copyright (c) 2025-PRESENT Johann Schopplich)
+- Release tag `v4.4.0` (annotated tag `4bf71f491ba8474b405710e8926ea8268700d36f`), resolving to commit
+  `d09c3d33e37389345a74bd96981eb96dd9be6c5e` (2026-10-08).
+- `SPEC.md` at that commit: git blob `d2d14b3134cd3e0b49eb627bafd010c5efc58707`, SHA-256
+  `b445972d3ffb6752d2012d6599ac6903a45d84125f8f07e3d3eec5ee9a6cd1da`. The document states
+  *Version 4.4, Working Draft, 2026-10-08*; AgentDiet declares `toon-spec: 4.4`.
+- Conformance fixtures: `tests/fixtures` at that commit (tree `394f2dff934d7c79a5daa54fdeae7bcc7988254f`;
+  `encode/` tree `f8ef3e83407327e43e6dc9ec9e0cbb961ee3cb47`).
+- This file cites the spec by section number (for example "spec §9.3") rather than copying it. The
+  reference checkout `toon/SPEC.md` is only a pointer to the repository above and is not the
+  normative text. A newer revision may change the subset's requirements; moving the pin is a
+  deliberate, reviewed change to this section.
+
+**Secretlint** (MIT) is the source of the scrubber's ported patterns; see `THIRD_PARTY_NOTICES`.
