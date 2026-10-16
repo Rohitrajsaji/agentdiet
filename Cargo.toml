@@ -33,6 +33,12 @@ thiserror = "2"
 # parser before being written, while the edit itself stays a byte edit that keeps comments.
 toml = { version = "1", default-features = false, features = ["parse", "serde", "std"] }
 
+# libc: O_NOFOLLOW / O_NONBLOCK for hardened regular-file opens (std exposes `custom_flags` but not
+# the constants). Already in the dependency tree (sha2, dirs, inquire all pull it in), so it adds no
+# crate and no runtime requirement; the libc crate is what std itself links against.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 # tempfile: isolated TempDir homes/projects for tests only.
 tempfile = "3"

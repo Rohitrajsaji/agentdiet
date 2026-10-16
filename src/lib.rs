@@ -64,6 +64,11 @@ impl Paths {
         self.agentdiet_home.join("state.json")
     }
 
+    /// Sibling lock file serialising every read-modify-write of `state.json`.
+    pub fn state_lock_file(&self) -> PathBuf {
+        self.agentdiet_home.join("state.json.lock")
+    }
+
     pub fn backups_dir(&self) -> PathBuf {
         self.agentdiet_home.join("backups")
     }

@@ -4,10 +4,18 @@
 //! never errors — a missing or corrupt file simply yields the defaults.
 
 use std::io;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Paths, fsutil};
+use crate::Paths;
+use crate::fsutil::{self, LockError};
+
+/// How long an explicit user change (`pause`, `resume`, a mode switch) waits for the state lock.
+pub const EXPLICIT_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long engine telemetry waits before giving up and dropping its update, so a hook is never
+/// held up by a slow writer.
+pub const TELEMETRY_LOCK_TIMEOUT: Duration = Duration::from_millis(100);
 
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
@@ -19,6 +27,10 @@ pub enum StateError {
     },
     #[error("could not serialize state: {0}")]
     Serialize(#[from] serde_json::Error),
+    #[error("state is busy: another agentdiet process held the lock for {0:?}; try again")]
+    Busy(Duration),
+    #[error("could not lock the state file: {0}")]
+    Lock(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -80,7 +92,7 @@ pub enum Change {
 /// file exists but is unreadable or corrupt).
 pub fn load(paths: &Paths) -> State {
     let path = paths.state_file();
-    match fsutil::read_optional(&path) {
+    match fsutil::read_optional_regular(&path) {
         Ok(None) => State::default(),
         Ok(Some(bytes)) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
             eprintln!(
@@ -116,8 +128,27 @@ pub fn save(paths: &Paths, state: &State) -> Result<(), StateError> {
     })
 }
 
-/// Load, apply `f`, and save only if `f` changed the state.
-pub fn update(paths: &Paths, f: impl FnOnce(&mut State)) -> Result<(State, Change), StateError> {
+/// Load, apply `f`, and save only if `f` changed the state, as one exclusive
+/// read-modify-write: the lock is held from the read to the rename, so two
+/// processes can never both start from the same old state. Waits at most
+/// `timeout`, then fails with [`StateError::Busy`]. The lock is released on
+/// every path (it is a guard).
+pub fn update_within(
+    paths: &Paths,
+    timeout: Duration,
+    f: impl FnOnce(&mut State),
+) -> Result<(State, Change), StateError> {
+    let lock_path = paths.state_lock_file();
+    let lock_err = |source: io::Error| StateError::Write {
+        path: lock_path.display().to_string(),
+        source,
+    };
+    fsutil::create_private_dir_all(&paths.agentdiet_home).map_err(lock_err)?;
+    let _guard = fsutil::lock_exclusive(&lock_path, timeout).map_err(|e| match e {
+        LockError::Timeout { waited, .. } => StateError::Busy(waited),
+        other => StateError::Lock(other.to_string()),
+    })?;
+
     let before = load(paths);
     let mut after = before.clone();
     f(&mut after);
@@ -131,6 +162,30 @@ pub fn update(paths: &Paths, f: impl FnOnce(&mut State)) -> Result<(State, Chang
         Change::Changed
     };
     Ok((after, change))
+}
+
+/// [`update_within`] for an explicit user change (waits up to [`EXPLICIT_LOCK_TIMEOUT`]).
+pub fn update(paths: &Paths, f: impl FnOnce(&mut State)) -> Result<(State, Change), StateError> {
+    update_within(paths, EXPLICIT_LOCK_TIMEOUT, f)
+}
+
+/// Engine telemetry: remember the last trimmed ID and add to the paused-token
+/// counter in one locked update. Waits at most [`TELEMETRY_LOCK_TIMEOUT`]; the
+/// caller drops the update on any error rather than delaying or failing a hook.
+pub fn record_telemetry(
+    paths: &Paths,
+    last_trimmed_id: Option<&str>,
+    paused_tokens: u64,
+) -> Result<(), StateError> {
+    update_within(paths, TELEMETRY_LOCK_TIMEOUT, |state| {
+        if let Some(id) = last_trimmed_id {
+            state.last_trimmed_id = Some(id.to_string());
+        }
+        state.raw_tokens_passed_while_paused = state
+            .raw_tokens_passed_while_paused
+            .saturating_add(paused_tokens);
+    })
+    .map(drop)
 }
 
 pub fn set_status(paths: &Paths, status: Status) -> Result<Change, StateError> {
@@ -234,6 +289,130 @@ mod tests {
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(names, vec!["state.json".to_string()]);
+        let mut names = names;
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["state.json".to_string(), "state.json.lock".to_string()]
+        );
+    }
+
+    #[test]
+    fn concurrent_updates_never_lose_a_write() {
+        let dir = TempDir::new().unwrap();
+        let p = std::sync::Arc::new(paths(&dir));
+        // Every update is a durable write (fsync of file and directory), so keep the count modest
+        // and the wait generous: this test is about lost updates, not about the 2 s policy.
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                let p = std::sync::Arc::clone(&p);
+                std::thread::spawn(move || {
+                    for _ in 0..10 {
+                        update_within(&p, Duration::from_secs(60), |s| {
+                            s.raw_tokens_passed_while_paused += 1;
+                        })
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(load(&p).raw_tokens_passed_while_paused, 40);
+    }
+
+    /// The scenario the lock exists for: telemetry holding an old copy must not overwrite a user's
+    /// pause. Without the lock the second `update` would read before the first one wrote.
+    #[test]
+    fn telemetry_cannot_overwrite_a_concurrent_pause() {
+        let dir = TempDir::new().unwrap();
+        let p = std::sync::Arc::new(paths(&dir));
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let p2 = std::sync::Arc::clone(&p);
+        let telemetry = std::thread::spawn(move || {
+            update_within(&p2, Duration::from_secs(5), |s| {
+                // We are inside the critical section, holding a snapshot taken before the pause.
+                started_tx.send(()).unwrap();
+                go_rx.recv().unwrap();
+                s.raw_tokens_passed_while_paused += 5;
+            })
+            .unwrap();
+        });
+        started_rx.recv().unwrap();
+        let p3 = std::sync::Arc::clone(&p);
+        let pauser = std::thread::spawn(move || set_status(&p3, Status::Paused).unwrap());
+        std::thread::sleep(Duration::from_millis(100));
+        go_tx.send(()).unwrap();
+        telemetry.join().unwrap();
+        pauser.join().unwrap();
+        let end = load(&p);
+        assert_eq!(end.status, Status::Paused, "the pause survived");
+        assert_eq!(
+            end.raw_tokens_passed_while_paused, 5,
+            "and so did the counter"
+        );
+    }
+
+    #[test]
+    fn a_busy_lock_fails_explicit_changes_and_drops_telemetry_quickly() {
+        let dir = TempDir::new().unwrap();
+        let p = paths(&dir);
+        fs::create_dir_all(&p.agentdiet_home).unwrap();
+        let held = fsutil::lock_exclusive(&p.state_lock_file(), Duration::from_secs(1)).unwrap();
+
+        let started = std::time::Instant::now();
+        let err = record_telemetry(&p, Some("4f9a1b2c"), 10).unwrap_err();
+        assert!(matches!(err, StateError::Busy(_)), "{err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "telemetry waits ~100ms"
+        );
+
+        let err = update_within(&p, Duration::from_millis(50), |s| s.status = Status::Paused)
+            .unwrap_err();
+        assert!(err.to_string().contains("state is busy"), "{err}");
+        assert!(!p.state_file().exists(), "nothing was written while busy");
+
+        drop(held);
+        record_telemetry(&p, Some("4f9a1b2c"), 10).unwrap();
+        let s = load(&p);
+        assert_eq!(s.last_trimmed_id.as_deref(), Some("4f9a1b2c"));
+        assert_eq!(s.raw_tokens_passed_while_paused, 10);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_at_state_json_is_unreadable_not_a_hang() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = TempDir::new().unwrap();
+        let p = paths(&dir);
+        fs::create_dir_all(&p.agentdiet_home).unwrap();
+        let c = std::ffi::CString::new(p.state_file().as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(load(&p));
+        });
+        let loaded = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("load blocked");
+        assert_eq!(loaded, State::default());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_lock_file_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let p = paths(&dir);
+        set_status(&p, Status::Paused).unwrap();
+        let mode = fs::metadata(p.state_lock_file())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
     }
 }

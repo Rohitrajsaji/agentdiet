@@ -231,7 +231,7 @@ fn purge_data(paths: &Paths, report: &mut EjectReport) -> Result<(), InitError> 
         fs::remove_dir_all(&cas).map_err(io_err(&cas))?;
         report.purged.push(cas);
     }
-    let mut files = vec![paths.state_file()];
+    let mut files = vec![paths.state_file(), paths.state_lock_file()];
     let project_data = paths.project_data_dir();
     for name in ["memory.db", "memory.db-wal", "memory.db-shm"] {
         files.push(project_data.join(name));

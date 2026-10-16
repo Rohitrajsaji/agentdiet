@@ -1,9 +1,9 @@
 //! Small filesystem helpers shared by `state.json` and every config write.
 
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
@@ -84,7 +84,12 @@ fn write_and_rename(target: &Path, tmp: &Path, bytes: &[u8], flavor: Flavor) -> 
     {
         fs::set_permissions(tmp, meta.permissions())?;
     }
-    fs::rename(tmp, target)
+    fs::rename(tmp, target)?;
+    // The rename is only a promise until the directory entry is on disk.
+    match target.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => sync_dir(dir),
+        _ => Ok(()),
+    }
 }
 
 /// `OpenOptions` for a write-only file that is `0600` from creation.
@@ -100,19 +105,43 @@ fn private_options() -> OpenOptions {
 }
 
 /// Create `path` and any missing parents, each new directory `0700` from
-/// creation. Directories that already exist keep their mode.
+/// creation. Directories that already exist keep their mode. Every directory
+/// this call creates is made durable: its parent is `fsync`ed, so a crash
+/// cannot leave the new entry unrecorded.
 pub fn create_private_dir_all(path: &Path) -> io::Result<()> {
-    private_dir_builder(true).create(path)
+    // Missing ancestors, nearest-to-root last.
+    let mut missing: Vec<&Path> = Vec::new();
+    let mut cursor = Some(path);
+    while let Some(dir) = cursor {
+        if dir.as_os_str().is_empty() || dir.is_dir() {
+            break;
+        }
+        missing.push(dir);
+        cursor = dir.parent();
+    }
+    for dir in missing.into_iter().rev() {
+        match create_private_dir(dir) {
+            Ok(()) => {}
+            // Lost a race with another process creating the same directory.
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && dir.is_dir() => continue,
+            Err(e) => return Err(e),
+        }
+        if let Some(parent) = dir.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            sync_dir(parent)?;
+        }
+    }
+    Ok(())
 }
 
 /// Create the single directory `path` as `0700`; `AlreadyExists` if it is there.
 pub fn create_private_dir(path: &Path) -> io::Result<()> {
-    private_dir_builder(false).create(path)
+    private_dir_builder().create(path)
 }
 
-fn private_dir_builder(recursive: bool) -> fs::DirBuilder {
+fn private_dir_builder() -> fs::DirBuilder {
     let mut builder = fs::DirBuilder::new();
-    builder.recursive(recursive);
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
@@ -131,25 +160,147 @@ pub fn create_private_empty(path: &Path) -> io::Result<()> {
     private_options().create_new(true).open(path).map(drop)
 }
 
-/// Open an existing **regular file** without following a symlink: a symlink or
-/// any other non-regular file is an error, and on Unix the opened file must be
-/// the very inode that was checked (so a swap in between is caught).
+/// Open an existing **regular file** without following a symlink and without
+/// ever blocking on it.
+///
+/// On Unix the open itself carries `O_NOFOLLOW` (a symlink as the last path
+/// component fails with `ELOOP`) and `O_NONBLOCK` (opening a FIFO whose other
+/// end is absent returns instead of waiting), and the descriptor that came back
+/// is then checked with `fstat`: anything but a regular file is an error. There
+/// is no separate check-then-open step, so there is no window to swap a symlink
+/// or FIFO into. `O_NOFOLLOW` covers the final component only; a symlinked
+/// parent directory is followed (SPEC §3 Tier 3 details).
 pub fn open_regular(path: &Path, write: bool) -> io::Result<fs::File> {
-    let not_regular = || io::Error::new(io::ErrorKind::InvalidInput, "not a regular file");
-    let before = fs::symlink_metadata(path)?;
-    if !before.file_type().is_file() {
-        return Err(not_regular());
-    }
-    let file = OpenOptions::new().read(true).write(write).open(path)?;
+    let mut options = OpenOptions::new();
+    options.read(true).write(write);
+    harden(&mut options);
+    let file = options.open(path)?;
+    require_regular(&file)?;
+    Ok(file)
+}
+
+/// Open (creating `0600` if needed) a lock or database file with the same
+/// hardening as [`open_regular`]. Existing contents and mode are left alone.
+pub fn open_or_create_private(path: &Path) -> io::Result<fs::File> {
+    let mut options = private_options();
+    options.read(true).create(true);
+    harden(&mut options);
+    let file = options.open(path)?;
+    require_regular(&file)?;
+    Ok(file)
+}
+
+fn harden(options: &mut OpenOptions) {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt;
-        let after = file.metadata()?;
-        if before.dev() != after.dev() || before.ino() != after.ino() {
-            return Err(not_regular());
-        }
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
-    Ok(file)
+    #[cfg(not(unix))]
+    let _ = options;
+}
+
+fn require_regular(file: &fs::File) -> io::Result<()> {
+    if file.metadata()?.file_type().is_file() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ))
+    }
+}
+
+/// Read a whole file that may legitimately be a symlink (user-visible config
+/// such as `state.json`, which dotfile managers link), mapping "not found" to
+/// `None`. The link is resolved first and the target opened with
+/// [`open_regular`], so a FIFO or device planted there is an error, never a hang.
+pub fn read_optional_regular(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    let target = resolve_symlink(path);
+    match open_regular(&target, false) {
+        Ok(mut file) => {
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            Ok(Some(bytes))
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// `fsync` a directory, so entries created, renamed or removed in it survive a
+/// crash. Filesystems that cannot sync a directory report `Unsupported` or
+/// `EINVAL`; that is not a failure to persist anything we could do better.
+pub fn sync_dir(dir: &Path) -> io::Result<()> {
+    match fs::File::open(dir).and_then(|d| d.sync_all()) {
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::Unsupported | io::ErrorKind::InvalidInput
+            ) =>
+        {
+            Ok(())
+        }
+        other => other,
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum LockError {
+    #[error("timed out after {waited:?} waiting for the lock on {path}")]
+    Timeout { path: String, waited: Duration },
+    #[error("cannot lock {path}: {source}")]
+    Io {
+        path: String,
+        #[source]
+        source: io::Error,
+    },
+}
+
+/// An exclusive advisory lock, released when dropped (so on every return path,
+/// error and unwind included) or when the process dies.
+///
+/// `flock` locks belong to the open file description, so two guards on the same
+/// path conflict even inside one process; callers must therefore never take the
+/// same lock twice in a call chain (SPEC §3 Tier 3 details).
+#[derive(Debug)]
+pub struct LockGuard {
+    file: fs::File,
+}
+
+impl Drop for LockGuard {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
+/// Take an exclusive lock on the private lock file `path`, creating it `0600`
+/// if needed (the directory must exist) and never deleting it. Waits at most
+/// `timeout`; a zero timeout tries exactly once.
+pub fn lock_exclusive(path: &Path, timeout: Duration) -> Result<LockGuard, LockError> {
+    let io_err = |source| LockError::Io {
+        path: path.display().to_string(),
+        source,
+    };
+    let file = open_or_create_private(path).map_err(io_err)?;
+    let start = Instant::now();
+    let mut pause = Duration::from_micros(200);
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(LockGuard { file }),
+            Err(fs::TryLockError::Error(e)) => return Err(io_err(e)),
+            Err(fs::TryLockError::WouldBlock) => {}
+        }
+        let waited = start.elapsed();
+        if waited >= timeout {
+            return Err(LockError::Timeout {
+                path: path.display().to_string(),
+                waited,
+            });
+        }
+        std::thread::sleep(pause.min(timeout - waited));
+        pause = (pause * 2).min(Duration::from_millis(20));
+    }
 }
 
 fn resolve_symlink(path: &Path) -> PathBuf {
@@ -272,6 +423,150 @@ mod tests {
                 .file_type()
                 .is_symlink()
         );
+    }
+
+    #[cfg(unix)]
+    fn mkfifo(path: &Path) {
+        use std::os::unix::ffi::OsStrExt;
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    }
+
+    /// A FIFO with no writer would block a plain `File::open` forever. Run the open on a thread so
+    /// a regression fails the test instead of hanging it.
+    #[cfg(unix)]
+    fn finishes_within(secs: u64, f: impl FnOnce() + Send + 'static) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            f();
+            let _ = tx.send(());
+        });
+        rx.recv_timeout(Duration::from_secs(secs))
+            .expect("blocked on a FIFO");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opens_never_block_on_a_fifo_or_follow_a_symlink() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let fifo = dir.path().join("fifo");
+        mkfifo(&fifo);
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(dir.path().join("target"), &link).unwrap();
+        fs::write(dir.path().join("target"), "x").unwrap();
+        let (f2, l2) = (fifo.clone(), link.clone());
+        finishes_within(5, move || {
+            assert!(open_regular(&f2, false).is_err());
+            assert!(open_regular(&f2, true).is_err());
+            assert!(open_regular(&l2, false).is_err());
+            assert!(open_or_create_private(&f2).is_err());
+            assert!(open_or_create_private(&l2).is_err());
+            assert!(read_optional_regular(&f2).is_err());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_optional_regular_follows_a_config_symlink_but_not_to_a_fifo() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let real = dir.path().join("real.json");
+        fs::write(&real, "{}").unwrap();
+        let link = dir.path().join("state.json");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert_eq!(read_optional_regular(&link).unwrap().unwrap(), b"{}");
+        assert_eq!(
+            read_optional_regular(&dir.path().join("none")).unwrap(),
+            None
+        );
+
+        let fifo = dir.path().join("fifo");
+        mkfifo(&fifo);
+        let linked_fifo = dir.path().join("linked");
+        std::os::unix::fs::symlink(&fifo, &linked_fifo).unwrap();
+        finishes_within(5, move || {
+            assert!(read_optional_regular(&linked_fifo).is_err())
+        });
+    }
+
+    /// `umask` is process-wide; nextest (CLAUDE.md) runs each test in its own process, and the
+    /// value is restored anyway.
+    #[cfg(unix)]
+    #[test]
+    fn lock_and_db_files_are_0600_from_creation_even_under_umask_0() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let old = unsafe { libc::umask(0) };
+        let lock = lock_exclusive(&dir.path().join("a.lock"), Duration::ZERO);
+        let db = open_or_create_private(&dir.path().join("m.db"));
+        let subdir = create_private_dir_all(&dir.path().join("x/y"));
+        unsafe { libc::umask(old) };
+        drop(lock.unwrap());
+        db.unwrap();
+        subdir.unwrap();
+        assert_eq!(mode(&dir.path().join("a.lock")), 0o600);
+        assert_eq!(mode(&dir.path().join("m.db")), 0o600);
+        assert_eq!(mode(&dir.path().join("x")), 0o700);
+        assert_eq!(mode(&dir.path().join("x/y")), 0o700);
+    }
+
+    #[test]
+    fn lock_is_exclusive_bounded_and_released_on_drop() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("l.lock");
+        let first = lock_exclusive(&path, Duration::from_secs(1)).unwrap();
+
+        // Same process, second open file description: must conflict, and must time out.
+        let started = Instant::now();
+        let err = lock_exclusive(&path, Duration::from_millis(80)).unwrap_err();
+        assert!(matches!(err, LockError::Timeout { .. }), "{err}");
+        assert!(started.elapsed() >= Duration::from_millis(80));
+        assert!(started.elapsed() < Duration::from_secs(2), "bounded wait");
+        assert!(matches!(
+            lock_exclusive(&path, Duration::ZERO),
+            Err(LockError::Timeout { .. })
+        ));
+
+        drop(first);
+        lock_exclusive(&path, Duration::ZERO).expect("free after drop");
+    }
+
+    #[test]
+    fn lock_is_released_when_the_holder_panics() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("p.lock");
+        let p2 = path.clone();
+        let result = std::thread::spawn(move || {
+            let _guard = lock_exclusive(&p2, Duration::from_secs(1)).unwrap();
+            panic!("holder dies");
+        })
+        .join();
+        assert!(result.is_err());
+        lock_exclusive(&path, Duration::ZERO).expect("unlocked by unwind");
+    }
+
+    #[test]
+    fn a_waiting_locker_gets_the_lock_when_the_holder_lets_go() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("w.lock");
+        let held = lock_exclusive(&path, Duration::from_secs(1)).unwrap();
+        let p2 = path.clone();
+        let waiter =
+            std::thread::spawn(move || lock_exclusive(&p2, Duration::from_secs(5)).map(drop));
+        std::thread::sleep(Duration::from_millis(50));
+        drop(held);
+        waiter.join().unwrap().expect("acquired after release");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_creation_syncs_without_error_and_is_idempotent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let deep = dir.path().join("a/b/c");
+        create_private_dir_all(&deep).unwrap();
+        create_private_dir_all(&deep).unwrap();
+        sync_dir(&deep).unwrap();
+        // A file where a directory is needed is an error, not a panic.
+        fs::write(dir.path().join("f"), "x").unwrap();
+        assert!(create_private_dir_all(&dir.path().join("f/g")).is_err());
     }
 
     #[cfg(unix)]
