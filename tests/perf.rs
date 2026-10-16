@@ -42,8 +42,9 @@ const R1_ITERATIONS: usize = 10_000;
 
 /// The `agentdiet` executable under test. `cargo test --release` relinks `target/release/agentdiet`
 /// with dev-dependency features unified, so its bytes can differ from a plain `cargo build
-/// --release --locked`. Set `AGENTDIET_PERF_BIN` to time that exact artifact instead; the report
-/// records the sha256 of whichever binary ran.
+/// --release --locked`. Set `AGENTDIET_PERF_BIN` to time that exact artifact instead (copy it out
+/// of `target/` first, because the test build overwrites `target/release/agentdiet` before it
+/// runs). The report records the sha256 of whichever binary ran.
 fn exe() -> PathBuf {
     match std::env::var_os("AGENTDIET_PERF_BIN") {
         Some(p) => {
