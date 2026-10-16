@@ -487,17 +487,26 @@ Requirements are not redefined to match a measurement.
 
 | Boundary | What it covers | Requirement | Status |
 |---|---|---|---|
-| **B1 — shim end-to-end overhead** | Wall time of spawning a shimmed command until it exits, minus the same command spawned directly (`E2 − E0`), human path, warm | < 0.2 ms | **NOT MET.** Independent baseline (macOS arm64, release, n = 100): median difference 3.70 ms (direct 2.02 ms, shim 5.72 ms; p95 2.56 / 6.17 ms). Reproduce with `tests/perf.rs` (below). |
-| B2 — process launch | Spawning `agentdiet hook noop` minus spawning the direct command (`E1 − E0`) | none; context for B1 | measured by `tests/perf.rs` |
-| B3 — in-process routing | `shim_name` + `resolve_real` on a synthetic `PATH`, up to the `exec` call | none; context for B1 | measured by `tests/perf.rs` |
+| **B1 — shim end-to-end overhead** | Wall time of spawning a shimmed command until it exits, minus the same command spawned directly (`E2 − E0`), human path, warm | < 0.2 ms | **NOT MET.** Median **2.28 ms** (p95 2.38, p99 2.52; n = 1000 iteration-matched pairs). |
+| B2 — process launch | Spawning `agentdiet hook noop` minus spawning the direct command (`E1 − E0`) | none; context for B1 | median 1.16 ms (p95 1.23, p99 1.29; n = 1000) |
+| B3 — in-process routing | `shim_name` + `resolve_real` on a synthetic `PATH`, up to the `exec` call | none; context for B1 | median 0.027 ms (p95 0.030, p99 0.031; n = 10000) |
 | **B4 — Diet Engine fast path** | Pure transform (classify, scrub, candidate, checks) of an input of up to 256 KiB, in process, warm, no I/O | < 10 ms | not measured yet **[3B]** |
 | **B5 — persistence** | Durable Vault write (`fsync` file and directory), GC, ID selection, index and state update; measured with 0, 100 and 1000 entries in the Vault | reported with B4; the engine's end-to-end budget is B4 + B5 + process launch (B2) < 10 ms | not measured yet **[3B]** |
 
+Measured on Darwin 27.0.0 (macOS), Apple M1, aarch64, rustc 1.99.1, release build with
+`lto = true` (binary 1,432,480 bytes, ad-hoc code signature), 1000 samples per arm after 50
+warm-up runs, two consecutive runs agreeing within 0.01 ms on every median. Absolute times for the
+arms: direct `true` 1.11 ms, `agentdiet hook noop` 2.27 ms, shim 3.39 ms (p50). An independent
+earlier measurement (n = 100, different harness) found a median difference of 3.70 ms; the
+harnesses differ, but both are far above 0.2 ms.
+
 Notes:
 
-- B1 is currently dominated by launching a second executable (B2), not by routing (B3). Closing the
-  gap needs a different shim design (for example a tiny dedicated shim, or fewer exec hops) and is
-  a Slice 4 design question. It is not closed by a faster `resolve_real` and not by redefining B1.
+- Routing (B3, 0.03 ms) is about 1% of B1. B1 is consistent with paying for two process images in
+  one pid: starting `agentdiet` (B2, 1.16 ms) and then `exec`ing the real binary, whose own start-up
+  (about 1.1 ms for `true`) the direct arm pays too, so B1 is roughly twice B2. This is an
+  observation from the arms, not a profile. Closing the gap needs a different shim design (for
+  example a tiny dedicated shim, or fewer exec hops) and is a Slice 4 design question. It is not closed by a faster `resolve_real` and not by redefining B1.
 - Durable writes will not be removed to hit B5. Candidates that keep the write-ahead guarantee are
   amortised GC (today `put` scans the vault on every call), no redundant directory creation, and
   doing the transform and the write in one pass. If B5 still misses, it is recorded as a miss.
@@ -514,7 +523,7 @@ Notes:
 |---|---|---|
 | 1 | scaffold, state ledger, Control Center, `init`/`eject` | done |
 | 2 | scrubber, Vault, FTS5 memory | done |
-| 3A | dependency cleanup, this specification, shim benchmark | in progress (build + spec committed; benchmark next) |
+| 3A | dependency cleanup, this specification, shim benchmark | done (B1 requirement still NOT MET) |
 | 3B | Diet Engine library: pipeline, compression, TOON, folding, `show`/ID/memory/state changes marked **[3B]** | specified, not implemented |
 | 4 | hooks **and** PPID shims, wiring the engine to real entry points, shim redesign question (B1) | not started |
 | 5 | MCP tools (`diet_exec` etc.), scanner, `agentdiet top` | not started |

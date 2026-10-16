@@ -36,6 +36,9 @@ this file is the source of truth for *how we build it*.
 - **Performance budgets are requirements, not goals:** shim passthrough < 0.2 ms, Diet Engine
   fast path < 10 ms (see `SPEC.md`). Keep the passthrough path free of heavy init: no DB open,
   no tree-sitter parse, no async runtime.
+  Each budget is measured at the boundary `SPEC.md` §7 defines for it (shim benchmark:
+  `cargo test --release --test perf -- --ignored --nocapture`). Report measured numbers and record
+  misses in `SPEC.md`; never claim an unmeasured pass or move a budget to a boundary it passes.
 - Any dependency beyond the above needs a one-line justification in the commit message and
   must not introduce a runtime requirement.
 
