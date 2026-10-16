@@ -123,11 +123,14 @@ Global state lives in `~/.agentdiet/state.json`:
   - `prompt` (default): emit exactly one line to hook stdout:
     `⏸ AgentDiet is paused. Run 'agentdiet resume' or type '@diet resume' to re-enable.`
   - `auto_resume`: set `status` to `"active"` and emit a one-line notice that it resumed.
+- Binary output is not counted in `raw_tokens_passed_while_paused` (it has no text tokens); every
+  other passed output is counted on its scrubbed bytes.
 - **Paused whisper:** while paused, any output whose estimated token count exceeds **3,000** gets
   that same one-line paused notice appended. This is the one sanctioned exception to "never
   inflate" (§6): the notice is not counted against any saving. Binary output (P3) never gets a
-  notice, because it is passed through byte-identical; oversize output (P3) is scrubbed, exceeds
-  the threshold by definition, and does get it.
+  notice, because it is passed through byte-identical. Oversize output (P3) is scrubbed and gets the
+  notice only if the counter says so: more than 8 MiB does not imply more than 3,000 estimated tokens
+  (8 MiB of spaces counts 0), so the actual counter decides.
 
 ### 2.4 Escape Hatches
 
@@ -226,6 +229,35 @@ wins**.
 Evaluation order: classify (binary / oversize / bypass) → scrub → build candidate → pre-check →
 persist → final check → emit → best-effort index and state update.
 
+**Library contract.** `diet.rs` exposes a pure step (`transform`: classify, scrub, candidate,
+pre-check; no I/O, no clock, no globals) and a persisting step (`finish`: durable Vault write, actual-ID
+rebuild, final check, then best-effort state and index updates). Callers pass the bytes plus:
+
+- the **source**: `Shell { argv, exit }` (output of a command that already ran, `exit` being a code,
+  a signal or unknown), `Read { path, extent }` (`extent` is `Complete` for the whole file, or `Ranged`
+  for a slice, which is never folded and never described as a complete file), or `ModelJson` (a
+  JSON document the caller marks as model-facing, such as an MCP tool result: the only source that
+  may become TOON);
+- the **settings**: mode, paused flag and bypass reason (`None`, `RawNextTurn`, `RepeatedCommand`).
+
+The result is the bytes to emit, what happened (identity, scrubbed only, binary, oversize, paused,
+bypassed, replaced, storage failed) and a bounded list of scrubbed diagnostics. **The library never
+prints**: the caller writes a diagnostic to stderr. Nothing in the engine executes or re-executes a
+command; it is handed output that already exists.
+
+- **Breadcrumb framing.** A replacement body that does not end in a line break gets one (`\r\n` if the
+  body's last line break is CRLF, else `\n`) before the breadcrumb line, and the breadcrumb ends with
+  the same break. Those bytes count in P5. Folded output carries no trailing breadcrumb: its markers
+  are the breadcrumbs.
+- **Panics.** The engine runs inside `catch_unwind`. A panic after scrubbing emits the scrubbed
+  original; a panic in the scrubber emits the raw output (the documented P2 exception). The panic
+  payload is never read or printed by the engine; the diagnostic is the fixed text
+  `agentdiet: internal error; output passed through`. The default panic hook still prints the
+  message and location to stderr, so a binary that runs the engine in a hook (Slice 4) must install a
+  hook that does not echo payloads; a library must not replace a process-global hook. Out-of-memory
+  and process aborts cannot be recovered from in process and are not claimed to be.
+- **Timing.** The pure step and the persisting step are measured separately (§7).
+
 #### Estimated tokens **[3B]**
 
 `estimate_tokens(bytes)` is a deterministic *estimate*, defined only on the bytes:
@@ -263,10 +295,22 @@ breadcrumb. A large number of warnings is never a reason to drop them.
   substitution or newline outside quotes). Anything else is left unchanged. Known miss: compound
   commands such as `cd app && cargo test` are not compressed.
 - **Machine-readable output is never altered:** `--porcelain`, `-z`, `--format`/`--pretty`/
-  `--template`, `--json`, `--message-format=json`, `--output-format` and similar flags; `git diff`,
-  `git log`, `git show`, `git blame` and `git status --short`; and any invocation whose stdout is
-  redirected to a file or piped onward. Detecting a redirected stdout in shim mode is a Slice 4
-  concern **[4]**.
+  `--template`, `--json`, `--message-format` (any value), `--output-format`, `-json` and similar
+  flags; `git diff`, `git log`, `git show`, `git blame` and `git status --short`; and any invocation
+  whose stdout is redirected to a file or piped onward. Detecting a redirected stdout in shim mode is
+  a Slice 4 concern **[4]**: the engine is only ever handed output that goes to the model, and a
+  caller must not hand it output that goes to a file or another program.
+- **Dispatch is by executable and subcommand.** The executable is the basename of `argv[0]`
+  (`python -m pytest` counts as pytest); global options that take a value are skipped by a per-tool
+  table (`git -C dir`, `cargo +nightly`); an unknown option before the subcommand means the shape is
+  not understood and the output is unchanged. A string merely containing `cargo` or `test` somewhere
+  never selects a tool.
+- **Shell strings.** `parse_simple_command` turns a hook's shell string into an argv only when it is
+  exactly one simple command (optionally preceded by `NAME=value` assignments); any metacharacter,
+  expansion or comment outside single quotes makes it `None`.
+- **Protection.** A noise line is removed only if it is further than the mode's context distance from
+  every error/warning/failure line and outside the mode's last lines. Everything within reach of a
+  diagnostic stays, whether or not it looks like noise.
 - A line is removed only if it matches an explicit noise rule for the detected tool. Everything
   else stays. Always kept: error and failure lines with their context lines, the last N lines, the
   exit status, and every line not covered by a noise rule. Unknown tools, unparseable output and
@@ -276,7 +320,7 @@ breadcrumb. A large number of warnings is never a reason to drop them.
 
   | Tool | Noise that may be removed or counted |
   |---|---|
-  | cargo | `Compiling`/`Checking`/`Downloaded`/`Fresh` lines; passing `test … ok` lines collapsed to a count. Failure sections are kept. |
+  | cargo | `Compiling`/`Checking`/`Downloading`/`Downloaded`/`Fresh` lines; passing `test … ok` lines collapsed to a count. Failure sections are kept. |
   | pytest | progress dots and `PASSED` lines. FAILURES/ERRORS sections and the short summary are kept. |
   | go test | `=== RUN`, `--- PASS`, `ok pkg` lines. `--- FAIL` blocks and panics are kept. |
   | npm, pnpm, yarn | progress lines; repeated `warn deprecated` lines grouped with a count. `ERR!` lines are kept. |
@@ -284,7 +328,7 @@ breadcrumb. A large number of warnings is never a reason to drop them.
   | make | `make[N]: Entering/Leaving directory` lines. |
   | docker | layer pull/download progress. Step headers and errors are kept. |
   | ruff | in Ultra-Lean only, the source-snippet lines under a diagnostic; every diagnostic line is kept. |
-  | gh | JSON output is a TOON candidate (below); otherwise unchanged. |
+  | gh | none from a shell invocation: `gh … --json` output is machine-readable and is never altered. Its JSON is eligible for TOON only as a separately marked `ModelJson` input (below). |
 
 - Rules informed by other tools are recorded in code as `// pattern ref: <repo>/<path> (behavior
   only)` and follow the clean-room rules in `CLAUDE.md`.
@@ -314,26 +358,38 @@ lesser form):
 - Strings are quoted per §7.2 and escaped per §7.1 (only those escapes, `\uXXXX` in lowercase hex
   for other control characters); keys per §7.3 (non-ASCII keys are quoted).
 - Numbers: the JSON number's **original text** is emitted only if it is already canonical (§2):
-  plain decimal, no exponent, no leading or trailing zeros, not `-0`, at most 15 significant digits,
-  and zero or within [1e-6, 1e21). Any other number (`1.10`, `1e5`, `-0`, a 17-digit id) makes the
-  whole document decline. Known miss: 64-bit ids above 15 digits keep such documents out of TOON.
-  How the original text is retained while parsing (for example `serde_json`'s
-  `arbitrary_precision`, or raw values) is an implementation choice that must keep existing
-  `state.json` and config handling unchanged and be recorded in the commit that makes it.
-- The JSON reader is strict RFC 8259. Duplicate object keys, a lone surrogate escape, a byte order
-  mark, trailing content, or nesting deeper than 64 make the document decline.
+  plain decimal, no exponent, no leading zeros, no unnecessary trailing *fractional* zeros (`10` and
+  `100` are fine, `1.50` and `1.0` are not), not `-0`, at most 15 significant digits, and zero or
+  within [1e-6, 1e21). Any other number (`1.10`, `1e5`, `-0`, a 17-digit id) makes the whole document
+  decline. Known miss: 64-bit ids above 15 digits keep such documents out of TOON. The original text
+  is retained with `serde_json`'s additive `raw_value` feature (`RawValue`): unlike
+  `arbitrary_precision` it does not change how `Number`/`Value` behave for `state.json` and the
+  assistants' configs, which are parsed and re-serialised elsewhere.
+- **Source.** A shell invocation's stdout is never converted, `gh … --json` included (machine-readable
+  output is never altered, above). A document becomes a TOON candidate only as `ModelJson`.
+- The JSON reader is strict RFC 8259 (`serde_json`, with a visitor that records each object's keys in
+  order and rejects a repeated key). Duplicate object keys, a lone surrogate escape, a byte order
+  mark, trailing content, or nesting deeper than 64 make the document decline. Re-parsing nested
+  values costs at most 64 passes over the input.
 - **Conformance evidence** is the official MIT-licensed fixtures at the pinned revision (§9),
   vendored with their copyright notice in `THIRD_PARTY_NOTICES`: for every `encode` fixture the
   encoder must either reproduce the expected output byte for byte or decline, and every fixture
-  inside the supported subset must be reproduced. A test-only decoder is used for round trips only
-  after it passes the official `decode` fixtures; a decoder that merely mirrors the encoder is not
-  evidence.
+  inside the supported subset must be reproduced, and the test fails if the supported set shrinks
+  below a recorded count (declining everything must not pass). No decoder is written: the evidence is
+  the official expected outputs plus targeted independent checks of the encoder's output.
 
 #### Signature folding **[3B]**
 
-- Applies to `Read` output of more than 300 lines, with the language taken from the file extension:
-  Rust, TypeScript/TSX, JavaScript and Python, via statically linked tree-sitter grammars. Input
-  that is not valid UTF-8, has an unknown extension, or parses with any error is left unchanged.
+- Applies to a `Read` whose `extent` is `Complete`, whose scrubbed text has more than 300 lines, with
+  the language taken from the file extension: Rust, TypeScript/TSX, JavaScript and Python, via
+  statically linked tree-sitter grammars. Input that is not valid UTF-8, has an unknown extension, or
+  parses with any error is left unchanged. A `Ranged` read is never folded: its line numbers would not
+  be the file's, and it is not described as a complete file. The input is the file's own bytes; a
+  tool's decorated rendering (such as `cat -n` line prefixes) must be converted to file bytes by the
+  hook layer **[4]** or not folded at all.
+- The parse runs on the **scrubbed** text, so every line number is already a line of the Vault copy.
+  The mode's token minimum does not apply to folding; the 300-line rule, the body-length rule and the
+  saving requirement do.
 - Only function and method **bodies** are replaced. Signatures, attributes, doc comments,
   docstrings, classes, impls, traits, types, imports and constants stay, and the result keeps valid
   indentation.
@@ -361,9 +417,8 @@ lesser form):
    `agentdiet top`). `show` on an expired ID reports "expired" rather than "not found".
 4. **IDs.** An ID that AgentDiet **emits** (breadcrumbs, fold markers, `state.json`, ambiguity
    candidates) is the shortest prefix of the sha256 that is unique among every live entry **and
-   every tombstone**, but never shorter than **8** hex characters; the full 64 hex if nothing
-   shorter is unique. It is written `#4f9a1b2c`. **[3B]** (Today the minimum is 4, in
-   `cas::MIN_ID_LEN`.) Input IDs are resolved by unique prefix match against the CAS filenames and
+   every tombstone**, but never shorter than **8** hex characters (`cas::MIN_EMIT_ID_LEN`); the full
+   64 hex if nothing shorter is unique. It is written `#4f9a1b2c`. Input IDs are resolved by unique prefix match against the CAS filenames and
    may be as short as 4 hex; an ambiguous prefix is an error that lists the candidates. Uniqueness
    is a property of the vault at emission time: an older ID can later become ambiguous, and then
    reports the ambiguity rather than returning a different entry.
@@ -390,7 +445,7 @@ lesser form):
   of the same content removes the tombstone. Tombstones are kept until the vault is purged: they
   are the vault's memory of which IDs were once issued.
 - **An old ID never resolves to an unrelated entry.** The short ID shown for an entry is the
-  shortest prefix (at least 4 hex today; at least 8 after **[3B]**, item 4) that no *other* entry shares, counting both live entries and
+  shortest prefix (at least 8 hex, item 4) that no *other* entry shares, counting both live entries and
   tombstones. Resolving an input prefix looks at live entries **and** tombstones:
   - one match, live: that entry;
   - one match, tombstone: `expired`;
@@ -416,18 +471,52 @@ lesser form):
   better) with title weighted above body. Query tokens are quoted as FTS5 phrases and ANDed, so
   user text can never produce an FTS syntax error.
 - **memory.db rows are events, not content.** The same output produced by different commands or
-  sessions is separate rows, so retrieval keeps its provenance; a row is a duplicate only if its
-  `cas_sha`, kind, scrubbed title and session all match, which a repeated identical run in one
-  session is. This is enforced by a unique index plus `INSERT OR IGNORE` in a single statement, not
-  by a read-then-insert check, so concurrent inserts cannot duplicate. **[3B]** (schema v2)
-- **`state.json` updates are serialised.** Every read-modify-write takes a bounded advisory lock
-  (an exclusive lock on a sibling lock file, waiting at most about 2 s). Engine telemetry that cannot
-  take the lock is dropped; an explicit `pause`/`resume`/mode change that cannot take it fails with
-  an error. Atomic rename alone is not enough: it makes a write whole, not the
-  read-modify-write exclusive. Required before any hook or engine path writes state. **[3B]**
-- **Persistence order and durability.** A write goes to a temp file, is `fsync`ed, and is renamed
-  into place; the directory `fsync` after the rename is **[3B]**. Reads verify the sha256 and report
-  a corrupt entry distinctly (P6) **[3B]**.
+  sessions is separate rows, so retrieval keeps its provenance. A row is a duplicate only if its
+  kind, scrubbed title, scrubbed body, `cas_sha` and session all match (a repeated identical run in
+  one session is one). The body is part of the key so that a different summary (for example another
+  exit status over the same output) is not discarded. The key is a `NOT NULL` column holding the
+  sha256 of those fields, each length-prefixed, an absent `cas_sha`/session counting as the empty
+  string, so a `NULL` can never defeat uniqueness. It is enforced by a unique index plus
+  `INSERT OR IGNORE` in one statement, not by a read-then-insert check, so concurrent inserts cannot
+  duplicate (schema v2). The migration runs in an `IMMEDIATE` transaction that re-reads
+  `user_version` first (concurrent first opens are safe), deletes existing duplicates keeping the
+  lowest `id` and fills the key.
+- **memory.db metadata.** `cas_sha`, when given, must be 64 lowercase hex; `session` is free text and
+  therefore only accepted as scrubbed text of at most 256 bytes. The file is created `0600` before
+  SQLite opens it (SQLite gives `-wal` and `-shm` the main file's mode), the project `.agentdiet/`
+  directory `0700`, and it is opened with `SQLITE_OPEN_NOFOLLOW`. Error values never contain row text.
+- **`state.json` updates are serialised.** Every read-modify-write holds an exclusive advisory lock
+  (`flock` on the private sibling file `state.json.lock`, created `0600`, never deleted) from the read
+  to the rename. An explicit `pause`/`resume`/mode change waits at most **2 s** and then fails with a
+  "state is busy" error; engine telemetry (`last_trimmed_id`, the paused-token counter) waits at most
+  **100 ms** and is dropped when it cannot take the lock, so a hook is never held up for long. The
+  lock is released on every path, including errors and panics (it is the open file's lifetime), and
+  a crashed holder releases it. Atomic rename alone is not enough: it makes a write whole, not the
+  read-modify-write exclusive. `load` is lock-free (it only ever sees a whole file) and opens the file
+  without blocking, so a FIFO planted at `state.json` is reported as unreadable, not waited on.
+- **The Vault is serialised too.** `put`, `gc`, `resolve` and `read` each hold an exclusive lock on
+  `cas/.lock` (waiting at most 2 s, then `Busy`; the engine treats `Busy` as a failed Vault write and
+  emits the scrubbed original). `put` holds the lock from the write through GC and ID selection, so a
+  concurrent GC can never delete content that was just re-put, and the breadcrumb for it is valid the
+  moment `put` returns. Two locks are never held at once (the CAS lock is released before `state.json`
+  or `memory.db` is touched), so there is no lock ordering to get wrong, and no function takes its own
+  lock twice. **Bound of the guarantee:** an entry is kept for 7 days after its last `put`, measured
+  by each process's wall clock; after that GC may remove it, and a process whose clock runs more than
+  a TTL ahead can remove it early. A breadcrumb is therefore valid for 7 days from the last time that
+  exact content was stored.
+- **Persistence order and durability.** A write goes to a temp file, is `fsync`ed, renamed into
+  place, and the containing directory is `fsync`ed. A directory created for the occasion is also
+  made durable (its parent is `fsync`ed). GC creates tombstones, `fsync`s the directory, removes the
+  logs and `fsync`s again, so an issued ID is never forgotten across a crash. On macOS the standard
+  library's `sync_all` is `F_FULLFSYNC`; that cost is reported, not avoided (§7). Reads verify the
+  sha256 before returning any byte, and a mismatch is the distinct `Corrupt` error, which carries no
+  content (P6).
+- **Opening an entry.** Vault entries, `memory.db` and lock files are opened with `O_NOFOLLOW` and
+  `O_NONBLOCK` and the opened descriptor must be a regular file, so a symlink or a FIFO swapped in
+  after any earlier check cannot be followed or waited on. `O_NOFOLLOW` covers the final path
+  component only: a symlinked *parent* directory (for example `~/.agentdiet` itself) is followed, and
+  anyone who can replace that directory already owns the user's account. Config files that `init`
+  edits keep their separate, intentional rule of writing through a symlink to its target.
 
 ### 3b. Interfaces & Tools (outside the hot path)
 
