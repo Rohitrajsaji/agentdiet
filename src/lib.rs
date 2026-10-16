@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 pub mod cas;
 pub mod cli;
 pub mod control;
+pub mod diet;
 pub mod fsutil;
 pub mod init;
 pub mod mcp;

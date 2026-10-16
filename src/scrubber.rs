@@ -82,6 +82,11 @@ fn plausible_secret_value(h: &[u8], start: usize, end: usize) -> bool {
     !value.starts_with(b"[REDACTED:") && value.len() >= 6 && !value.iter().all(u8::is_ascii_digit)
 }
 
+/// URL credentials: skip values an earlier rule already redacted.
+fn plausible_url_secret(h: &[u8], start: usize, end: usize) -> bool {
+    !h[start..end].starts_with(b"[REDACTED:")
+}
+
 fn rule(id: &'static str, pattern: &str, group: usize, accept: Accept) -> Rule {
     Rule {
         id,
@@ -142,6 +147,23 @@ static RULES: LazyLock<Vec<Rule>> = LazyLock::new(|| {
             r"(?-u)(?i:\bBearer)[ \t]+([A-Za-z0-9._~+/-]{16,}=*)",
             1,
             always,
+        ),
+        // original: credentials embedded in a URL, the shape `git remote -v` and `git clone`
+        // print. `scheme://user:PASSWORD@host`: only the password is redacted, so the user name
+        // and host stay readable.
+        rule(
+            "url-password",
+            r"(?-u)(?i:\b[a-z][a-z0-9+.-]{1,15})://[^\s/@:]*:([^\s/@]+)@",
+            1,
+            plausible_url_secret,
+        ),
+        // original: a token used as the user name (`https://ghp_...@github.com`). Short user
+        // names such as `git` are not secrets, so only 20+ token-looking characters count.
+        rule(
+            "url-token",
+            r"(?-u)(?i:\b[a-z][a-z0-9+.-]{1,15})://([A-Za-z0-9_.~%-]{20,})@",
+            1,
+            plausible_url_secret,
         ),
         // original: `.env`-style assignments to secret-looking names. Secretlint's
         // no-dotenv rule only flags the filename, so nothing is ported here.
@@ -333,6 +355,39 @@ mod tests {
         assert!(bytes.starts_with(&[0xff, 0xfe, b'\n']));
         assert!(bytes.ends_with(b"\n\x80tail"));
         assert_eq!(out.redactions(), 1);
+    }
+
+    #[test]
+    fn url_credentials_are_redacted_but_names_and_hosts_stay() {
+        let pw = ["gh", "p_"].concat() + &"a1B2c3D4e5".repeat(4);
+        let cases = [
+            (
+                format!("git clone https://user:{pw}@github.com/o/r.git"),
+                "git clone https://user:[REDACTED:url-password]@github.com/o/r.git",
+            ),
+            (
+                format!("origin\thttps://{pw}@github.com/o/r.git (fetch)"),
+                "origin\thttps://[REDACTED:url-token]@github.com/o/r.git (fetch)",
+            ),
+            (
+                "postgres://app:s3cr3t-Pass@db:5432/app".to_string(),
+                "postgres://app:[REDACTED:url-password]@db:5432/app",
+            ),
+        ];
+        for (raw, want) in cases {
+            let out = scrub(raw.as_bytes());
+            assert_eq!(text(&out), want);
+            assert_eq!(out.redactions(), 1, "{raw}");
+        }
+        // Not credentials: ssh user, no userinfo, a port, an email-like path.
+        for clean in [
+            "ssh://git@github.com/o/r.git",
+            "https://github.com/o/r.git",
+            "http://localhost:8080/path",
+            "see https://example.com/a@b and mailto:me@example.com",
+        ] {
+            assert_eq!(scrub(clean.as_bytes()).redactions(), 0, "{clean}");
+        }
     }
 
     #[test]

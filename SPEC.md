@@ -437,7 +437,10 @@ lesser form):
 #### Tier 3 details (Slice 2)
 
 - **Redaction:** a secret span is replaced by `[REDACTED:<rule-id>]`; surrounding text (e.g. the
-  variable name) is kept. PEM private-key blocks are replaced whole.
+  variable name) is kept. PEM private-key blocks are replaced whole. Credentials embedded in a URL
+  (`scheme://user:PASSWORD@host`, or a 20+ character token used as the user name) are redacted
+  (`url-password`, `url-token`; original rules), which is what makes recorded `git clone` and
+  `git remote -v` lines safe to store (P1). A short user name such as `git@` is not a secret.
 - **CAS files** are `<64hex>.log` (dir mode 0700, files 0600). Writing identical content again
   refreshes the file's mtime instead of rewriting it; the 7-day TTL counts from the last write.
 - **GC** runs on `put` and on `show`. Deleting an expired file leaves a zero-byte
@@ -627,7 +630,7 @@ Notes:
 | 1 | scaffold, state ledger, Control Center, `init`/`eject` | done |
 | 2 | scrubber, Vault, FTS5 memory | done |
 | 3A | dependency cleanup, this specification, shim benchmark | done (B1 requirement still NOT MET) |
-| 3B | Diet Engine library: pipeline, compression, TOON, folding, `show`/ID/memory/state changes marked **[3B]** | specified, not implemented |
+| 3B | Diet Engine library: pipeline, compression, TOON, folding, `show`/ID/memory/state changes marked **[3B]** | in progress: storage prerequisites and the `diet.rs` pipeline (library only, no transforms yet) are implemented; shell compression, TOON and folding are not |
 | 4 | hooks **and** PPID shims, wiring the engine to real entry points, shim redesign question (B1) | not started |
 | 5 | MCP tools (`diet_exec` etc.), scanner, `agentdiet top` | not started |
 
