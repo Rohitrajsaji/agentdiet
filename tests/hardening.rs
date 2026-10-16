@@ -218,12 +218,15 @@ fn vault_is_private_under_a_permissive_umask() {
     let entries = tree(&cas_dir);
     let names: Vec<String> = entries
         .iter()
-        .map(|p| p.extension().unwrap().to_string_lossy().into_owned())
+        .filter_map(|p| p.extension())
+        .map(|e| e.to_string_lossy().into_owned())
         .collect();
     assert!(
         names.contains(&"log".to_string()) && names.contains(&"expired".to_string()),
         "{names:?}"
     );
+    // The vault's lock file is private too (it has no extension, hence not in `names`).
+    assert!(cas_dir.join(".lock").is_file());
     assert_eq!(mode(&cas_dir), 0o700);
     assert_eq!(mode(&env.paths.agentdiet_home), 0o700);
     for path in entries {

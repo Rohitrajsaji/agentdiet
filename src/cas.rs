@@ -15,6 +15,14 @@
 //! Entries are plain regular files. Symlinks and other non-regular files in the
 //! directory are never read, written or followed; see [`fsutil::open_regular`].
 //!
+//! Concurrency: `put`, `gc`, `resolve` and `read` each take the exclusive vault
+//! lock (`.lock` in the vault directory, bounded wait, see [`Cas::lock_timeout`])
+//! for their whole duration, and the private helpers assume it is held, so a lock
+//! is never taken twice and a GC can never delete content a `put` is refreshing.
+//!
+//! Integrity: `read` hashes the bytes before returning any of them; a mismatch
+//! is [`CasError::Corrupt`] and carries no content.
+//!
 //! Every operation takes `now` explicitly so expiry is deterministic in tests.
 
 use std::collections::BTreeMap;
@@ -30,8 +38,15 @@ use crate::scrubber::Scrubbed;
 /// How long an entry is kept after its last write.
 pub const DEFAULT_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
-/// Shortest ID shown to the user (`#4f9a`).
-pub const MIN_ID_LEN: usize = 4;
+/// Shortest ID accepted as input (`#4f9a`).
+pub const MIN_INPUT_ID_LEN: usize = 4;
+
+/// Shortest ID AgentDiet emits (`#4f9a1b2c`): breadcrumbs, fold markers, `state.json` and
+/// ambiguity candidates. Longer when a shorter one is not unique among every entry ever issued.
+pub const MIN_EMIT_ID_LEN: usize = 8;
+
+/// How long `put`/`gc`/`resolve`/`read` wait for the vault lock before giving up.
+pub const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 
 const SHA_LEN: usize = 64;
 
@@ -46,8 +61,14 @@ pub enum CasError {
         prefix: String,
         candidates: Vec<Candidate>,
     },
-    #[error("invalid ID {0:?}: expected at least {MIN_ID_LEN} hex characters, e.g. #4f9a")]
+    #[error("invalid ID {0:?}: expected at least {MIN_INPUT_ID_LEN} hex characters, e.g. #4f9a")]
     InvalidId(String),
+    #[error(
+        "vault entry #{0} is corrupt: its bytes no longer match its hash, so nothing was returned"
+    )]
+    Corrupt(String),
+    #[error("the vault is busy: another agentdiet process held its lock for {0:?}")]
+    Busy(Duration),
     #[error(
         "invalid line range {0:?}: expected <start>..<end>, 1-based and inclusive, start <= end"
     )]
@@ -59,7 +80,7 @@ pub enum CasError {
 /// One entry an ambiguous prefix could mean.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
-    /// Shortest prefix (at least [`MIN_ID_LEN`]) that tells it apart from every other entry.
+    /// Shortest prefix (at least [`MIN_EMIT_ID_LEN`]) that tells it apart from every other entry.
     pub id: String,
     /// Only a tombstone remains; the content is gone.
     pub expired: bool,
@@ -80,7 +101,7 @@ impl fmt::Display for Candidate {
 pub struct PutResult {
     /// Full 64-hex sha256 of the scrubbed output.
     pub sha: String,
-    /// Shortest unique prefix, at least [`MIN_ID_LEN`] chars (shown as `#4f9a`).
+    /// Shortest unique prefix, at least [`MIN_EMIT_ID_LEN`] chars (shown as `#4f9a1b2c`).
     pub short_id: String,
 }
 
@@ -123,7 +144,10 @@ pub fn normalize_id(input: &str) -> Result<String, CasError> {
         .strip_prefix('#')
         .unwrap_or(trimmed)
         .to_ascii_lowercase();
-    if id.len() < MIN_ID_LEN || id.len() > SHA_LEN || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if id.len() < MIN_INPUT_ID_LEN
+        || id.len() > SHA_LEN
+        || !id.bytes().all(|b| b.is_ascii_hexdigit())
+    {
         return Err(CasError::InvalidId(input.to_string()));
     }
     Ok(id)
@@ -147,6 +171,7 @@ struct Entry {
 pub struct Cas {
     dir: PathBuf,
     ttl: Duration,
+    lock_timeout: Duration,
 }
 
 impl Cas {
@@ -155,7 +180,43 @@ impl Cas {
     }
 
     pub fn with_ttl(dir: PathBuf, ttl: Duration) -> Self {
-        Self { dir, ttl }
+        Self {
+            dir,
+            ttl,
+            lock_timeout: DEFAULT_LOCK_TIMEOUT,
+        }
+    }
+
+    /// Bound the wait for the vault lock (default [`DEFAULT_LOCK_TIMEOUT`]).
+    pub fn lock_timeout(mut self, timeout: Duration) -> Self {
+        self.lock_timeout = timeout;
+        self
+    }
+
+    fn lock_path(&self) -> PathBuf {
+        self.dir.join(".lock")
+    }
+
+    /// Take the vault lock, creating the (private) directory first.
+    fn lock(&self) -> Result<fsutil::LockGuard, CasError> {
+        fsutil::create_private_dir_all(&self.dir)?;
+        self.acquire()
+    }
+
+    /// Take the vault lock only if the vault exists; a read-only caller has nothing to wait for
+    /// (and nothing to create) in a vault that was never written.
+    fn lock_existing(&self) -> Result<Option<fsutil::LockGuard>, CasError> {
+        if !self.dir.is_dir() {
+            return Ok(None);
+        }
+        self.acquire().map(Some)
+    }
+
+    fn acquire(&self) -> Result<fsutil::LockGuard, CasError> {
+        fsutil::lock_exclusive(&self.lock_path(), self.lock_timeout).map_err(|e| match e {
+            fsutil::LockError::Timeout { waited, .. } => CasError::Busy(waited),
+            fsutil::LockError::Io { source, .. } => CasError::Io(source),
+        })
     }
 
     fn log_path(&self, sha: &str) -> PathBuf {
@@ -167,8 +228,14 @@ impl Cas {
     }
 
     /// Store `data`, refresh its TTL, run GC, and return its IDs.
+    ///
+    /// Durable before it returns: the entry's bytes, and the directory entries
+    /// that name it, are on disk. The whole call holds the vault lock, so no
+    /// concurrent GC can remove the entry between the write and the ID being
+    /// handed out. The entry stays until the TTL has passed since this call
+    /// (by each process's clock; see the SPEC for the bound).
     pub fn put(&self, data: &Scrubbed, now: SystemTime) -> Result<PutResult, CasError> {
-        fsutil::create_private_dir_all(&self.dir)?;
+        let _guard = self.lock()?;
         let sha = fsutil::sha256_hex(data.as_bytes());
         let path = self.log_path(&sha);
         let file = match intact_entry(&path, &sha) {
@@ -178,11 +245,13 @@ impl Cas {
                 fsutil::open_regular(&path, true)?
             }
         };
-        // Dedupe hit or fresh write: the entry's 7 days restart now.
+        // Dedupe hit or fresh write: the entry's 7 days restart now. (A refresh of an existing
+        // entry's timestamp is not fsynced: a crash can only make it expire earlier than the new
+        // time, never lose the content.)
         file.set_modified(now)?;
         remove_if_present(&self.tombstone_path(&sha))?;
 
-        self.gc(now)?;
+        self.gc_locked(now)?;
         let known = self.known_shas()?;
         Ok(PutResult {
             short_id: shortest_unique_prefix(&sha, &known),
@@ -192,15 +261,35 @@ impl Cas {
 
     /// Delete entries older than the TTL, leaving tombstones. Returns how many.
     pub fn gc(&self, now: SystemTime) -> Result<usize, CasError> {
-        let mut removed = 0;
-        for entry in self.scan()? {
-            if entry.kind == Kind::Live && self.is_stale(entry.modified, now) {
-                fsutil::create_private_empty(&self.tombstone_path(&entry.sha))?;
-                remove_if_present(&self.log_path(&entry.sha))?;
-                removed += 1;
-            }
+        let Some(_guard) = self.lock_existing()? else {
+            return Ok(0);
+        };
+        self.gc_locked(now)
+    }
+
+    /// GC with the vault lock already held by the caller.
+    ///
+    /// Tombstones are created and made durable *before* any log is removed, so a
+    /// crash can never leave an issued ID that is neither a log nor a tombstone.
+    fn gc_locked(&self, now: SystemTime) -> Result<usize, CasError> {
+        let stale: Vec<String> = self
+            .scan()?
+            .into_iter()
+            .filter(|e| e.kind == Kind::Live && self.is_stale(e.modified, now))
+            .map(|e| e.sha)
+            .collect();
+        if stale.is_empty() {
+            return Ok(0);
         }
-        Ok(removed)
+        for sha in &stale {
+            fsutil::create_private_empty(&self.tombstone_path(sha))?;
+        }
+        fsutil::sync_dir(&self.dir)?;
+        for sha in &stale {
+            remove_if_present(&self.log_path(sha))?;
+        }
+        fsutil::sync_dir(&self.dir)?;
+        Ok(stale.len())
     }
 
     /// Resolve a (short) ID to the full sha of a live entry.
@@ -209,7 +298,15 @@ impl Cas {
     /// live one is ambiguous, never silently the live one.
     pub fn resolve(&self, input: &str, now: SystemTime) -> Result<String, CasError> {
         let prefix = normalize_id(input)?;
-        self.gc(now)?;
+        let Some(_guard) = self.lock_existing()? else {
+            return Err(CasError::NotFound(prefix));
+        };
+        self.gc_locked(now)?;
+        self.resolve_locked(prefix)
+    }
+
+    /// Prefix resolution with the vault lock held and GC already run.
+    fn resolve_locked(&self, prefix: String) -> Result<String, CasError> {
         let entries = self.scan()?;
 
         let matches: Vec<&Entry> = entries
@@ -238,21 +335,32 @@ impl Cas {
     }
 
     /// The raw (scrubbed) bytes of an entry, optionally sliced by line.
+    ///
+    /// The bytes are hashed first: an entry that no longer matches its name is
+    /// [`CasError::Corrupt`] and nothing from it is returned, not even a slice.
     pub fn read(
         &self,
         input: &str,
         range: Option<LineRange>,
         now: SystemTime,
     ) -> Result<Vec<u8>, CasError> {
-        let sha = self.resolve(input, now)?;
+        let prefix = normalize_id(input)?;
+        let Some(_guard) = self.lock_existing()? else {
+            return Err(CasError::NotFound(prefix));
+        };
+        self.gc_locked(now)?;
+        let sha = self.resolve_locked(prefix)?;
         let bytes = match read_entry(&self.log_path(&sha)) {
             Ok(bytes) => bytes,
-            // Removed by a concurrent GC between resolve and read.
+            // Removed behind our back (not by a GC: that needs the lock we hold).
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                return Err(CasError::Expired(sha[..MIN_ID_LEN].to_string()));
+                return Err(CasError::Expired(sha[..MIN_EMIT_ID_LEN].to_string()));
             }
             Err(e) => return Err(e.into()),
         };
+        if fsutil::sha256_hex(&bytes) != sha {
+            return Err(CasError::Corrupt(sha[..MIN_EMIT_ID_LEN].to_string()));
+        }
         Ok(match range {
             Some(range) => range.slice(&bytes),
             None => bytes,
@@ -341,9 +449,10 @@ fn is_sha(s: &str) -> bool {
     s.len() == SHA_LEN && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// Shortest prefix of `sha` (at least [`MIN_ID_LEN`]) shared with no other sha.
+/// Shortest prefix of `sha` (at least [`MIN_EMIT_ID_LEN`]) shared with no other sha, live or
+/// expired: the ID AgentDiet emits for it.
 pub fn shortest_unique_prefix(sha: &str, all: &[String]) -> String {
-    let mut len = MIN_ID_LEN;
+    let mut len = MIN_EMIT_ID_LEN;
     while len < sha.len() && all.iter().any(|o| o != sha && o.starts_with(&sha[..len])) {
         len += 1;
     }
@@ -415,12 +524,17 @@ mod tests {
 
     #[test]
     fn shortest_prefix_grows_until_unique() {
-        let a = format!("4f9a{}", "0".repeat(60));
-        let b = format!("4f9a1{}", "0".repeat(59));
+        // Never shorter than the 8-hex emit minimum, however unique a shorter one would be.
+        let a = format!("4f9a1b2c0{}", "0".repeat(55));
+        let b = format!("4f9a1b2c1{}", "0".repeat(55));
         let c = format!("beef{}", "0".repeat(60));
         let all = vec![a.clone(), b.clone(), c.clone()];
-        assert_eq!(shortest_unique_prefix(&c, &all), "beef");
-        assert_eq!(shortest_unique_prefix(&b, &all), "4f9a1");
-        assert_eq!(shortest_unique_prefix(&a, &all), "4f9a0");
+        assert_eq!(shortest_unique_prefix(&c, &all), "beef0000");
+        assert_eq!(shortest_unique_prefix(&b, &all), "4f9a1b2c1");
+        assert_eq!(shortest_unique_prefix(&a, &all), "4f9a1b2c0");
+        // Two entries identical for 70 chars are impossible; identical for 63 needs the full hash.
+        let x = format!("{}0", "a".repeat(63));
+        let y = format!("{}1", "a".repeat(63));
+        assert_eq!(shortest_unique_prefix(&x, &[x.clone(), y]), x);
     }
 }

@@ -503,7 +503,8 @@ lesser form):
   lock twice. **Bound of the guarantee:** an entry is kept for 7 days after its last `put`, measured
   by each process's wall clock; after that GC may remove it, and a process whose clock runs more than
   a TTL ahead can remove it early. A breadcrumb is therefore valid for 7 days from the last time that
-  exact content was stored.
+  exact content was stored. (When identical content is stored again, the refreshed timestamp is not
+  `fsync`ed: a crash right then can only leave the older, earlier expiry, never lose the content.)
 - **Persistence order and durability.** A write goes to a temp file, is `fsync`ed, renamed into
   place, and the containing directory is `fsync`ed. A directory created for the occasion is also
   made durable (its parent is `fsync`ed). GC creates tombstones, `fsync`s the directory, removes the

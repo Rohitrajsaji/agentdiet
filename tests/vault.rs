@@ -174,22 +174,25 @@ fn prefix_recovery_and_ambiguity() {
     fs::write(dir.join(format!("{}.log", "AB".repeat(32))), "x").unwrap();
     assert_eq!(cas.read(&target.short_id, None, now).unwrap(), b"target\n");
 
-    // Two entries sharing a prefix -> ambiguous, listing both.
-    let a = format!("ab12{}", "0".repeat(60));
-    let b = format!("ab12{}", "f".repeat(60));
-    fs::write(dir.join(format!("{a}.log")), "a").unwrap();
-    fs::write(dir.join(format!("{b}.log")), "b").unwrap();
+    // Two entries sharing a prefix -> ambiguous, listing both by their (8+ hex) emitted IDs.
+    let (a, a_content) = plant_live_with_prefix(&dir, "ab12", "a");
+    let (b, _) = plant_live_with_prefix(&dir, "ab12", "b");
+    let mut want = [a[..8].to_string(), b[..8].to_string()];
+    want.sort();
     match cas.read("#ab12", None, now) {
         Err(CasError::Ambiguous { candidates, .. }) => {
             let ids: Vec<&str> = candidates.iter().map(|c| c.id.as_str()).collect();
-            assert_eq!(ids, ["ab120", "ab12f"]);
+            assert_eq!(ids, want);
         }
         other => panic!("expected Ambiguous, got {other:?}"),
     }
     let msg = cas.read("#ab12", None, now).unwrap_err().to_string();
-    assert!(msg.contains("#ab120") && msg.contains("#ab12f"), "{msg}");
+    assert!(
+        msg.contains(&format!("#{}", want[0])) && msg.contains(&format!("#{}", want[1])),
+        "{msg}"
+    );
     // A longer prefix disambiguates.
-    assert_eq!(cas.read("#ab120", None, now).unwrap(), b"a");
+    assert_eq!(cas.read(&a[..8], None, now).unwrap(), a_content.as_bytes());
 
     assert!(matches!(
         cas.read("#0000", None, now),
@@ -379,6 +382,21 @@ fn plant_live(dir: &Path, sha: &str, content: &str) {
     fs::write(dir.join(format!("{sha}.log")), content).unwrap();
 }
 
+/// Plant a live entry whose bytes really hash to a name starting with `prefix` (reads verify the
+/// hash now, so a made-up name with arbitrary content would be reported as corrupt). Searching a
+/// 4-hex prefix takes ~65k hashes. Returns `(sha, content)`.
+fn plant_live_with_prefix(dir: &Path, prefix: &str, salt: &str) -> (String, String) {
+    for i in 0u64.. {
+        let content = format!("{salt} #{i}\n");
+        let sha = agentdiet::fsutil::sha256_hex(content.as_bytes());
+        if sha.starts_with(prefix) {
+            plant_live(dir, &sha, &content);
+            return (sha, content);
+        }
+    }
+    unreachable!()
+}
+
 fn plant_tombstone(dir: &Path, sha: &str) {
     fs::create_dir_all(dir).unwrap();
     fs::write(dir.join(format!("{sha}.expired")), "").unwrap();
@@ -402,30 +420,32 @@ fn an_expired_id_never_returns_a_different_live_entry() {
     let cas = Cas::new(dir.clone());
     let now = SystemTime::now();
     let old = sha_like("abcd", '1');
-    let live = sha_like("abcd", '2');
     plant_tombstone(&dir, &old);
-    plant_live(&dir, &live, "unrelated live output\n");
+    let (live, live_content) = plant_live_with_prefix(&dir, "abcd", "unrelated live output");
 
     let (prefix, candidates) = ambiguity(cas.read("abcd", None, now).unwrap_err());
     assert_eq!(prefix, "abcd");
-    assert_eq!(
-        candidates,
-        [("abcd1".to_string(), true), ("abcd2".to_string(), false)]
-    );
+    // Emitted IDs are at least 8 hex: the tombstone is `abcd1111…`.
+    let mut want = [
+        ("abcd1111".to_string(), true),
+        (live[..8].to_string(), false),
+    ];
+    want.sort();
+    assert_eq!(candidates, want);
     let msg = cas.read("#abcd", None, now).unwrap_err().to_string();
     assert!(
-        msg.contains("#abcd1 (expired)") && msg.contains("#abcd2"),
+        msg.contains("#abcd1111 (expired)") && msg.contains(&format!("#{}", &live[..8])),
         "{msg}"
     );
 
     // The hint prefixes work: one is expired, the other is the live entry.
     assert!(matches!(
-        cas.read("abcd1", None, now),
+        cas.read("abcd1111", None, now),
         Err(CasError::Expired(_))
     ));
     assert_eq!(
-        cas.read("abcd2", None, now).unwrap(),
-        b"unrelated live output\n"
+        cas.read(&live[..8], None, now).unwrap(),
+        live_content.as_bytes()
     );
 
     // For every prefix length of the expired sha, the live decoy is never returned.
@@ -435,7 +455,7 @@ fn an_expired_id_never_returns_a_different_live_entry() {
         assert!(result.is_err(), "prefix {len} returned {result:?}");
     }
     assert_eq!(
-        files_in(&dir).len(),
+        files_in(&dir).iter().filter(|(n, _)| n != ".lock").count(),
         2,
         "lookups must not create or delete entries"
     );
@@ -449,22 +469,23 @@ fn collisions_between_live_and_expired_entries_are_classified() {
     let now = SystemTime::now();
 
     // live / live
-    plant_live(&dir, &sha_like("1111", 'a'), "one");
-    plant_live(&dir, &sha_like("1111", 'b'), "two");
+    let (one, _) = plant_live_with_prefix(&dir, "1111", "one");
+    let (two, _) = plant_live_with_prefix(&dir, "1111", "two");
     let (_, c) = ambiguity(cas.read("1111", None, now).unwrap_err());
-    assert_eq!(
-        c,
-        [("1111a".to_string(), false), ("1111b".to_string(), false)]
-    );
+    let mut want = [(one[..8].to_string(), false), (two[..8].to_string(), false)];
+    want.sort();
+    assert_eq!(c, want);
 
     // expired / live
     plant_tombstone(&dir, &sha_like("2222", 'a'));
-    plant_live(&dir, &sha_like("2222", 'b'), "three");
+    let (three, _) = plant_live_with_prefix(&dir, "2222", "three");
     let (_, c) = ambiguity(cas.read("2222", None, now).unwrap_err());
-    assert_eq!(
-        c,
-        [("2222a".to_string(), true), ("2222b".to_string(), false)]
-    );
+    let mut want = [
+        ("2222aaaa".to_string(), true),
+        (three[..8].to_string(), false),
+    ];
+    want.sort();
+    assert_eq!(c, want);
 
     // expired / expired: every meaning is gone, so "expired", and no content.
     plant_tombstone(&dir, &sha_like("3333", 'a'));
@@ -474,7 +495,7 @@ fn collisions_between_live_and_expired_entries_are_classified() {
         Err(CasError::Expired(_))
     ));
     assert!(matches!(
-        cas.read("3333a", None, now),
+        cas.read("3333aaaa", None, now),
         Err(CasError::Expired(_))
     ));
 
@@ -493,13 +514,13 @@ fn new_entries_get_short_ids_that_are_unique_against_tombstones() {
     let now = SystemTime::now();
 
     let sha = agentdiet::fsutil::sha256_hex(b"fresh output\n");
-    let old = format!("{}{}", &sha[..4], "0".repeat(60));
+    let old = format!("{}{}", &sha[..8], "0".repeat(56));
     plant_tombstone(&dir, &old);
 
     let put = put_text(&cas, "fresh output\n", now);
     assert_eq!(put.sha, sha);
     assert!(
-        put.short_id.len() > 4,
+        put.short_id.len() > 8,
         "short id {} collides with a tombstone",
         put.short_id
     );
@@ -508,9 +529,9 @@ fn new_entries_get_short_ids_that_are_unique_against_tombstones() {
         cas.read(&put.short_id, None, now).unwrap(),
         b"fresh output\n"
     );
-    // The old 4-char breadcrumb can no longer silently mean the new entry.
+    // The old 8-char breadcrumb can no longer silently mean the new entry.
     assert!(matches!(
-        cas.read(&sha[..4], None, now),
+        cas.read(&sha[..8], None, now),
         Err(CasError::Ambiguous { .. })
     ));
 }
@@ -523,7 +544,7 @@ fn reputting_identical_content_revives_it_and_hints_stay_deterministic() {
     let now = SystemTime::now();
 
     let sha = agentdiet::fsutil::sha256_hex(b"comes back\n");
-    let rival = format!("{}{}", &sha[..4], "f".repeat(60));
+    let rival = format!("{}{}", &sha[..8], "f".repeat(56));
     plant_live(&dir, &rival, "rival");
 
     // Expire it, then put the same bytes again.
@@ -544,19 +565,19 @@ fn reputting_identical_content_revives_it_and_hints_stay_deterministic() {
     );
 
     // Its (longer) new ID works; the old 4-char one is an ambiguity with the rival.
-    assert!(again.short_id.len() > 4);
+    assert!(again.short_id.len() > 8);
     assert_eq!(
         cas.read(&again.short_id, None, now).unwrap(),
         b"comes back\n"
     );
-    let first_err = cas.read(&sha[..4], None, now).unwrap_err().to_string();
+    let first_err = cas.read(&sha[..8], None, now).unwrap_err().to_string();
     for _ in 0..5 {
         assert_eq!(
-            cas.read(&sha[..4], None, now).unwrap_err().to_string(),
+            cas.read(&sha[..8], None, now).unwrap_err().to_string(),
             first_err
         );
     }
-    let (_, candidates) = ambiguity(cas.read(&sha[..4], None, now).unwrap_err());
+    let (_, candidates) = ambiguity(cas.read(&sha[..8], None, now).unwrap_err());
     let ids: Vec<&str> = candidates.iter().map(|(id, _)| id.as_str()).collect();
     assert_eq!(ids.len(), 2);
     assert!(
@@ -572,12 +593,11 @@ fn a_log_with_a_leftover_tombstone_is_live() {
     let env = Env::empty();
     let dir = env.paths.cas_dir();
     let cas = Cas::new(dir.clone());
-    let sha = sha_like("9a9a", 'c');
-    plant_live(&dir, &sha, "still here");
+    let (sha, content) = plant_live_with_prefix(&dir, "9a9a", "still here");
     plant_tombstone(&dir, &sha);
     assert_eq!(
         cas.read("9a9a", None, SystemTime::now()).unwrap(),
-        b"still here"
+        content.as_bytes()
     );
 }
 
@@ -687,4 +707,284 @@ mod symlinks {
         assert_eq!(again.sha, put.sha);
         assert_eq!(fs::read(&log).unwrap(), b"the real output\n");
     }
+}
+
+// ---- 3B storage: integrity, concurrency, bounded waits ---------------------
+
+fn log_path(env: &Env, sha: &str) -> std::path::PathBuf {
+    env.paths.cas_dir().join(format!("{sha}.log"))
+}
+
+#[test]
+fn emitted_ids_are_at_least_eight_hex_and_input_ids_at_least_four() {
+    let env = Env::empty();
+    let cas = Cas::new(env.paths.cas_dir());
+    let put = put_text(&cas, "an output\n", SystemTime::now());
+    assert!(put.short_id.len() >= 8, "{}", put.short_id);
+    assert!(put.sha.starts_with(&put.short_id));
+    // A 4-hex input still resolves when it is unique.
+    assert_eq!(
+        cas.read(&put.sha[..4], None, SystemTime::now()).unwrap(),
+        b"an output\n"
+    );
+    assert!(matches!(
+        cas.read(&put.sha[..3], None, SystemTime::now()),
+        Err(CasError::InvalidId(_))
+    ));
+}
+
+#[test]
+fn a_corrupted_entry_is_corrupt_not_missing_and_leaks_no_bytes() {
+    let env = Env::empty();
+    let cas = Cas::new(env.paths.cas_dir());
+    let now = SystemTime::now();
+    let put = put_text(&cas, "line one\nline two\nline three\n", now);
+    let log = log_path(&env, &put.sha);
+
+    // Bit rot / a torn write: same name, different bytes (here: the last byte flipped).
+    let mut bytes = fs::read(&log).unwrap();
+    *bytes.last_mut().unwrap() ^= 0x01;
+    fs::write(&log, &bytes).unwrap();
+
+    for range in [None, Some(LineRange::parse("1..2").unwrap())] {
+        let err = cas.read(&put.short_id, range, now).unwrap_err();
+        assert!(matches!(err, CasError::Corrupt(_)), "{err:?}");
+        let text = err.to_string();
+        assert!(text.contains("corrupt"), "{text}");
+        assert!(
+            !text.contains("line one"),
+            "no content in the error: {text}"
+        );
+        assert!(
+            !text.contains("not found") && !text.contains("expired"),
+            "{text}"
+        );
+    }
+    // Truncated to nothing is corrupt too.
+    fs::write(&log, b"").unwrap();
+    assert!(matches!(
+        cas.read(&put.short_id, None, now),
+        Err(CasError::Corrupt(_))
+    ));
+
+    // Putting the same content again repairs the entry.
+    let again = put_text(&cas, "line one\nline two\nline three\n", now);
+    assert_eq!(again, put);
+    assert_eq!(
+        cas.read(&put.short_id, None, now).unwrap(),
+        b"line one\nline two\nline three\n"
+    );
+}
+
+#[test]
+fn the_show_command_reports_corruption_and_prints_nothing() {
+    let env = Env::empty();
+    let cas = Cas::new(env.paths.cas_dir());
+    let put = put_text(&cas, "secretless but precious\n", SystemTime::now());
+    fs::write(log_path(&env, &put.sha), b"tampered\n").unwrap();
+    let exe = env!("CARGO_BIN_EXE_agentdiet");
+    let out = std::process::Command::new(exe)
+        .args(["show", &format!("#{}", put.short_id)])
+        .env("HOME", &env.paths.home)
+        .env("XDG_CONFIG_HOME", &env.paths.config_dir)
+        .current_dir(&env.paths.project_root)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(out.stdout.is_empty(), "no bytes on stdout");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("corrupt") && !err.contains("tampered"),
+        "{err}"
+    );
+}
+
+#[test]
+fn reading_a_vault_that_was_never_written_creates_nothing() {
+    let env = Env::empty();
+    let cas = Cas::new(env.paths.cas_dir());
+    assert!(matches!(
+        cas.read("abcd1234", None, SystemTime::now()),
+        Err(CasError::NotFound(_))
+    ));
+    assert_eq!(cas.gc(SystemTime::now()).unwrap(), 0);
+    assert!(!env.paths.cas_dir().exists());
+}
+
+/// The race the lock exists for: one thread keeps re-putting content (refreshing its mtime) while
+/// others run GC with a clock far in the future. Without the lock a GC can scan the entry as
+/// stale and delete it after the put has refreshed it, leaving the fresh breadcrumb dangling.
+#[test]
+fn gc_never_deletes_content_a_concurrent_put_just_refreshed() {
+    let env = Env::empty();
+    let dir = env.paths.cas_dir();
+    let cas = Cas::new(dir.clone()).lock_timeout(Duration::from_secs(60));
+    let real_now = SystemTime::now();
+    // Stored 8 days ago, so a GC at `real_now` considers it stale until a put refreshes it.
+    let seed = put_text(&cas, "contended\n", real_now - 8 * DAY);
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let collectors: Vec<_> = (0..3)
+        .map(|_| {
+            let (cas, stop) = (cas.clone(), std::sync::Arc::clone(&stop));
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    cas.gc(real_now).unwrap();
+                }
+            })
+        })
+        .collect();
+    for round in 0..40 {
+        // Age the entry back, put it (refresh to real_now), and demand it is readable immediately.
+        let log = log_path(&env, &seed.sha);
+        if log.exists() {
+            backdate(&log, 8 * DAY);
+        }
+        let put = cas.put(&scrub(b"contended\n"), real_now).unwrap();
+        let read = cas.read(&put.short_id, None, real_now);
+        assert_eq!(
+            read.unwrap_or_else(|e| panic!("round {round}: dangling right after put: {e}")),
+            b"contended\n"
+        );
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    for c in collectors {
+        c.join().unwrap();
+    }
+}
+
+#[test]
+fn concurrent_puts_of_different_content_all_survive() {
+    let env = Env::empty();
+    let cas = Cas::new(env.paths.cas_dir()).lock_timeout(Duration::from_secs(60));
+    let now = SystemTime::now();
+    let threads: Vec<_> = (0..4)
+        .map(|t| {
+            let cas = cas.clone();
+            std::thread::spawn(move || {
+                (0..10)
+                    .map(|i| {
+                        let text = format!("thread {t} item {i}\n");
+                        (text.clone(), cas.put(&scrub(text.as_bytes()), now).unwrap())
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    let puts: Vec<_> = threads
+        .into_iter()
+        .flat_map(|t| t.join().unwrap())
+        .collect();
+    assert_eq!(puts.len(), 40);
+    for (text, put) in puts {
+        assert_eq!(cas.read(&put.sha, None, now).unwrap(), text.as_bytes());
+    }
+}
+
+#[test]
+fn a_held_vault_lock_makes_operations_fail_busy_within_the_timeout() {
+    let env = Env::empty();
+    let dir = env.paths.cas_dir();
+    let cas = Cas::new(dir.clone()).lock_timeout(Duration::from_millis(100));
+    let put = put_text(&cas, "x\n", SystemTime::now());
+    let held =
+        agentdiet::fsutil::lock_exclusive(&dir.join(".lock"), Duration::from_secs(1)).unwrap();
+
+    let started = std::time::Instant::now();
+    let now = SystemTime::now();
+    assert!(matches!(
+        cas.put(&scrub(b"y\n"), now),
+        Err(CasError::Busy(_))
+    ));
+    assert!(matches!(
+        cas.read(&put.short_id, None, now),
+        Err(CasError::Busy(_))
+    ));
+    assert!(matches!(
+        cas.resolve(&put.short_id, now),
+        Err(CasError::Busy(_))
+    ));
+    assert!(matches!(cas.gc(now), Err(CasError::Busy(_))));
+    assert!(started.elapsed() < Duration::from_secs(2), "bounded wait");
+    assert_eq!(live_logs(&dir), 1, "nothing was written while busy");
+
+    drop(held);
+    assert_eq!(cas.read(&put.short_id, None, now).unwrap(), b"x\n");
+}
+
+/// A FIFO swapped in where an entry's log should be must never block a put or a read.
+#[cfg(unix)]
+#[test]
+fn a_fifo_in_place_of_an_entry_never_blocks() {
+    use std::os::unix::ffi::OsStrExt;
+    let env = Env::empty();
+    let dir = env.paths.cas_dir();
+    let cas = Cas::new(dir.clone());
+    let sha = agentdiet::fsutil::sha256_hex(b"payload\n");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{sha}.log"));
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let now = SystemTime::now();
+        // Not an entry (scan ignores non-regular files), so a read says "not found"...
+        let before = cas.read(&sha[..8], None, now);
+        // ...and a put replaces the FIFO with a regular file.
+        let put = cas.put(&scrub(b"payload\n"), now);
+        let after = cas.read(&sha[..8], None, now);
+        let _ = tx.send((before, put, after));
+    });
+    let (before, put, after) = rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("blocked on a FIFO");
+    assert!(matches!(before, Err(CasError::NotFound(_))));
+    put.unwrap();
+    assert_eq!(after.unwrap(), b"payload\n");
+}
+
+/// Child half of [`two_processes_putting_and_collecting_do_not_corrupt_the_vault`].
+#[test]
+#[ignore = "child-process helper; run by two_processes_putting_and_collecting_do_not_corrupt_the_vault"]
+fn vault_child_hammers() {
+    let Some(dir) = std::env::var_os("AD_VAULT_HAMMER_DIR") else {
+        return;
+    };
+    let id = std::env::var("AD_VAULT_HAMMER_ID").unwrap();
+    let cas = Cas::new(dir.into()).lock_timeout(Duration::from_secs(60));
+    let now = SystemTime::now();
+    for i in 0..15 {
+        let text = format!("child {id} item {i}\n");
+        let put = cas.put(&scrub(text.as_bytes()), now).unwrap();
+        assert_eq!(cas.read(&put.short_id, None, now).unwrap(), text.as_bytes());
+        cas.gc(now + DAY).unwrap(); // never expires anything: entries are fresh
+    }
+}
+
+#[test]
+fn two_processes_putting_and_collecting_do_not_corrupt_the_vault() {
+    let env = Env::empty();
+    let exe = std::env::current_exe().unwrap();
+    let children: Vec<_> = (0..3)
+        .map(|n| {
+            std::process::Command::new(&exe)
+                .args(["--ignored", "--exact", "vault_child_hammers", "--nocapture"])
+                .env("AD_VAULT_HAMMER_DIR", env.paths.cas_dir())
+                .env("AD_VAULT_HAMMER_ID", n.to_string())
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    for child in children {
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "child failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    assert_eq!(live_logs(&env.paths.cas_dir()), 45);
 }
