@@ -483,8 +483,12 @@ lesser form):
   lowest `id` and fills the key.
 - **memory.db metadata.** `cas_sha`, when given, must be 64 lowercase hex; `session` is free text and
   therefore only accepted as scrubbed text of at most 256 bytes. The file is created `0600` before
-  SQLite opens it (SQLite gives `-wal` and `-shm` the main file's mode), the project `.agentdiet/`
-  directory `0700`, and it is opened with `SQLITE_OPEN_NOFOLLOW`. Error values never contain row text.
+  SQLite opens it (SQLite gives `-wal` and `-shm` the main file's mode) and the project
+  `.agentdiet/` directory `0700`. The final path component is opened with `O_NOFOLLOW|O_NONBLOCK`
+  first, and once SQLite has opened the file, before anything is read or written, the path must still
+  be that same inode. (`SQLITE_OPEN_NOFOLLOW` is not used: it rejects a symlink anywhere in the path,
+  such as macOS's `/var` or a project below a linked directory.) A swap in the instant between
+  SQLite's `open` and the check is detected, not prevented. Error values never contain row text.
 - **`state.json` updates are serialised.** Every read-modify-write holds an exclusive advisory lock
   (`flock` on the private sibling file `state.json.lock`, created `0600`, never deleted) from the read
   to the rename. An explicit `pause`/`resume`/mode change waits at most **2 s** and then fails with a

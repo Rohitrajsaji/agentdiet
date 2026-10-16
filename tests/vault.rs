@@ -107,7 +107,7 @@ fn secrets_never_reach_the_vault_or_the_memory_db() {
         &scrub(format!("deploy {}", secrets[0]).as_bytes()),
         &scrubbed,
         Some(&put.sha),
-        Some("s1"),
+        Some(&scrub(b"s1")),
     )
     .unwrap();
 
@@ -315,27 +315,31 @@ fn memory_search_is_ranked_by_bm25() {
         "consectetur adipiscing elit ".repeat(12),
         "sed do eiusmod tempor ".repeat(12)
     );
-    let body_only = db
-        .index(Kind::Read, &s("build log"), &s(&long_body), None, None)
-        .unwrap();
-    let title_only = db
-        .index(
+    let body_only = new_id(
+        db.index(Kind::Read, &s("build log"), &s(&long_body), None, None)
+            .unwrap(),
+    );
+    let title_only = new_id(
+        db.index(
             Kind::Decision,
             &s("cargo test notes"),
             &s("remember to check flags"),
             None,
             None,
         )
-        .unwrap();
-    let dense = db
-        .index(
+        .unwrap(),
+    );
+    let dense_sha = agentdiet::fsutil::sha256_hex(b"the dense output");
+    let dense = new_id(
+        db.index(
             Kind::Command,
             &s("cargo test failed"),
             &s("cargo test failed: 3 errors in cargo test run"),
-            Some("deadbeef"),
-            Some("s1"),
+            Some(&dense_sha),
+            Some(&s("s1")),
         )
-        .unwrap();
+        .unwrap(),
+    );
     // Only one of the two terms: excluded by the implicit AND.
     db.index(
         Kind::Command,
@@ -356,7 +360,7 @@ fn memory_search_is_ranked_by_bm25() {
     );
 
     assert_eq!(hits[0].kind, "command");
-    assert_eq!(hits[0].cas_sha.as_deref(), Some("deadbeef"));
+    assert_eq!(hits[0].cas_sha.as_deref(), Some(dense_sha.as_str()));
     assert!(hits[0].snippet.contains('['));
 
     // limit is honoured; hostile text does not error.
@@ -368,6 +372,13 @@ fn memory_search_is_ranked_by_bm25() {
     drop(db);
     let db = MemoryDb::open(&env.paths.memory_db()).unwrap();
     assert_eq!(db.search("cargo test", 10).unwrap().len(), 3);
+}
+
+fn new_id(indexed: agentdiet::memory::Indexed) -> i64 {
+    match indexed {
+        agentdiet::memory::Indexed::New(id) => id,
+        other => panic!("expected a new row, got {other:?}"),
+    }
 }
 
 // ---- vault identity: old IDs never resolve to an unrelated entry ----------

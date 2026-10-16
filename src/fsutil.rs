@@ -211,6 +211,32 @@ fn require_regular(file: &fs::File) -> io::Result<()> {
     }
 }
 
+/// Fail unless `path` still names the very regular file `opened` is a handle to (same device and
+/// inode, and not a symlink). Catches a file swapped in after the handle was checked.
+pub fn require_same_file(opened: &fs::File, path: &Path) -> io::Result<()> {
+    let swapped = || {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "file was replaced while opening",
+        )
+    };
+    let now = fs::symlink_metadata(path)?;
+    if !now.file_type().is_file() {
+        return Err(swapped());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let held = opened.metadata()?;
+        if held.dev() != now.dev() || held.ino() != now.ino() {
+            return Err(swapped());
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = opened;
+    Ok(())
+}
+
 /// Read a whole file that may legitimately be a symlink (user-visible config
 /// such as `state.json`, which dotfile managers link), mapping "not found" to
 /// `None`. The link is resolved first and the target opened with

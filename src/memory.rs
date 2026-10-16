@@ -4,19 +4,32 @@
 //! BM25. It holds short summaries (command results, document reads, session
 //! decisions) that point at the full output in the vault via `cas_sha`;
 //! PreCompact recovery and `diet_search` query it. Only [`Scrubbed`] text can
-//! be indexed.
+//! be indexed: titles, bodies and the session label alike, and `cas_sha` must be
+//! a real sha256, so nothing free-form reaches the database unscrubbed.
+//!
+//! Rows are *events*. Schema v2 adds a `NOT NULL` `dedupe_key` (sha256 over the
+//! length-prefixed kind, title, body, cas_sha and session) with a unique index,
+//! and [`MemoryDb::index`] is a single `INSERT … ON CONFLICT DO NOTHING`, so
+//! repeats collapse atomically while the same output produced by a different
+//! command or session keeps its own row.
 
-use std::fs;
+use std::collections::HashSet;
 use std::io;
 use std::path::Path;
 use std::time::Duration;
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 
 use crate::fsutil;
 use crate::scrubber::Scrubbed;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
+
+/// How long SQLite (and our WAL retry) waits on another writer before reporting `Busy`.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Longest session label accepted (bytes of scrubbed text).
+pub const MAX_SESSION_LEN: usize = 256;
 
 /// Title matches count this much more than body matches.
 const TITLE_WEIGHT: f64 = 5.0;
@@ -49,6 +62,12 @@ CREATE TRIGGER entries_au AFTER UPDATE ON entries BEGIN
 END;
 ";
 
+/// Added in schema v2. The key column is `NOT NULL` so a missing `cas_sha` or `session` (an empty
+/// string in the key) cannot make two identical events look distinct, which a `UNIQUE` index over
+/// nullable columns would allow.
+const SCHEMA_V2_COLUMN: &str = "ALTER TABLE entries ADD COLUMN dedupe_key TEXT NOT NULL DEFAULT ''";
+const SCHEMA_V2_INDEX: &str = "CREATE UNIQUE INDEX entries_dedupe ON entries(dedupe_key)";
+
 #[derive(Debug, thiserror::Error)]
 pub enum MemoryError {
     #[error("memory database error: {0}")]
@@ -61,6 +80,17 @@ pub enum MemoryError {
     },
     #[error("memory.db schema version {0} is newer than this agentdiet understands")]
     UnsupportedVersion(i64),
+    #[error("invalid {0} for the memory index")]
+    InvalidMetadata(&'static str),
+}
+
+/// What [`MemoryDb::index`] did with an event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Indexed {
+    /// A new row with this id.
+    New(i64),
+    /// An identical event (same kind, title, body, `cas_sha` and session) was already there.
+    Duplicate,
 }
 
 /// What an indexed entry summarises.
@@ -98,61 +128,89 @@ pub struct MemoryDb {
 
 impl MemoryDb {
     /// Open (creating and migrating if needed) the database at `path`.
+    ///
+    /// The project directory is created `0700` and the database file `0600` *before* SQLite sees
+    /// it (SQLite gives `-wal` and `-shm` the main file's mode). The final path component is
+    /// opened with `O_NOFOLLOW|O_NONBLOCK`, so a symlink or a FIFO planted at `memory.db` is
+    /// refused rather than followed or waited on, and after SQLite has opened the file, before
+    /// anything is read or written, the path must still be the very inode that was checked.
+    /// (`SQLITE_OPEN_NOFOLLOW` is not used: it also rejects a symlinked *parent*, such as macOS's
+    /// `/var` or a project under a linked directory.) Only the final component is guarded; a
+    /// swap in the instant between SQLite's `open` and the check is detected, not prevented.
     pub fn open(path: &Path) -> Result<Self, MemoryError> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|source| MemoryError::Io {
-                path: parent.display().to_string(),
-                source,
-            })?;
-        }
-        let conn = Connection::open(path)?;
-        conn.busy_timeout(Duration::from_secs(2))?;
-        // Setting journal_mode returns a row, so `execute` would fail.
-        conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get::<_, String>(0))?;
-        let db = Self { conn };
-        db.migrate()?;
-        Ok(db)
+        let io_err = |source| MemoryError::Io {
+            path: path.display().to_string(),
+            source,
+        };
+        let path = match (
+            path.parent().filter(|p| !p.as_os_str().is_empty()),
+            path.file_name(),
+        ) {
+            (Some(parent), Some(name)) => {
+                fsutil::create_private_dir_all(parent).map_err(io_err)?;
+                std::fs::canonicalize(parent).map_err(io_err)?.join(name)
+            }
+            _ => path.to_path_buf(),
+        };
+        let checked = fsutil::open_or_create_private(&path).map_err(io_err)?;
+        let mut conn = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        fsutil::require_same_file(&checked, &path).map_err(io_err)?;
+        drop(checked);
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        enable_wal(&conn)?;
+        migrate(&mut conn)?;
+        Ok(Self { conn })
     }
 
-    fn migrate(&self) -> Result<(), MemoryError> {
-        let version: i64 = self
-            .conn
-            .pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > SCHEMA_VERSION {
-            return Err(MemoryError::UnsupportedVersion(version));
-        }
-        if version < 1 {
-            let tx = self.conn.unchecked_transaction()?;
-            tx.execute_batch(SCHEMA_V1)?;
-            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-            tx.commit()?;
-        }
-        Ok(())
-    }
-
-    /// Index one summary; returns its row id.
+    /// Index one event. An identical event (same kind, title, body, `cas_sha` and session) is
+    /// [`Indexed::Duplicate`]; the check and the insert are one statement, so concurrent callers
+    /// cannot both insert it.
+    ///
+    /// `cas_sha` must be 64 lowercase hex; `session` is scrubbed text of at most
+    /// [`MAX_SESSION_LEN`] bytes.
     pub fn index(
         &self,
         kind: Kind,
         title: &Scrubbed,
         body: &Scrubbed,
         cas_sha: Option<&str>,
-        session: Option<&str>,
-    ) -> Result<i64, MemoryError> {
+        session: Option<&Scrubbed>,
+    ) -> Result<Indexed, MemoryError> {
+        if let Some(sha) = cas_sha
+            && !is_sha256_hex(sha)
+        {
+            return Err(MemoryError::InvalidMetadata("cas_sha"));
+        }
+        if session.is_some_and(|s| s.as_bytes().len() > MAX_SESSION_LEN) {
+            return Err(MemoryError::InvalidMetadata("session"));
+        }
+        let title = title.to_lossy_string();
+        let body = body.to_lossy_string();
+        let session = session.map(Scrubbed::to_lossy_string);
+        let key = dedupe_key(kind.as_str(), &title, &body, cas_sha, session.as_deref());
         let created_ms = i64::try_from(fsutil::now_millis()).unwrap_or(i64::MAX);
-        self.conn.execute(
-            "INSERT INTO entries(kind, title, body, cas_sha, session, created_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        let inserted = self.conn.execute(
+            "INSERT INTO entries(kind, title, body, cas_sha, session, created_ms, dedupe_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(dedupe_key) DO NOTHING",
             params![
                 kind.as_str(),
-                title.to_lossy_string(),
-                body.to_lossy_string(),
+                title,
+                body,
                 cas_sha,
                 session,
-                created_ms
+                created_ms,
+                key
             ],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        Ok(if inserted == 0 {
+            Indexed::Duplicate
+        } else {
+            Indexed::New(self.conn.last_insert_rowid())
+        })
     }
 
     /// BM25-ranked search, best match first. Free text is safe: it can never
@@ -195,6 +253,123 @@ impl MemoryDb {
             .conn
             .pragma_query_value(None, "journal_mode", |row| row.get(0))?)
     }
+}
+
+/// Switch to WAL. SQLite's busy handler is not consulted for a journal-mode change made while
+/// another connection is mid-initialisation, so a concurrent first open can see `SQLITE_BUSY`
+/// immediately; retry for as long as the connection's own busy timeout would have waited. Once
+/// the mode is WAL it is persistent and later opens are no-ops.
+fn enable_wal(conn: &Connection) -> Result<(), MemoryError> {
+    let deadline = std::time::Instant::now() + BUSY_TIMEOUT;
+    loop {
+        // Setting journal_mode returns a row, so `execute` would fail.
+        match conn
+            .pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get::<_, String>(0))
+        {
+            Ok(_) => return Ok(()),
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::DatabaseBusy
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+
+fn is_sha256_hex(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// sha256 over the length-prefixed fields. A missing `cas_sha`/`session` is the empty string.
+fn dedupe_key(
+    kind: &str,
+    title: &str,
+    body: &str,
+    cas_sha: Option<&str>,
+    session: Option<&str>,
+) -> String {
+    let mut buf = Vec::with_capacity(title.len() + body.len() + 160);
+    for field in [
+        kind,
+        title,
+        body,
+        cas_sha.unwrap_or(""),
+        session.unwrap_or(""),
+    ] {
+        buf.extend_from_slice(&(field.len() as u64).to_le_bytes());
+        buf.extend_from_slice(field.as_bytes());
+    }
+    fsutil::sha256_hex(&buf)
+}
+
+/// Bring the database to [`SCHEMA_VERSION`].
+///
+/// An already-current database is detected without taking a write lock. Otherwise the work runs
+/// in an `IMMEDIATE` transaction that re-reads `user_version` *after* the lock is held, so two
+/// processes opening a fresh or v1 database at once serialise: the second finds the work done.
+fn migrate(conn: &mut Connection) -> Result<(), MemoryError> {
+    let read_version = |conn: &Connection| -> Result<i64, MemoryError> {
+        Ok(conn.pragma_query_value(None, "user_version", |row| row.get(0))?)
+    };
+    let version = read_version(conn)?;
+    if version > SCHEMA_VERSION {
+        return Err(MemoryError::UnsupportedVersion(version));
+    }
+    if version == SCHEMA_VERSION {
+        return Ok(());
+    }
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let version = read_version(&tx)?;
+    if version > SCHEMA_VERSION {
+        return Err(MemoryError::UnsupportedVersion(version));
+    }
+    if version < 1 {
+        tx.execute_batch(SCHEMA_V1)?;
+    }
+    if version < 2 {
+        tx.execute_batch(SCHEMA_V2_COLUMN)?;
+        fill_dedupe_keys(&tx)?;
+        tx.execute_batch(SCHEMA_V2_INDEX)?;
+    }
+    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// v1 -> v2: give every row its key and delete repeats, keeping the lowest `id` of each group so
+/// the outcome does not depend on scan order. The FTS delete trigger keeps the index in sync.
+fn fill_dedupe_keys(tx: &rusqlite::Transaction<'_>) -> Result<(), MemoryError> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut duplicates: Vec<i64> = Vec::new();
+    {
+        let mut select = tx.prepare(
+            "SELECT id, kind, title, body, cas_sha, session FROM entries ORDER BY id ASC",
+        )?;
+        let mut update = tx.prepare("UPDATE entries SET dedupe_key = ?1 WHERE id = ?2")?;
+        let mut rows = select.query([])?;
+        while let Some(row) = rows.next()? {
+            let id: i64 = row.get(0)?;
+            let key = dedupe_key(
+                &row.get::<_, String>(1)?,
+                &row.get::<_, String>(2)?,
+                &row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?.as_deref(),
+                row.get::<_, Option<String>>(5)?.as_deref(),
+            );
+            if seen.insert(key.clone()) {
+                update.execute(params![key, id])?;
+            } else {
+                duplicates.push(id);
+            }
+        }
+    }
+    let mut delete = tx.prepare("DELETE FROM entries WHERE id = ?1")?;
+    for id in duplicates {
+        delete.execute([id])?;
+    }
+    Ok(())
 }
 
 /// Turn free text into a safe FTS5 expression: each whitespace-separated token
