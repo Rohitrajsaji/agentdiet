@@ -1,0 +1,34 @@
+[package]
+name = "agentdiet"
+version = "0.1.0"
+edition = "2024"
+description = "Context firewall for AI coding agents"
+
+[lib]
+name = "agentdiet"
+path = "src/lib.rs"
+
+[[bin]]
+name = "agentdiet"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+# dirs: cross-platform home/config dir resolution (called only from main.rs); pure Rust.
+dirs = "6"
+inquire = "0.7"
+serde = { version = "1", features = ["derive"] }
+# preserve_order: re-serialised user configs keep their key order.
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+thiserror = "2"
+
+[dev-dependencies]
+# tempfile: isolated TempDir homes/projects for tests only.
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

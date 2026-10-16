@@ -31,7 +31,27 @@ Running bare `agentdiet` opens an interactive Control Center menu (`inquire`), i
 - Targets: Claude Code, Cursor, Windsurf, Gemini CLI, Copilot, Codex, and `~/.agentdiet/shims`.
 - Before modifying any file, back it up to `~/.agentdiet/backups/<timestamp>/<target>/…`.
 - Patching is **idempotent**: a second run is a no-op; existing agentdiet entries are detected
-  and updated, never duplicated.
+  and updated, never duplicated. A file is only backed up and rewritten when its new bytes
+  differ from its current bytes, so a no-op run creates no backup directory.
+- A config that cannot be parsed (e.g. JSONC with comments or trailing commas) is **skipped with
+  a warning and never rewritten**.
+- Shell rc files are never edited; `init` prints the `PATH` line for the shims directory instead.
+- Slice 1 writes, per target (user scope / `--project` scope):
+
+  | Target | User scope | `--project` |
+  |---|---|---|
+  | Claude Code | hooks in `~/.claude/settings.json`; MCP in `~/.claude.json` (`mcpServers`) | `.claude/settings.json`; `.mcp.json` |
+  | Cursor | `~/.cursor/mcp.json` (`mcpServers`) | `.cursor/mcp.json` |
+  | Windsurf | `~/.codeium/windsurf/mcp_config.json` (`mcpServers`) | not supported; skipped with a notice |
+  | Gemini CLI | `~/.gemini/settings.json` (`mcpServers`) | `.gemini/settings.json` |
+  | Copilot (VS Code) | `<config dir>/Code/User/mcp.json` (`servers`, `"type": "stdio"`) | `.vscode/mcp.json` |
+  | Codex | `~/.codex/config.toml`, marker block `[mcp_servers.agentdiet]` | `.codex/config.toml` |
+  | Shims | `~/.agentdiet/shims/<cmd>` symlinks to the binary | always global |
+
+  Claude Code gets hooks for SessionStart, UserPromptSubmit, PreToolUse, PostToolUse and
+  PreCompact; the other assistants get only the MCP entry until the hook slice.
+- Shim commands: `git`, `cargo`, `pytest`, `npm`, `pnpm`, `yarn`, `go`, `make`, `ruff`, `docker`,
+  `gh`. Until the Diet Engine ships, shim mode always execs the real binary.
 
 ### 2.3 Stateful Pause / Resume
 
@@ -42,7 +62,8 @@ Global state lives in `~/.agentdiet/state.json`:
   "status": "active",
   "mode": "balanced",
   "raw_tokens_passed_while_paused": 0,
-  "on_session_start": "prompt"
+  "on_session_start": "prompt",
+  "last_trimmed_id": null
 }
 ```
 
@@ -52,6 +73,9 @@ Global state lives in `~/.agentdiet/state.json`:
 | `mode` | `"light"` \| `"balanced"` \| `"ultra-lean"` |
 | `raw_tokens_passed_while_paused` | non-negative integer |
 | `on_session_start` | `"prompt"` \| `"auto_resume"` (default `"prompt"`) |
+| `last_trimmed_id` | short ID (e.g. `"4f9a"`) of the most recently trimmed output, or `null` (default). Read by the Control Center's "Inspect last trimmed output". |
+
+- A missing, unreadable or corrupt `state.json` loads as defaults (fail open); unknown fields are ignored.
 
 - Writes are atomic (temp file + rename).
 - Pausing: `agentdiet pause`, the Control Center toggle, or typing `@diet pause` in chat
@@ -130,6 +154,12 @@ Global state lives in `~/.agentdiet/state.json`:
 - **`agentdiet eject` / `agentdiet uninstall`** — restore original configs from
   `~/.agentdiet/backups/`, remove agentdiet hook entries and shims. Idempotent. `cas/` and
   `memory.db` are kept unless `--purge` is passed.
+  - Every `init` write that changes a file records a `manifest.json` in its backup directory
+    (original absolute path, whether the file existed, sha256 of what was written).
+  - Eject restores the **earliest** backup of each path byte-for-byte (or deletes a file init
+    created) when the file still matches what init last wrote. If the user edited it since, eject
+    removes only the agentdiet entries and keeps the user's edits.
+  - Processed manifests are renamed `manifest.ejected.json`; backups are kept.
 
 ## 4. Filesystem Layout
 
