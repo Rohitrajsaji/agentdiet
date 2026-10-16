@@ -94,7 +94,7 @@ pub fn explained(decline: &Decline, input: &str, expected: &str) -> Result<(), S
         Decline::NumberForm => numbers_in(input).iter().any(|n| non_canonical(n)),
         Decline::Form("tabular rows would reorder keys") => key_orders_differ(input),
         Decline::Form(_) => expected_uses_unsupported_form(expected),
-        Decline::NotJson | Decline::DuplicateKey | Decline::TooDeep => false,
+        Decline::NotJson | Decline::DuplicateKey | Decline::TooDeep | Decline::Cost => false,
     };
     if ok {
         Ok(())

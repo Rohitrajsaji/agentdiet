@@ -27,6 +27,12 @@ use crate::diet::{Candidate, Layout, Transform};
 
 /// JSON nesting deeper than this declines.
 pub const MAX_DEPTH: usize = 64;
+/// Each nested value is parsed again from its own text, so a document costs (about) its size times
+/// its depth. Past this many passes over the input the document declines instead.
+const MAX_PASSES: usize = 10;
+/// ...but a document is always allowed this many bytes of parsing work, so small documents are
+/// never refused for cost however deep (at most [`MAX_DEPTH`]) they nest.
+const MIN_WORK: usize = 64 * 1024;
 /// A number may have at most this many significant digits to be emitted.
 const MAX_SIGNIFICANT_DIGITS: usize = 15;
 
@@ -37,6 +43,9 @@ pub enum Decline {
     NotJson,
     DuplicateKey,
     TooDeep,
+    /// Parsing would take more than [`MAX_PASSES`] passes over the input (deep nesting around a large
+    /// value). Declining keeps the cost of this step bounded.
+    Cost,
     /// A number whose text is not already canonical (exponent, `1.10`, `-0`, 16+ digits, ...).
     NumberForm,
     /// A form the spec requires but this subset does not implement.
@@ -115,9 +124,15 @@ fn map_error(e: &serde_json::Error) -> Decline {
     }
 }
 
-fn parse(raw: &str, depth: usize) -> Result<Node, Decline> {
+/// Parse `raw` and, recursively, every value in it. `work` counts the bytes handed to the parser
+/// so far and is checked against `limit`.
+fn parse(raw: &str, depth: usize, work: &mut usize, limit: usize) -> Result<Node, Decline> {
     if depth > MAX_DEPTH {
         return Err(Decline::TooDeep);
+    }
+    *work += raw.len();
+    if *work > limit {
+        return Err(Decline::Cost);
     }
     let raw = raw.trim_matches([' ', '\t', '\n', '\r']);
     match raw.as_bytes().first() {
@@ -125,7 +140,7 @@ fn parse(raw: &str, depth: usize) -> Result<Node, Decline> {
             let Pairs(pairs) = serde_json::from_str(raw).map_err(|e| map_error(&e))?;
             pairs
                 .into_iter()
-                .map(|(k, v)| Ok((k, parse(v.get(), depth + 1)?)))
+                .map(|(k, v)| Ok((k, parse(v.get(), depth + 1, work, limit)?)))
                 .collect::<Result<_, Decline>>()
                 .map(Node::Obj)
         }
@@ -133,7 +148,7 @@ fn parse(raw: &str, depth: usize) -> Result<Node, Decline> {
             let Items(items) = serde_json::from_str(raw).map_err(|e| map_error(&e))?;
             items
                 .into_iter()
-                .map(|v| parse(v.get(), depth + 1))
+                .map(|v| parse(v.get(), depth + 1, work, limit))
                 .collect::<Result<_, Decline>>()
                 .map(Node::Arr)
         }
@@ -524,7 +539,13 @@ pub fn encode_json(bytes: &[u8]) -> Result<String, Decline> {
         return Err(Decline::TooDeep);
     }
     let raw: Box<RawValue> = serde_json::from_slice(bytes).map_err(|e| map_error(&e))?;
-    let root = parse(raw.get(), 0)?;
+    let mut work = 0;
+    let root = parse(
+        raw.get(),
+        0,
+        &mut work,
+        bytes.len().saturating_mul(MAX_PASSES).max(MIN_WORK),
+    )?;
     let mut out = String::new();
     match &root {
         // An empty root object is the empty document (§8).
@@ -701,6 +722,24 @@ mod tests {
             enc(&brackets).unwrap(),
             format!("a: \"{}\\\"{}\"", "[".repeat(5000), "{".repeat(5000))
         );
+    }
+
+    #[test]
+    fn deep_nesting_around_a_large_value_is_bounded_by_construction() {
+        let leaf = format!("[{}]", vec!["1"; 50_000].join(","));
+        let nest = |n: usize| format!("{}{leaf}{}", "{\"a\":".repeat(n), "}".repeat(n));
+        // A realistic depth costs a handful of passes and encodes.
+        assert!(enc(&nest(4)).is_ok());
+        // Sixty levels around the same leaf would take sixty passes: declined, quickly.
+        let started = std::time::Instant::now();
+        assert_eq!(enc(&nest(60)), Err(Decline::Cost));
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
+        // Small documents are never refused for cost, however deep (within the depth cap).
+        assert!(
+            enc(&format!("{}1{}", "[".repeat(40), "]".repeat(40)))
+                .is_err_and(|d| d != Decline::Cost)
+        );
+        assert!(enc(&format!("{}1{}", "{\"a\":".repeat(30), "}".repeat(30))).is_ok());
     }
 
     #[test]
