@@ -10,8 +10,8 @@ this file is the source of truth for *how we build it*.
   shared grammar files, or helper binaries at runtime. Rust crates are fine; they compile in.
   - Linux release builds: `x86_64-unknown-linux-musl` / `aarch64-unknown-linux-musl` (fully static).
   - macOS: the release binary may load only `/usr/lib/libSystem.B.dylib`. `build.rs` passes
-    `-Wl,-dead_strip_dylibs` on Apple targets, which drops dylibs nothing references, notably
-    `libiconv` (the `libc` crate links it unconditionally on Apple). If a future dependency
+    `-Wl,-dead_strip_dylibs` on macOS targets (`target_os = "macos"`), which drops dylibs nothing references, notably
+    `libiconv` (the `libc` crate links it unconditionally on Apple platforms, macOS included). If a future dependency
     really calls iconv, the linker keeps it and the check fails: stop and decide explicitly, do not
     loosen this rule silently. Run `scripts/check-binary-deps.sh --build` after any dependency
     change; it inspects a freshly built artifact (macOS and Linux only; it exits 2, not 0, on

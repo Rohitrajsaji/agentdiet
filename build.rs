@@ -1,7 +1,7 @@
 //! Link-time policy for the release binary (see CLAUDE.md, "Single binary, zero runtime deps").
 //!
-//! On Apple targets the `libc` crate links `libiconv` unconditionally, even though AgentDiet never
-//! calls an iconv function. `-dead_strip_dylibs` makes the linker drop any dylib none of whose
+//! On macOS the `libc` crate links `libiconv` unconditionally, even though AgentDiet never
+//! calls an iconv function. `-dead_strip_dylibs` (passed for `target_os = "macos"` only) makes the linker drop any dylib none of whose
 //! symbols are referenced, so only `libSystem` stays. It lives here rather than in
 //! `.cargo/config.toml` because that file does not travel with `cargo install` and `RUSTFLAGS`
 //! overrides it. `scripts/check-binary-deps.sh` verifies the result on a built artifact.
