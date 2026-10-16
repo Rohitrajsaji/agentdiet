@@ -33,12 +33,31 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-const EXE: &str = env!("CARGO_BIN_EXE_agentdiet");
+const CARGO_EXE: &str = env!("CARGO_BIN_EXE_agentdiet");
 /// SPEC §7, B1.
 const B1_REQUIREMENT_MS: f64 = 0.2;
 const DEFAULT_SAMPLES: usize = 1000;
 const DEFAULT_WARMUP: usize = 50;
 const R1_ITERATIONS: usize = 10_000;
+
+/// The `agentdiet` executable under test. `cargo test --release` relinks `target/release/agentdiet`
+/// with dev-dependency features unified, so its bytes can differ from a plain `cargo build
+/// --release --locked`. Set `AGENTDIET_PERF_BIN` to time that exact artifact instead; the report
+/// records the sha256 of whichever binary ran.
+fn exe() -> PathBuf {
+    match std::env::var_os("AGENTDIET_PERF_BIN") {
+        Some(p) => {
+            let p = PathBuf::from(p);
+            assert!(
+                p.is_file(),
+                "AGENTDIET_PERF_BIN {} is not a file",
+                p.display()
+            );
+            fs::canonicalize(p).expect("canonicalize AGENTDIET_PERF_BIN")
+        }
+        None => PathBuf::from(CARGO_EXE),
+    }
+}
 
 /// Where a stock `true` lives. macOS has only `/usr/bin/true`; most Linux distributions have both.
 const TRUE_CANDIDATES: [&str; 2] = ["/usr/bin/true", "/bin/true"];
@@ -72,7 +91,7 @@ impl Fixture {
         fs::create_dir_all(&shims).expect("shims dir");
         fs::create_dir_all(&real).expect("real dir");
         symlink(true_bin, real.join("git")).expect("real/git");
-        symlink(EXE, shims.join("git")).expect("shims/git");
+        symlink(exe(), shims.join("git")).expect("shims/git");
         let shim_path = std::env::join_paths([&shims, &real]).expect("PATH");
         let direct_path = std::env::join_paths([&real]).expect("PATH");
         Self {
@@ -101,7 +120,7 @@ impl Fixture {
     }
 
     fn e1(&self) -> Command {
-        let mut cmd = self.command(Path::new(EXE), &self.direct_path);
+        let mut cmd = self.command(&exe(), &self.direct_path);
         cmd.args(["hook", "noop"]);
         cmd
     }
@@ -169,10 +188,27 @@ fn capture(program: &str, args: &[&str]) -> String {
 }
 
 fn machine_info() -> Value {
-    let dirty = capture("git", &["status", "--porcelain", "--untracked-files=no"]);
+    let exe = exe();
+    // Tracked and untracked files that can change the measured binary or this benchmark; the
+    // user's stray files (`.DS_Store`) are not part of the build.
+    let dirty = capture(
+        "git",
+        &[
+            "status",
+            "--porcelain",
+            "--untracked-files=normal",
+            "--",
+            "src",
+            "tests",
+            "scripts",
+            "build.rs",
+            "Cargo.toml",
+            "Cargo.lock",
+        ],
+    );
     let signing = if cfg!(target_os = "macos") {
         // `codesign -dv` writes to stderr and fails on an unsigned binary.
-        let out = Command::new("codesign").args(["-dv", EXE]).output();
+        let out = Command::new("codesign").args(["-dv"]).arg(&exe).output();
         match out {
             Ok(o) if o.status.success() => "signed (ad-hoc or identity)",
             Ok(_) => "unsigned",
@@ -193,9 +229,9 @@ fn machine_info() -> Value {
         "rustc": capture("rustc", &["--version"]),
         "git_commit": capture("git", &["rev-parse", "HEAD"]),
         "git_dirty": dirty != "unknown" && !dirty.is_empty(),
-        "binary": EXE,
-        "binary_bytes": fs::metadata(EXE).map(|m| m.len()).unwrap_or(0),
-        "binary_sha256": fs::read(EXE)
+        "binary": exe.display().to_string(),
+        "binary_bytes": fs::metadata(&exe).map(|m| m.len()).unwrap_or(0),
+        "binary_sha256": fs::read(&exe)
             .map(|b| agentdiet::fsutil::sha256_hex(&b))
             .unwrap_or_default(),
         "code_signing": signing,
