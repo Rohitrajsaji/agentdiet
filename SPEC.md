@@ -116,8 +116,8 @@ Global state lives in `~/.agentdiet/state.json`:
 - While paused, the Diet Engine performs **no trimming, TOON encoding or folding**, and
   `raw_tokens_passed_while_paused` accumulates the estimated tokens (§3 Tier 2, "Estimated tokens")
   of the output passed. Secret scrubbing still applies (precedence rule P3): "raw" means
-  *untransformed*, not *unscrubbed*. Only the exclusions listed under P3 (human shim path, binary and
-  oversize output) bypass scrubbing.
+  *untransformed*, not *unscrubbed*. Only the two scrubbing exclusions listed under P3 (the human shim
+  path and binary output) bypass scrubbing.
 - **SessionStart while paused never blocks.** Hooks have no interactive TTY, so nothing ever
   reads stdin for confirmation.
   - `prompt` (default): emit exactly one line to hook stdout:
@@ -125,8 +125,9 @@ Global state lives in `~/.agentdiet/state.json`:
   - `auto_resume`: set `status` to `"active"` and emit a one-line notice that it resumed.
 - **Paused whisper:** while paused, any output whose estimated token count exceeds **3,000** gets
   that same one-line paused notice appended. This is the one sanctioned exception to "never
-  inflate" (§6): the notice is not counted against any saving. Binary and oversize output (P3) never
-  get a notice, because they are passed through byte-identical.
+  inflate" (§6): the notice is not counted against any saving. Binary output (P3) never gets a
+  notice, because it is passed through byte-identical; oversize output (P3) is scrubbed, exceeds
+  the threshold by definition, and does get it.
 
 ### 2.4 Escape Hatches
 
@@ -186,13 +187,16 @@ wins**.
   (`[REDACTED:aws-access-key-id]` replaces a 20-byte key with 28 bytes), so "never inflate" (P5) is
   measured against the *scrubbed* original. Redacted spans are not stored anywhere and are
   **never recoverable**. Detection is pattern based and best effort: AgentDiet does not claim to find
-  every secret. Three exclusions are explicit:
+  every secret. Exactly **two exclusions from scrubbing** are explicit:
   1. the transparent human shim path (Tier 1);
   2. **binary output** (a NUL byte in the first 8 KiB): passed through byte-identical, neither
      scrubbed, transformed nor stored, because rewriting inside binary data corrupts it. Text in
-     UTF-16 contains NULs and is therefore treated as binary;
-  3. **oversize output**: more than 8 MiB (initial value, to be re-evaluated with measurements). It
-     is scrubbed but never transformed or stored.
+     UTF-16 contains NULs and is therefore treated as binary.
+
+  Separately, **oversize output** (more than 8 MiB; an initial value, to be re-evaluated with
+  measurements) *is* scrubbed, but is never transformed, stored or indexed: it is emitted as the
+  scrubbed original with no breadcrumb. This is a limit on transformation, not an exclusion from
+  scrubbing.
 - **P4 — Identity.** If nothing was redacted and no transform was applied, the output is the exact
   input bytes, including non-UTF-8 bytes, CRLF line endings and a missing final newline.
 - **P5 — Never inflate (final check).** A replacement (trimmed text, TOON or folded text) is emitted
@@ -338,6 +342,9 @@ lesser form):
   `{ /* folded L120-188: agentdiet show '#4f9a1b2c' --lines 120..188 */ }`. Line numbers refer to
   the scrubbed Vault copy; a multi-line redaction (a private key) shifts them relative to the
   file on disk, which a test must cover.
+- In Python the folded body becomes `...` followed by a `#` comment carrying the same marker text,
+  so the result is still valid at the original indentation; in the brace languages the body becomes
+  the `{ /* … */ }` form above.
 - A folded view is not the file. How an agent edits a file after a folded `Read` is an open
   question for the hook slice **[4]**.
 
@@ -345,8 +352,9 @@ lesser form):
 
 1. **Scrub secrets** before storing or emitting anything the engine handles, using regexes ported
    from Secretlint's rule set. Secretlint is MIT-licensed; ported patterns keep attribution in a
-   `THIRD_PARTY_NOTICES` file. The explicit exclusions (human shim path, binary and oversize
-   output) are listed under precedence rule P3 in Tier 2. Detection is best effort, not a guarantee.
+   `THIRD_PARTY_NOTICES` file. The two exclusions (human shim path and binary
+   output) are listed under precedence rule P3 in Tier 2; oversize output is scrubbed but not
+   transformed or stored. Detection is best effort, not a guarantee.
 2. **Store the scrubbed output losslessly** (byte-exact apart from redactions) at `~/.agentdiet/cas/<full_sha256>.log`. The 64-hex sha256 is
    computed over the scrubbed output. Storage is content-addressed, so identical output dedupes.
 3. **7-day auto-GC.** CAS files older than 7 days are deleted opportunistically (on writes, or by
@@ -382,7 +390,7 @@ lesser form):
   of the same content removes the tombstone. Tombstones are kept until the vault is purged: they
   are the vault's memory of which IDs were once issued.
 - **An old ID never resolves to an unrelated entry.** The short ID shown for an entry is the
-  shortest prefix (at least 4 hex) that no *other* entry shares, counting both live entries and
+  shortest prefix (at least 4 hex today; at least 8 after **[3B]**, item 4) that no *other* entry shares, counting both live entries and
   tombstones. Resolving an input prefix looks at live entries **and** tombstones:
   - one match, live: that entry;
   - one match, tombstone: `expired`;
@@ -476,8 +484,7 @@ Precedence between them is fixed by rules P1–P7 (§3 Tier 2).
 - Thinking blocks are never touched.
 - Secrets are never written to disk unscrubbed (P1). The one exception is the byte-exact backup of
   a user's own config file made by `init` (see §2.2), which is kept `0700`/`0600`. Secret
-  detection is best effort and does not cover the human shim path, binary output or oversize
-  output (P3).
+  detection is best effort and does not cover the human shim path or binary output (P3).
 - Hooks never block on stdin or a TTY.
 
 ## 7. Performance
