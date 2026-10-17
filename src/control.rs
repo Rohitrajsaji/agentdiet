@@ -2,11 +2,13 @@
 
 use std::fmt;
 use std::io::IsTerminal;
+use std::time::SystemTime;
 
 use anyhow::Context;
 use inquire::error::InquireError;
 
 use crate::Paths;
+use crate::cas::{Cas, CasError};
 use crate::init::{self, InitOptions, Target};
 use crate::state::{self, Change, Mode, State, Status};
 
@@ -67,7 +69,7 @@ pub fn pause(paths: &Paths) -> anyhow::Result<String> {
     let change = state::set_status(paths, Status::Paused).context("could not update state.json")?;
     Ok(match change {
         Change::Changed => {
-            "⏸ AgentDiet paused. Output passes through raw until you run 'agentdiet resume'.".into()
+            "⏸ AgentDiet paused. Output passes through raw until you run 'agentdiet resume' or type '@diet resume'.".into()
         }
         Change::Unchanged => "AgentDiet is already paused.".into(),
     })
@@ -82,15 +84,45 @@ pub fn resume(paths: &Paths) -> anyhow::Result<String> {
     })
 }
 
-/// Text for "Inspect last trimmed output". The vault itself arrives later, so
-/// for now this reports the recorded short ID.
-pub fn inspect_last(state: &State) -> String {
-    match &state.last_trimmed_id {
-        Some(id) => format!(
-            "Last trimmed output: #{id}\nRun: agentdiet show #{id}  (full content viewing arrives with the vault)"
-        ),
-        None => "Nothing has been trimmed yet.".into(),
+/// "Inspect last trimmed output" shows at most this many lines of the entry.
+pub const INSPECT_MAX_LINES: usize = 400;
+
+/// Text for "Inspect last trimmed output": the recorded ID and the Vault entry's (scrubbed)
+/// content, up to [`INSPECT_MAX_LINES`] lines.
+pub fn inspect_last(paths: &Paths, state: &State, now: SystemTime) -> String {
+    let Some(id) = &state.last_trimmed_id else {
+        return "Nothing has been trimmed yet.".into();
+    };
+    let show = format!("agentdiet show '#{id}'");
+    let bytes = match Cas::new(paths.cas_dir()).read(id, None, now) {
+        Ok(bytes) => bytes,
+        Err(CasError::Expired(_)) => {
+            return format!("Last trimmed output: #{id} has expired from the vault (7-day TTL).");
+        }
+        Err(CasError::NotFound(_)) => {
+            return format!("Last trimmed output: #{id} is not in the vault.");
+        }
+        Err(CasError::Corrupt(_)) => {
+            return format!("Last trimmed output: #{id} is corrupt in the vault; nothing shown.");
+        }
+        Err(e) => return format!("Last trimmed output: #{id} could not be read: {e}"),
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    let total = text.lines().count();
+    let mut out = format!("Last trimmed output: #{id} ({total} lines)\n");
+    for line in text.lines().take(INSPECT_MAX_LINES) {
+        out.push_str(line);
+        out.push('\n');
     }
+    if total > INSPECT_MAX_LINES {
+        out.push_str(&format!(
+            "… {} more lines. Run: {show}\n",
+            total - INSPECT_MAX_LINES
+        ));
+    } else {
+        out.push_str(&format!("Run: {show}\n"));
+    }
+    out
 }
 
 /// Open the Control Center. Without a terminal, print the status and exit
@@ -148,7 +180,7 @@ fn handle(paths: &Paths, item: MenuItem, state: &State) -> anyhow::Result<()> {
             };
             println!("{message}");
         }
-        MenuItem::InspectLast => println!("{}", inspect_last(state)),
+        MenuItem::InspectLast => print!("{}", inspect_last(paths, state, SystemTime::now())),
         MenuItem::SwitchMode => switch_mode(paths, state)?,
         MenuItem::ManageAssistants => manage_assistants(paths)?,
         MenuItem::OpenTop => {
@@ -295,10 +327,34 @@ mod tests {
     }
 
     #[test]
-    fn inspect_reports_recorded_id() {
+    fn inspect_shows_the_last_trimmed_entry() {
+        let dir = TempDir::new().unwrap();
+        let p = paths(&dir);
+        let now = SystemTime::now();
         let mut s = State::default();
-        assert!(inspect_last(&s).contains("Nothing"));
-        s.last_trimmed_id = Some("4f9a".into());
-        assert!(inspect_last(&s).contains("#4f9a"));
+        assert!(inspect_last(&p, &s, now).contains("Nothing"));
+
+        s.last_trimmed_id = Some("4f9a1b2c".into());
+        assert!(inspect_last(&p, &s, now).contains("not in the vault"));
+
+        let body: String = (1..=450).map(|i| format!("line {i}\n")).collect();
+        let put = Cas::new(p.cas_dir())
+            .put(&crate::scrubber::scrub(body.as_bytes()), now)
+            .unwrap();
+        s.last_trimmed_id = Some(put.short_id.clone());
+        let shown = inspect_last(&p, &s, now);
+        assert!(shown.starts_with(&format!(
+            "Last trimmed output: #{} (450 lines)\n",
+            put.short_id
+        )));
+        assert!(shown.contains("\nline 1\n") && shown.contains("\nline 400\n"));
+        assert!(!shown.contains("line 401\n"));
+        assert!(shown.contains(&format!(
+            "… 50 more lines. Run: agentdiet show '#{}'",
+            put.short_id
+        )));
+
+        let later = now + crate::cas::DEFAULT_TTL + std::time::Duration::from_secs(1);
+        assert!(inspect_last(&p, &s, later).contains("expired"));
     }
 }

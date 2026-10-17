@@ -343,6 +343,31 @@ impl Cas {
         }
     }
 
+    /// The ID to emit for each full sha (as [`PutResult::short_id`] would give it now), or `None`
+    /// for a sha that is not a live entry. One scan under the lock serves every sha; a vault that
+    /// was never written answers `None` throughout without creating anything.
+    pub fn short_ids(
+        &self,
+        shas: &[&str],
+        now: SystemTime,
+    ) -> Result<Vec<Option<String>>, CasError> {
+        let Some(_guard) = self.lock_existing()? else {
+            return Ok(vec![None; shas.len()]);
+        };
+        self.gc_locked(now)?;
+        let entries = self.scan()?;
+        let known: Vec<String> = entries.iter().map(|e| e.sha.clone()).collect();
+        Ok(shas
+            .iter()
+            .map(|sha| {
+                entries
+                    .iter()
+                    .any(|e| e.sha == *sha && e.kind == Kind::Live)
+                    .then(|| shortest_unique_prefix(sha, &known))
+            })
+            .collect())
+    }
+
     /// The raw (scrubbed) bytes of an entry, optionally sliced by line.
     ///
     /// The bytes are hashed first: an entry that no longer matches its name is
@@ -539,5 +564,26 @@ mod tests {
         let x = format!("{}0", "a".repeat(63));
         let y = format!("{}1", "a".repeat(63));
         assert_eq!(shortest_unique_prefix(&x, &[x.clone(), y]), x);
+    }
+
+    #[test]
+    fn short_ids_match_put_and_skip_dead_entries() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let now = SystemTime::now();
+        let cas = Cas::new(dir.path().join("cas"));
+        assert_eq!(cas.short_ids(&["ab"], now).unwrap(), vec![None]);
+        assert!(
+            !dir.path().join("cas").exists(),
+            "a read never creates the vault"
+        );
+
+        let put = cas.put(&crate::scrubber::scrub(b"hello\n"), now).unwrap();
+        let missing = "0".repeat(64);
+        assert_eq!(
+            cas.short_ids(&[&put.sha, &missing], now).unwrap(),
+            vec![Some(put.short_id), None]
+        );
+        let later = now + DEFAULT_TTL + Duration::from_secs(1);
+        assert_eq!(cas.short_ids(&[&put.sha], later).unwrap(), vec![None]);
     }
 }

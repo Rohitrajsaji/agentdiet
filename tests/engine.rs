@@ -1,4 +1,5 @@
-//! The Diet Engine end to end (library API only: nothing in the CLI, shims or hooks calls it yet).
+//! The Diet Engine end to end through its library API (the hook and shim entry points are covered
+//! by `tests/hooks.rs` and `tests/shim_agent.rs`).
 //! Everything runs in a `TempDir` home; the recovery tests execute the literal command from the
 //! breadcrumb with the built `agentdiet` binary.
 

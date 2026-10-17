@@ -57,12 +57,24 @@ pub fn atomic_write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     write_via_temp(path, bytes, Flavor::Private)
 }
 
+/// [`atomic_write_private`] without any `fsync`: for scratch state whose loss in a crash is
+/// harmless (the per-session sidecars), where a durable write would cost more than the work it
+/// records. Readers still only ever see a whole file.
+pub fn atomic_write_scratch(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        create_private_dir_all(parent)?;
+    }
+    write_via_temp(path, bytes, Flavor::Scratch)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Flavor {
     /// Carry over the permissions of the file being replaced.
     Config,
     /// Always `0600`.
     Private,
+    /// `0600` and not synced.
+    Scratch,
 }
 
 fn write_via_temp(target: &Path, bytes: &[u8], flavor: Flavor) -> io::Result<()> {
@@ -77,7 +89,9 @@ fn write_via_temp(target: &Path, bytes: &[u8], flavor: Flavor) -> io::Result<()>
 fn write_and_rename(target: &Path, tmp: &Path, bytes: &[u8], flavor: Flavor) -> io::Result<()> {
     let mut file = private_options().create_new(true).open(tmp)?;
     file.write_all(bytes)?;
-    file.sync_all()?;
+    if flavor != Flavor::Scratch {
+        file.sync_all()?;
+    }
     drop(file);
     if flavor == Flavor::Config
         && let Ok(meta) = fs::metadata(target)
@@ -85,6 +99,9 @@ fn write_and_rename(target: &Path, tmp: &Path, bytes: &[u8], flavor: Flavor) -> 
         fs::set_permissions(tmp, meta.permissions())?;
     }
     fs::rename(tmp, target)?;
+    if flavor == Flavor::Scratch {
+        return Ok(());
+    }
     // The rename is only a promise until the directory entry is on disk.
     match target.parent() {
         Some(dir) if !dir.as_os_str().is_empty() => sync_dir(dir),

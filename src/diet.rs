@@ -1,8 +1,8 @@
 //! The Diet Engine's shared pipeline (SPEC §3 Tier 2).
 //!
-//! A library, not an entry point: nothing in the CLI, the shims or the hooks calls it before
-//! Slice 4. It takes the captured bytes of one tool output plus structured metadata ([`Input`]) and
-//! returns the bytes to emit ([`Outcome`]). It never prints and never runs a command.
+//! A library called by the hook router (`hook.rs`, PostToolUse) and the shims' agent path
+//! (`shim.rs`). It takes the captured bytes of one tool output plus structured metadata ([`Input`])
+//! and returns the bytes to emit ([`Outcome`]). It never prints and never runs a command.
 //!
 //! ```text
 //! classify -> scrub -> candidate -> pre-check            (pure: [`transform`])
@@ -461,7 +461,8 @@ impl Outcome {
     }
 }
 
-fn note(text: &str) -> String {
+/// A diagnostic for stderr: at most [`MAX_NOTE_BYTES`] of `text`, scrubbed.
+pub fn note(text: &str) -> String {
     scrub(truncate_chars(text, MAX_NOTE_BYTES).as_bytes()).to_lossy_string()
 }
 

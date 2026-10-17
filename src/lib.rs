@@ -2,7 +2,9 @@
 //!
 //! Slice 1: workspace scaffold, state ledger (pause/resume), Control Center,
 //! and `init` / `eject`. Slice 2: secret scrubber, CAS vault and project
-//! memory index. The diet engine and TUI land in later slices.
+//! memory index. Slice 3B: the Diet Engine (`diet`, `compress`, `toon`,
+//! `folding`). Slice 4: the hook router (`hook`), agent-path shims (`shim`) and
+//! per-session sidecars (`session`). The TUI and scanner land later.
 
 use std::path::{Path, PathBuf};
 
@@ -13,10 +15,12 @@ pub mod control;
 pub mod diet;
 pub mod folding;
 pub mod fsutil;
+pub mod hook;
 pub mod init;
 pub mod mcp;
 pub mod memory;
 pub mod scrubber;
+pub mod session;
 pub mod shim;
 pub mod state;
 pub mod toon;
@@ -83,6 +87,11 @@ impl Paths {
 
     pub fn cas_dir(&self) -> PathBuf {
         self.agentdiet_home.join("cas")
+    }
+
+    /// Per-session sidecars: the raw-turn flag and retry signatures (SPEC §2.4).
+    pub fn sessions_dir(&self) -> PathBuf {
+        self.agentdiet_home.join("sessions")
     }
 
     /// Project-local `memory.db` (SQLite, WAL, FTS5).

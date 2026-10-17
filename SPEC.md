@@ -82,7 +82,7 @@ Running bare `agentdiet` opens an interactive Control Center menu (`inquire`), i
   Claude Code gets hooks for SessionStart, UserPromptSubmit, PreToolUse, PostToolUse and
   PreCompact; the other assistants get only the MCP entry until the hook slice.
 - Shim commands: `git`, `cargo`, `pytest`, `npm`, `pnpm`, `yarn`, `go`, `make`, `ruff`, `docker`,
-  `gh`. Until the Diet Engine ships, shim mode always execs the real binary.
+  `gh`. What a shim does with them is decided per call (§3 Tier 1, "Shim decision order").
 
 ### 2.3 Stateful Pause / Resume
 
@@ -135,11 +135,32 @@ Global state lives in `~/.agentdiet/state.json`:
 ### 2.4 Escape Hatches
 
 - If a UserPromptSubmit contains `raw`, `full` or `unfiltered`, compression is bypassed for the
-  **next turn only**. Matching is whole-word and case-insensitive, so "fully" or "full-stack"
-  do not trigger it.
+  **next turn only**: every tool output until the next UserPromptSubmit, which sets or clears the
+  flag again (SessionStart clears it too). Matching is whole-word and case-insensitive, where a word
+  is a maximal run of ASCII letters, digits, `_` and `-`, so "fully" or "full-stack" do not trigger
+  it, while "raw." or "(full)" do.
 - Running the exact same command twice in a row auto-expands the output on the retry. "Same" means
-  identical structured argv (and working directory) as the immediately preceding engine invocation
-  in the same session; how that is tracked is decided with the hook wiring **[4]**.
+  identical structured argv (and working directory) as the immediately preceding tool call in the
+  same session. Tracking:
+  - **Hooks** key a session sidecar by the payload's `session_id`. PreToolUse computes a signature
+    for every tool call (Bash: working directory plus `parse_simple_command` argv, or the raw command
+    string when it is not one simple command; any other tool: tool name plus its input) and, when it
+    equals the previous call's signature, marks that `tool_use_id` as a retry. PostToolUse bypasses
+    a marked call.
+  - **Shims** compare working directory plus argv against the previous shim run in the same
+    sidecar, kept in a field of their own (a hook signature and a shim signature never compare
+    equal). Claude Code exports `CLAUDE_CODE_SESSION_ID` to the commands it runs, so a shim under
+    Claude Code uses that session's sidecar and sees the raw-turn flag set by UserPromptSubmit.
+    Elsewhere a shim keys its sidecar by the PID of its nearest AI-agent ancestor (`pid:<n>`), or by
+    the shared key `agent:unknown` when the agent was recognised only by an environment marker;
+    those agents have no hooks, so only retries apply to them.
+  - Sidecars live at `~/.agentdiet/sessions/<first 32 hex of sha256(key)>.json` (directory `0700`,
+    files `0600`) and hold only `raw_turn` and sha256 hashes (the previous hook signature, the
+    previous shim signature, the retry's `tool_use_id`): never command text (P1). Every
+    read-modify-write holds `sessions/.lock` for at most 100 ms; a sidecar that cannot be read,
+    written or locked counts as "no bypass" (fail open). Sidecars are scratch state, written
+    atomically but without `fsync`: a crash can only lose a bypass. SessionStart deletes sidecars
+    older than 7 days. `state.json` keeps exactly the §2.3 shape.
 - Every bypass skips trimming, TOON and folding and writes nothing to the Vault. None of them skips
   secret scrubbing (precedence rule P3).
 
@@ -149,26 +170,121 @@ Global state lives in `~/.agentdiet/state.json`:
 
 - `main.rs` inspects `argv[0]`. If invoked as `git`, `pytest`, `cargo` (and so on) through
   `~/.agentdiet/shims/`, it runs in shim mode.
-- Shim mode walks the parent process tree (PPID chain) **[4]**:
-  - **No AI-agent ancestor (human shell):** `execv` straight through to the real binary
-    (resolved from `PATH` with the shims directory excluded). The requirement is **< 0.2 ms** of
-    added end-to-end time; it is currently **NOT MET** (§7).
-    This path is *transparent*: the real command writes straight to the user's terminal, so
-    nothing is captured, scrubbed, stored or measured. AgentDiet makes no privacy claim about it.
-  - **AI-agent ancestor:** run the command and route its output through the Diet Engine.
-- Until the PPID walk and Engine wiring ship, shim mode always execs the real binary.
-- Hook mode (`agentdiet hook <event>`) handles SessionStart, UserPromptSubmit, PreToolUse,
-  PostToolUse and PreCompact **[4]**. Whether and how a PostToolUse hook may *replace* a tool's
-  output (Claude Code's `updatedToolOutput`) must be verified against the current official docs and
-  version-tested before it is relied on; nothing here assumes it.
+- Shim mode decides between two paths:
+  - **Transparent (human) path:** `execv` straight through to the real binary (resolved from `PATH`
+    with the shims directory excluded). The requirement is **< 0.2 ms** of added end-to-end time; it
+    is currently **NOT MET** (§7). Nothing is captured, scrubbed, stored or measured, and AgentDiet
+    makes no privacy claim about it.
+  - **Agent path:** run the command, capture its stdout and stderr, and route each through the Diet
+    Engine (§3 Tier 2) as `Shell { argv, exit }`.
+- **Shim decision order** (first match wins, cheapest checks first, so a human's terminal pays for
+  no process walk):
+  1. `AGENTDIET_SHIM_ACTIVE` is set → transparent. The agent path sets it on its child, so a shimmed
+     command run by another shimmed command (a `git` inside a `cargo` build script) is never
+     captured: its output is read by a program, not the model.
+  2. `AGENTDIET_FORCE_HUMAN` set → transparent; `AGENTDIET_FORCE_AGENT` set → skip steps 7–8.
+  3. stdin or stdout is a terminal → transparent (a human is at it, or the command is interactive).
+  4. stdout is a character device (`> /dev/null`) → transparent.
+  5. `compress::detect(argv)` finds no compressible shape → transparent. Only recognised shapes with
+     finite output are captured, so dev servers (`npm run dev`, `cargo run`), `gh … --json` and
+     interactive commands are never buffered.
+  6. stdout is not the **same open file as the parent's stdout** → transparent. Identity is device and
+     inode (macOS `proc_pidfdinfo` vnode info, Linux `stat` of `/proc/<pid>/fd/1`) or, for a macOS
+     pipe, the pipe's kernel handle; an identity that cannot be read counts as different. A command
+     the agent's shell runs as-is writes where the shell writes, which is the agent; a redirection
+     (`> out.txt`) or a pipe onward (`| tail`) gives the command its own stdout, so it is never
+     dieted. Observed with Claude Code 2.1.302: a Bash command's stdout and stderr are a **regular
+     file** (Claude Code's capture file) shared with the per-command `zsh` that is its parent, stdin is
+     `/dev/null`, and nothing is a terminal; a file type alone could not tell that capture file from
+     `> out.txt`.
+  7. One of the environment markers `CLAUDECODE`, `CURSOR_TRACE_ID`, `GEMINI_CLI` is set → agent.
+  8. The parent chain contains an AI agent → agent; otherwise transparent. The walk follows parent
+     PIDs from the shim's parent, at most **16** hops, stops at PID 1 or a PID already seen, and
+     reads process data through libc only (macOS `proc_pidinfo`/`proc_pidpath`, Linux `/proc`), never
+     through a helper binary. A process is an agent when its process name (macOS `p_comm`, Linux
+     `comm`) or its executable's base name, lowercased, is one of `claude`, `cursor`, `windsurf`,
+     `codex`, `aider`, `gemini`, `copilot`, `opencode`, alone or followed by a space or `-`
+     (`Cursor Helper (Plugin)`). Both are needed: Claude Code's executable is named after its
+     version (`…/claude/versions/2.1.302`) while its process name is `claude`. Substrings never match
+     (`claudette` is not `claude`).
+- Agent path details: stdin is inherited; stdout and stderr are read on two threads until the child
+  exits; each stream is one engine call (so each may carry its own breadcrumb and Vault entry) and is
+  written back to its own descriptor. The shim then exits with the child's code, or re-raises the
+  child's terminating signal (falling back to exit `128 + n`). A failure to spawn exits `127`/`126`
+  as the transparent path does. Nothing re-runs the command (P2).
+- **Known misses (shims):** an agent started as `node`/`python`/`bun` is found only through an
+  environment marker. A command whose shell `exec`s it in the shell's own place (`sh -c 'cargo
+  test'` with nothing after it) has the agent itself as its parent and is not dieted (step 6); Claude
+  Code 2.1.302 runs commands under a per-command shell that does not do this. Inside a pipeline the
+  last command shares the shell's stdout, so in `cat log | cargo test` only `cargo test` is dieted,
+  correctly; but `(cargo test) | tail` is not, because the subshell's stdout is already the pipe.
+  A live check under Claude Code 2.1.302 (2026-10-17): `cargo test` run as-is was dieted with a
+  breadcrumb and kept exit 101; `cargo test | tail -3` and `cargo test > out.txt` received the raw
+  output.
+- Hook mode (`agentdiet hook <event>`, §3 Tier 1 "Hook router").
 - **PreToolUse must protect interleaved thinking blocks:** it never modifies, reorders or
-  strips them.
+  strips them. It achieves this by emitting nothing at all: no `updatedInput`, no decision.
+
+#### Hook router
+
+Contract checked against the official Claude Code hooks reference (code.claude.com/docs/en/hooks,
+read 2026-10-17) and payloads recorded by Claude Code **2.1.302**. A newer Claude Code may change
+these shapes; re-checking them is a deliberate change to this section.
+
+- **Input.** One JSON object on stdin with `session_id`, `cwd`, `hook_event_name` and per-event
+  fields. Stdin is read only for the five handled events (unknown events, and `noop` used by the
+  B2 benchmark, return at once without touching it), never when it is a terminal, for at most
+  **5 s** and **32 MiB**. A timeout, an oversize payload, invalid JSON, a missing field or any
+  internal error makes the hook exit `0` with nothing on stdout (fail open). Diagnostics go to stderr
+  only. The payload is never echoed back.
+- **Output channel.** SessionStart and UserPromptSubmit add plain stdout to the model's context;
+  PostToolUse can only change a tool result through JSON
+  `{"hookSpecificOutput":{"hookEventName":"PostToolUse","updatedToolOutput":…}}`, whose value must
+  match that tool's own result shape (Claude Code silently ignores a mismatched value); PreCompact's
+  output is discarded by Claude Code.
+- **SessionStart:** clears the session's sidecar and deletes stale sidecars. While paused: `prompt` prints the §2.3 notice line, `auto_resume` resumes and
+  prints one line saying so. With `source: "compact"` (the SessionStart that follows a compaction)
+  it also prints a **snapshot** of at most 2 KiB: the last trimmed ID and the most recent
+  `memory.db` entries (kind, title, ID if the Vault entry is live), all of it already-scrubbed text.
+  memory.db is never created just to be read.
+- **UserPromptSubmit:** `@diet pause` / `@diet resume` (case-insensitive, whole words, anywhere in
+  the prompt) set the status and print the one-line confirmation of `agentdiet pause`/`resume`; the
+  escape words set the raw-turn flag (§2.4).
+- **PreToolUse:** records the retry signature (§2.4); prints nothing.
+- **PostToolUse:** builds engine settings from `state.json` (mode, paused) and the sidecar (bypass:
+  a marked retry is `RepeatedCommand`, else the raw-turn flag is `RawNextTurn`) and runs the engine
+  per text field; it prints the replacement JSON only if some field's bytes changed. A copy of
+  `tool_response` is made with only those string fields replaced, every other field kept as it was.
+  - `Bash`: the result is `{stdout, stderr, interrupted, isImage, noOutputExpected, …}`. `stdout` and
+    `stderr` are each `Shell { argv, exit: 0 }` (PostToolUse fires only for a successful command),
+    argv from `parse_simple_command` or empty when the command is not one simple command (then the
+    text is only scrubbed). A field that already carries an AgentDiet breadcrumb line was dieted by a
+    shim and is left alone.
+  - `Read` — result `{type: "text", file: {content, filePath, numLines, startLine, totalLines}}`,
+    `content` being the file's own text. **Not folded** in Slice 4 (how an agent edits a folded file
+    is still open, §3 Signature folding): passed as `Read { extent: Ranged }`, so it is scrubbed
+    only.
+  - MCP tools (`mcp__*`, result a string or an array of `{type: "text", text}` blocks) and
+    `WebFetch` (`result`): each text is `ModelJson`. JSON may become TOON; anything else is only
+    scrubbed.
+  - Every other tool is left untouched.
+- **Failing commands.** A Bash command that exits non-zero fires PostToolUseFailure, which can only
+  *add* context, never replace the result. The hook therefore cannot shrink a failing `cargo test`;
+  the shim (agent path) is what diets failing commands. PostToolUseFailure is not registered.
+- **PreCompact:** exits `0` with no output and never blocks compaction; the snapshot is delivered by
+  the SessionStart that follows (above).
+- **Panics.** The hook and the agent shim install a panic hook that prints only `PANIC_NOTE` to
+  stderr and never the payload; the hook then exits `0` with nothing on stdout.
+- **Live check.** Unit and integration tests cannot prove that a given Claude Code accepts the
+  `updatedToolOutput` shape. It is verified by hand: `agentdiet init --only claude --project` in a
+  scratch project, then a large successful `cargo test` through Claude Code, and the model must see
+  the breadcrumb. Status: see §8.
 
 ### Tier 2 — Fast-Path Diet Engine
 
-Slice 3B delivers the engine as a **library API** with no user-facing entry point: nothing in the
-CLI, shims or hooks calls it before Slice 4, and no document may claim end-to-end integration
-until then. Its tests call it directly. **[3B]**
+Slice 3B delivered the engine as a **library API**; Slice 4 calls it from the hook router
+(PostToolUse) and the shims' agent path (§3 Tier 1). End-to-end acceptance by Claude Code is
+subject to the live check recorded there.
 
 #### Output pipeline and precedence **[3B]**
 
@@ -191,7 +307,11 @@ wins**.
   measured against the *scrubbed* original. Redacted spans are not stored anywhere and are
   **never recoverable**. Detection is pattern based and best effort: AgentDiet does not claim to find
   every secret. Exactly **two exclusions from scrubbing** are explicit:
-  1. the transparent human shim path (Tier 1);
+  1. the transparent shim path (Tier 1). This includes a shim run *by an agent* whenever the decision
+     order picks the transparent path (a terminal, a device or another program's pipe on stdout, a
+     nested shim, or an argv shape the engine does not compress): what reaches the agent then is
+     unscrubbed. Under
+     Claude Code, a successful Bash call's output is still scrubbed by PostToolUse;
   2. **binary output** (a NUL byte in the first 8 KiB): passed through byte-identical, neither
      scrubbed, transformed nor stored, because rewriting inside binary data corrupts it. Text in
      UTF-16 contains NULs and is therefore treated as binary.
@@ -293,13 +413,14 @@ breadcrumb. A large number of warnings is never a reason to drop them.
   executable and arguments as an argv vector. A hook's shell string qualifies only if it parses as
   exactly one simple command (no pipe, `;`, `&`, `&&`, `||`, redirection, subshell, command
   substitution or newline outside quotes). Anything else is left unchanged. Known miss: compound
-  commands such as `cd app && cargo test` are not compressed.
+  commands such as `cd app && cargo test` are not compressed by the hook (a shimmed `cargo` inside
+  them still is, on the agent path).
 - **Machine-readable output is never altered:** `--porcelain`, `-z`, `--format`/`--pretty`/
   `--template`, `--json`, `--message-format` (any value), `--output-format`, `-json` and similar
   flags; `git diff`, `git log`, `git show`, `git blame` and `git status --short`; and any invocation
-  whose stdout is redirected to a file or piped onward. Detecting a redirected stdout in shim mode is
-  a Slice 4 concern **[4]**: the engine is only ever handed output that goes to the model, and a
-  caller must not hand it output that goes to a file or another program.
+  whose stdout is redirected to a file or piped onward. The engine is only ever handed output that
+  goes to the model, and a caller must not hand it output that goes to a file or another program;
+  shims check that a command's stdout is its shell's own (§3 Tier 1, decision step 6).
 - **Dispatch is by executable and subcommand.** The executable is the basename of `argv[0]`
   (`python -m pytest` counts as pytest); global options that take a value are skipped by a per-tool
   table (`git -C dir`, `cargo +nightly`); an unknown option before the subcommand means the shape is
@@ -393,7 +514,7 @@ lesser form):
   parses with any error is left unchanged. A `Ranged` read is never folded: its line numbers would not
   be the file's, and it is not described as a complete file. The input is the file's own bytes; a
   tool's decorated rendering (such as `cat -n` line prefixes) must be converted to file bytes by the
-  hook layer **[4]** or not folded at all.
+  hook layer or not folded at all. Slice 4's hook does not fold Reads at all (§3 Hook router).
 - **Bounded parse.** The parser does not report a syntax error until it has read the whole input, so
   text that is not source code would otherwise run it to the end of the input. Two guards bound
   that cost:
@@ -433,8 +554,8 @@ lesser form):
 - In Python the folded body becomes `...` followed by a `#` comment carrying the same marker text,
   so the result is still valid at the original indentation; in the brace languages the body becomes
   the `{ /* … */ }` form above.
-- A folded view is not the file. How an agent edits a file after a folded `Read` is an open
-  question for the hook slice **[4]**.
+- A folded view is not the file. How an agent edits a file after a folded `Read` is still an open
+  question; until it is settled, no entry point folds a `Read`.
 
 ### Tier 3 — Persistent Vault
 
@@ -578,7 +699,8 @@ lesser form):
 
 ## 4. Filesystem Layout
 
-- **Global — `~/.agentdiet/`:** `state.json`, `backups/`, `shims/`, `cas/`
+- **Global — `~/.agentdiet/`:** `state.json`, `backups/`, `shims/`, `cas/`, `sessions/` (retry and
+  raw-turn sidecars, §2.4)
 - **Project-local — `.agentdiet/`:** `memory.db`
 
 ## 5. Commands
@@ -613,7 +735,7 @@ Precedence between them is fixed by rules P1–P7 (§3 Tier 2).
 - Thinking blocks are never touched.
 - Secrets are never written to disk unscrubbed (P1). The one exception is the byte-exact backup of
   a user's own config file made by `init` (see §2.2), which is kept `0700`/`0600`. Secret
-  detection is best effort and does not cover the human shim path or binary output (P3).
+  detection is best effort and does not cover the transparent shim path or binary output (P3).
 - Hooks never block on stdin or a TTY.
 
 ## 7. Performance
@@ -623,7 +745,7 @@ Requirements are not redefined to match a measurement.
 
 | Boundary | What it covers | Requirement | Status |
 |---|---|---|---|
-| **B1 — shim end-to-end overhead** | Wall time of spawning a shimmed command until it exits, minus the same command spawned directly (`E2 − E0`), human path, warm | < 0.2 ms | **NOT MET.** Median **2.24 ms** (p95 2.34, p99 2.59; n = 1000 iteration-matched pairs). |
+| **B1 — shim end-to-end overhead** | Wall time of spawning a shimmed command until it exits, minus the same command spawned directly (`E2 − E0`), human path, warm | < 0.2 ms | **NOT MET.** Slice 4: median **3.74–3.84 ms** against 3.22–3.33 ms for the Slice 3B binary in the same session (see "Slice 4 re-measurement" below). Slice 3A: median 2.24 ms (p95 2.34, p99 2.59; n = 1000 iteration-matched pairs). |
 | B2 — process launch | Spawning `agentdiet hook noop` minus spawning the direct command (`E1 − E0`) | none; context for B1 | median 1.12 ms (p95 1.20, p99 1.24; n = 1000) |
 | B3 — in-process routing | `shim_name` + `resolve_real` on a synthetic `PATH`, up to the `exec` call | none; context for B1 | median 0.027 ms (p95 0.029, p99 0.030; n = 10000) |
 | **B4 — Diet Engine fast path** | Pure transform (classify, scrub, candidate, checks) of an input of up to 256 KiB, in process, warm, no I/O | < 10 ms | **NOT MET** at 256 KiB. Worst p50 **28.7 ms**: realistic Rust source through the fold path (p99 29.6 ms; the tree-sitter parse alone is ~22 ms, so a large valid file cannot meet the budget while it is folded). Also over 10 ms at p50: adversarial "secrets everywhere" `shell` 13.7 ms and `read` 12.9 ms (the scrubber takes 6.2 ms on clean text of this size), "deep (60) JSON, large leaf" `json` 12.7 ms (TOON's 10-pass bound) and "diagnostic on every line" `read` 10.0 ms. Realistic 256 KiB JSON → TOON: p50 9.8 ms, p99 over 10 ms in every run (10.2–36.2 ms). Other realistic 256 KiB rows: cargo 7.7 ms, pytest 6.7 ms, npm 5.4 ms. The hostile "numbers and punctuation" `read` was p50 **247 ms** until the bounded parse (§3, Signature folding) and is now 8.4 ms (p99 8.8 ms); "multibyte text" `read` is 8.5 ms. Several rows show isolated p99 spikes of 26–37 ms (n = 60) that follow no one input. Larger inputs (not judged): 1 MiB of Rust is now left unchanged after ~57 ms where it used to fold in ~117 ms, because it exceeds the 30 ms parse deadline. Measured at `10d1ad6` plus the bounded-parse change, release, n = 60 per row. |
@@ -638,13 +760,40 @@ Absolute p50: direct `true` 1.11 ms, `agentdiet hook noop` 2.23 ms, shim 3.35 ms
 earlier measurement (n = 100, different harness) found a median difference of 3.70 ms; the
 harnesses differ, but both are far above 0.2 ms.
 
+**Slice 4 re-measurement** (2026-10-17, same machine and harness, n = 1000 per arm). Two release
+binaries built with `cargo build --release --locked` were timed through `AGENTDIET_PERF_BIN`,
+alternating head, new, head, new:
+
+| Binary | Size | B1 p50 | B2 p50 | B3 p50 |
+|---|---|---|---|---|
+| Slice 3B (`4ae86e0`) | 1,449,168 bytes | 3.22, 3.33 ms | 1.97, 2.00 ms | 0.026 ms |
+| Slice 4 (this change) | 9,492,064 bytes | 3.84, 3.74 ms | 2.36, 2.43 ms | 0.026–0.032 ms |
+
+- The machine was slower in this session than at Slice 3A: the *unchanged* Slice 3B binary measured
+  B1 3.22–3.33 ms here against 2.24 ms then. Only the paired comparison above is meaningful.
+- Slice 4 adds about **0.4–0.6 ms** to B1, and the same to B2, whose code path (`hook noop` returns
+  before reading stdin) is unchanged. The cost tracks the binary, not the routing: once the hook and
+  the shim's agent path call the Diet Engine, link-time optimisation can no longer drop it, so the
+  scrubber's regexes, the tree-sitter grammars (most of the 5.1 MB `__const` section), TOON and
+  SQLite are now in the one binary. A larger image costs more to load on every launch.
+- B3 still times only `shim_name` + `resolve_real`. The new routing checks before the transparent
+  `exec` (environment reads, `isatty` on stdin and stdout, one `fstat` of stdout) are **not
+  measured** separately. The harness sends stdout to `/dev/null`, so it exits at decision step 4. A
+  human at a terminal exits at step 3 (in `git log | less`, git's stdin is still the terminal). The
+  callers that reach steps 6–8 on the transparent path are non-interactive ones with neither stdin
+  nor stdout a terminal (scripts, cron, CI) running a recognised shape. They pay for two
+  descriptor lookups and possibly the parent walk, and that cost is **unmeasured**.
+- Hook latency (B2 + the engine's B4 + B5 per PostToolUse) was not re-measured in Slice 4.
+
 Notes:
 
 - Routing (B3, 0.03 ms) is about 1% of B1. B1 is consistent with paying for two process images in
   one pid: starting `agentdiet` (B2, 1.12 ms) and then `exec`ing the real binary, whose own start-up
   (about 1.1 ms for `true`) the direct arm pays too, so B1 is roughly twice B2. This is an
   observation from the arms, not a profile. Closing the gap needs a different shim design (for
-  example a tiny dedicated shim, or fewer exec hops) and is a Slice 4 design question. It is not closed by a faster `resolve_real` and not by redefining B1.
+  example a tiny dedicated shim, or fewer exec hops). That redesign is still open after Slice 4,
+  and the engine now linked into the single binary makes the launch cost worse (above). It is not
+  closed by a faster `resolve_real` and not by redefining B1.
 - Durable writes will not be removed to hit B5. Candidates that keep the write-ahead guarantee are
   amortised GC (today `put` scans the vault on every call), no redundant directory creation, and
   doing the transform and the write in one pass. If B5 still misses, it is recorded as a miss.
@@ -663,11 +812,10 @@ Notes:
 | 2 | scrubber, Vault, FTS5 memory | done |
 | 3A | dependency cleanup, this specification, shim benchmark | done (B1 requirement still NOT MET) |
 | 3B | Diet Engine library: pipeline, compression, TOON, folding, `show`/ID/memory/state changes marked **[3B]** | done (B4 and B5 requirements still NOT MET, §7): storage prerequisites, the `diet.rs` pipeline, shell compression (`compress.rs`), the TOON subset (`toon.rs`) and signature folding (`folding.rs`, with a bounded parse) are implemented as a library, and the §7 numbers are measured. Nothing is wired to a real entry point until Slice 4 |
-| 4 | hooks **and** PPID shims, wiring the engine to real entry points, shim redesign question (B1) | not started |
+| 4 | hooks **and** PPID shims, wiring the engine to real entry points, shim redesign question (B1) | in progress: hook router (`hook.rs`), agent-path shims and the per-session sidecars are implemented and tested; the shim agent path was checked live under Claude Code 2.1.302 (§3 Tier 1); the Control Center shows the last trimmed entry. Open: B1 still NOT MET and worse than in Slice 3B (§7; the shim redesign is not done), the live Claude Code check of `updatedToolOutput` (§3 Hook router) has not been run, Reads are not folded |
 | 5 | MCP tools (`diet_exec` etc.), scanner, `agentdiet top` | not started |
 
-Also open: reconciling the module docs in `lib.rs`/`main.rs` and the Control Center "inspect"
-action with the final behavior; the project license (a user decision, not made here).
+Also open: the project license (a user decision, not made here).
 
 ## 9. Reference pins
 

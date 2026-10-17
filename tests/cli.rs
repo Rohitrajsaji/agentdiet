@@ -71,26 +71,36 @@ fn bare_command_without_a_terminal_prints_status_and_exits() {
     assert!(stdout(&run(&env, &[])).contains("AgentDiet is paused"));
 }
 
+/// Real events read a bounded payload (tests/hooks.rs covers them, including a stdin that never
+/// closes). Unknown events, `noop` among them, never touch stdin: an open, never-closed pipe returns
+/// at once.
 #[test]
-fn hook_is_a_silent_no_op_that_never_reads_stdin() {
+fn hook_with_no_payload_or_an_unknown_event_is_silent() {
     let env = Env::empty();
-    for event in ["SessionStart", "PreToolUse", "NotARealEvent"] {
-        // stdin is /dev/null here; an open, never-closed pipe below proves it doesn't block.
+    for event in ["SessionStart", "PreToolUse", "NotARealEvent", "noop"] {
+        // stdin is /dev/null here: an empty payload.
         let out = run(&env, &["hook", event]);
         assert!(out.status.success(), "{event}");
         assert!(out.stdout.is_empty() && out.stderr.is_empty(), "{event}");
     }
 
-    let mut child = agentdiet(&env)
-        .args(["hook", "UserPromptSubmit"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let _held_open = child.stdin.take().unwrap(); // never written, never closed
-    let out = child.wait_with_output().unwrap();
-    assert!(out.status.success());
-    assert!(out.stdout.is_empty());
+    for event in ["noop", "NotARealEvent"] {
+        let start = std::time::Instant::now();
+        let mut child = agentdiet(&env)
+            .args(["hook", event])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let _held_open = child.stdin.take().unwrap(); // never written, never closed
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success());
+        assert!(out.stdout.is_empty());
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "{event}"
+        );
+    }
 }
 
 #[test]
@@ -279,10 +289,12 @@ fn shim_passes_through_to_the_real_binary() {
         Path::new("/bin"),
     ])
     .unwrap();
+    // Forced: these tests may themselves run under an AI agent (an ancestor named `claude`).
     let out = Command::new(shims.join("make"))
         .args(["-j", "4"])
         .env("HOME", &env.paths.home)
         .env("PATH", path)
+        .env("AGENTDIET_FORCE_HUMAN", "1")
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -304,6 +316,7 @@ fn shim_without_a_real_binary_exits_127() {
     let out = Command::new(shims.join("ruff"))
         .env("HOME", &env.paths.home)
         .env("PATH", &shims)
+        .env("AGENTDIET_FORCE_AGENT", "1")
         .stdin(Stdio::null())
         .output()
         .unwrap();

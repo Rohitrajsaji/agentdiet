@@ -122,6 +122,15 @@ pub struct Hit {
     pub score: f64,
 }
 
+/// One indexed event, as [`MemoryDb::recent`] returns it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Recent {
+    pub kind: String,
+    pub title: String,
+    pub body: String,
+    pub cas_sha: Option<String>,
+}
+
 pub struct MemoryDb {
     conn: Connection,
 }
@@ -244,6 +253,23 @@ impl MemoryDb {
                 })
             },
         )?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// The `limit` most recently indexed events, newest first (the post-compaction snapshot).
+    pub fn recent(&self, limit: usize) -> Result<Vec<Recent>, MemoryError> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut stmt = self
+            .conn
+            .prepare("SELECT kind, title, body, cas_sha FROM entries ORDER BY id DESC LIMIT ?1")?;
+        let rows = stmt.query_map(params![limit], |row| {
+            Ok(Recent {
+                kind: row.get(0)?,
+                title: row.get(1)?,
+                body: row.get(2)?,
+                cas_sha: row.get(3)?,
+            })
+        })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -468,5 +494,31 @@ mod tests {
                 .unwrap_or_else(|e| panic!("query {q:?} failed: {e}"));
         }
         assert_eq!(db.search("full-stack", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn recent_is_newest_first_and_bounded() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = MemoryDb::open(&dir.path().join("m.db")).unwrap();
+        let sha = "a".repeat(64);
+        for (title, cas) in [
+            ("first", None),
+            ("second", Some(sha.as_str())),
+            ("third", None),
+        ] {
+            db.index(
+                Kind::Command,
+                &scrub(title.as_bytes()),
+                &scrub(b"ok"),
+                cas,
+                None,
+            )
+            .unwrap();
+        }
+        let rows = db.recent(2).unwrap();
+        let titles: Vec<&str> = rows.iter().map(|r| r.title.as_str()).collect();
+        assert_eq!(titles, ["third", "second"]);
+        assert_eq!(rows[1].cas_sha.as_deref(), Some(sha.as_str()));
+        assert_eq!(rows[0].kind, "command");
     }
 }
