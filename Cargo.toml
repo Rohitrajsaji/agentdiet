@@ -3,6 +3,8 @@ name = "agentdiet"
 version = "0.1.0"
 edition = "2024"
 description = "Context firewall for AI coding agents"
+license = "MIT"
+readme = "README.md"
 
 [lib]
 name = "agentdiet"

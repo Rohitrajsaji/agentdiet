@@ -1,7 +1,7 @@
 THIRD-PARTY NOTICES — AgentDiet
 
-AgentDiet itself is licensed under its own terms. It includes patterns adapted
-from the following third-party project.
+AgentDiet itself is licensed under the MIT License (see LICENSE). It includes
+material adapted from the following third-party projects.
 
 --------------------------------------------------------------------------------
 Secretlint — https://github.com/secretlint/secretlint

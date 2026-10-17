@@ -296,6 +296,18 @@ these shapes; re-checking them is a deliberate change to this section.
   `updatedToolOutput` shape. It is verified by hand: `agentdiet init --only claude --project` in a
   scratch project, then a large successful `cargo test` through Claude Code, and the model must see
   the breadcrumb. Status: see §8.
+  **Run 2026-10-17, Claude Code 2.1.302, headless (`claude -p`, `--mcp-config .mcp.json`), release binary
+  of `1e72a5d`, `cargo` not shimmed:** passed. The model quoted the Bash breadcrumb
+  (`kept 14/412 lines; cargo test: 398 passing test lines collapsed`), quoted a `Read` of a file holding an
+  AWS key as `[REDACTED:aws-access-key-id]` (never the key), and quoted the exact `diet_inspect` slice of
+  that ID; `state.json` then held `trimmed_outputs` 1 and `cas_dereferences` 1. That slice was 5 lines of
+  plain text, which no `mcp__*` rule would change anyway, so a second run checked the `mcp__agentdiet__*`
+  exclusion: `diet_inspect` (no range) of a Vault entry holding a 17,582-byte pretty-printed JSON array
+  of 200 uniform objects, which as any other MCP tool's result becomes TOON. The model received all
+  17,582 bytes as JSON, with no TOON and no breadcrumb.
+  Payloads captured by a second PostToolUse hook in that run: Bash `tool_response` had exactly the keys
+  `stdout, stderr, interrupted, isImage, noOutputExpected`, with cargo's stderr already merged into
+  `stdout` (`stderr` empty); Read `{type, file}`; an MCP tool result an array of `{type, text}` blocks.
 
 ### Tier 2 — Fast-Path Diet Engine
 
@@ -953,10 +965,10 @@ Notes:
 | 2 | scrubber, Vault, FTS5 memory | done |
 | 3A | dependency cleanup, this specification, shim benchmark | done (B1 requirement still NOT MET) |
 | 3B | Diet Engine library: pipeline, compression, TOON, folding, `show`/ID/memory/state changes marked **[3B]** | done (B4 and B5 requirements still NOT MET, §7): storage prerequisites, the `diet.rs` pipeline, shell compression (`compress.rs`), the TOON subset (`toon.rs`) and signature folding (`folding.rs`, with a bounded parse) are implemented as a library, and the §7 numbers are measured. Nothing is wired to a real entry point until Slice 4 |
-| 4 | hooks **and** PPID shims, wiring the engine to real entry points, shim redesign question (B1) | in progress: hook router (`hook.rs`), agent-path shims and the per-session sidecars are implemented and tested; the shim agent path was checked live under Claude Code 2.1.302 (§3 Tier 1); the Control Center shows the last trimmed entry. Open: B1 still NOT MET and worse than in Slice 3B (§7; the shim redesign is not done), the live Claude Code check of `updatedToolOutput` (§3 Hook router) has not been run, Reads are not folded |
-| 5 | MCP tools (`diet_exec` etc.), scanner, `agentdiet top` | done: `diet_inspect`/`diet_search`/`diet_exec` in the stdio MCP server (§3b), the static scanner with the §3b rule table, the `agentdiet top` dashboard (also Control Center item 5) and the §2.3 telemetry counters, with end-to-end tests; B1 re-measured (§7, still NOT MET); `top` was driven in an 80x24 pseudo-terminal, directly and through Control Center item 5 (renders, keys work, the terminal is restored and the menu returns). Not done: a live check of the MCP tools inside a real assistant |
+| 4 | hooks **and** PPID shims, wiring the engine to real entry points, shim redesign question (B1) | in progress: hook router (`hook.rs`), agent-path shims and the per-session sidecars are implemented and tested; the shim agent path was checked live under Claude Code 2.1.302 (§3 Tier 1); the Control Center shows the last trimmed entry. The live Claude Code check passed under Claude Code 2.1.302 on 2026-10-17 (§3 Hook router, "Live check"): `updatedToolOutput` replacements of `Bash` and `Read` results reached the model, and a JSON `mcp__agentdiet__diet_inspect` result reached it unchanged. Open: B1 still NOT MET and worse than in Slice 3B (§7; the shim redesign is not done), Reads are not folded |
+| 5 | MCP tools (`diet_exec` etc.), scanner, `agentdiet top` | done: `diet_inspect`/`diet_search`/`diet_exec` in the stdio MCP server (§3b), the static scanner with the §3b rule table, the `agentdiet top` dashboard (also Control Center item 5) and the §2.3 telemetry counters, with end-to-end tests; B1 re-measured (§7, still NOT MET); `top` was driven in an 80x24 pseudo-terminal, directly and through Control Center item 5 (renders, keys work, the terminal is restored and the menu returns). Live checks (2026-10-17): a scripted JSON-RPC client ran `diet_exec` (`cargo test`, 400 tests: breadcrumb, Vault entry, memory.db row), `diet_search` (hit `#<id> command: cargo test`) and `diet_inspect` (lines 3..9 byte-identical to `agentdiet show --lines 3..9`, `cas_dereferences` +1); `@modelcontextprotocol/inspector --cli` listed the three tools and called `diet_inspect`; and Claude Code 2.1.302 connected the server and called `diet_inspect` (§3 Hook router, "Live check") |
 
-Also open: the project license (a user decision, not made here).
+License: MIT (`LICENSE`); third-party notices in `THIRD_PARTY_NOTICES`.
 
 ## 9. Reference pins
 
