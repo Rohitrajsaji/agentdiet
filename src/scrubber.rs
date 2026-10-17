@@ -143,6 +143,16 @@ fn needs_for(id: &str) -> Needs {
 }
 
 impl Rule {
+    /// The accepted secret spans in `hay`, in order.
+    fn spans(&self, hay: &[u8]) -> Vec<(usize, usize)> {
+        self.regex()
+            .captures_iter(hay)
+            .filter_map(|caps| caps.get(self.group))
+            .filter(|m| (self.accept)(hay, m.start(), m.end()))
+            .map(|m| (m.start(), m.end()))
+            .collect()
+    }
+
     fn regex(&self) -> &Regex {
         // The patterns are literals covered by unit tests; a failure here is a programming
         // error that every test run would surface.
@@ -243,14 +253,7 @@ fn scrub_with(raw: &[u8], prefilter: bool) -> Scrubbed {
         if prefilter && !rule.needs.met(&bytes) {
             continue;
         }
-        let mut spans: Vec<(usize, usize)> = Vec::new();
-        for caps in rule.regex().captures_iter(&bytes) {
-            if let Some(m) = caps.get(rule.group)
-                && (rule.accept)(&bytes, m.start(), m.end())
-            {
-                spans.push((m.start(), m.end()));
-            }
-        }
+        let spans = rule.spans(&bytes);
         if spans.is_empty() {
             continue;
         }
@@ -267,6 +270,39 @@ fn scrub_with(raw: &[u8], prefilter: bool) -> Scrubbed {
         bytes = out;
     }
     Scrubbed { bytes, redactions }
+}
+
+/// One detected secret, located in the bytes that were searched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SecretSpan {
+    /// The scrubber rule id (`aws-access-key-id`, ...), as in `[REDACTED:<rule>]`.
+    pub rule: &'static str,
+    pub start: usize,
+    pub end: usize,
+}
+
+/// Every secret [`scrub`] would redact, located in `raw` itself rather than redacted: the static
+/// scanner reports where they are. Rules run in [`scrub`]'s order over the original bytes, and a
+/// span overlapping one an earlier rule found is dropped (in `scrub` it would already be a
+/// placeholder). Sorted by position.
+pub fn find_secrets(raw: &[u8]) -> Vec<SecretSpan> {
+    let mut found: Vec<SecretSpan> = Vec::new();
+    for rule in RULES.iter() {
+        if !rule.needs.met(raw) {
+            continue;
+        }
+        for (start, end) in rule.spans(raw) {
+            if !found.iter().any(|f| start < f.end && f.start < end) {
+                found.push(SecretSpan {
+                    rule: rule.id,
+                    start,
+                    end,
+                });
+            }
+        }
+    }
+    found.sort_by_key(|f| f.start);
+    found
 }
 
 #[cfg(test)]
@@ -495,5 +531,41 @@ mod tests {
         let twice = scrub(once.as_bytes());
         assert_eq!(once.as_bytes(), twice.as_bytes());
         assert_eq!(twice.redactions(), 0);
+    }
+
+    #[test]
+    fn find_secrets_locates_what_scrub_redacts() {
+        let raw = format!(
+            "id {}\nAWS_SECRET_ACCESS_KEY={}\nnothing here\n{}\nauthorization: Bearer abcdefghijklmnop1234\n",
+            aws_key_id(),
+            aws_secret(),
+            pem()
+        );
+        let found = find_secrets(raw.as_bytes());
+        let scrubbed = scrub(raw.as_bytes());
+        assert_eq!(found.len(), scrubbed.redactions());
+        let rules: Vec<&str> = found.iter().map(|f| f.rule).collect();
+        assert_eq!(
+            rules,
+            [
+                "aws-access-key-id",
+                "aws-secret-access-key",
+                "private-key",
+                "bearer-token"
+            ]
+        );
+        for f in &found {
+            let text = scrubbed.to_lossy_string();
+            assert!(
+                text.contains(&format!("[REDACTED:{}]", f.rule)),
+                "{}",
+                f.rule
+            );
+        }
+        assert_eq!(
+            &raw.as_bytes()[found[0].start..found[0].end],
+            aws_key_id().as_bytes()
+        );
+        assert!(find_secrets(b"plain text, MAX_TOKENS=4096\n").is_empty());
     }
 }

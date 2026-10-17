@@ -104,7 +104,14 @@ fn an_explicit_change_waits_for_a_slow_telemetry_writer_and_telemetry_does_not_w
             .unwrap();
     let started = std::time::Instant::now();
     assert!(
-        state::record_telemetry(&env.paths, None, 1).is_err(),
+        state::record_telemetry(
+            &env.paths,
+            &state::Telemetry {
+                paused_tokens: 1,
+                ..Default::default()
+            }
+        )
+        .is_err(),
         "telemetry is dropped"
     );
     assert!(started.elapsed() < Duration::from_secs(1));

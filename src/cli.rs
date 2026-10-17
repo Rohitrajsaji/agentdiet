@@ -38,7 +38,7 @@ pub enum Command {
     Pause,
     /// Resume trimming
     Resume,
-    /// Print a trimmed output by short ID (not available yet)
+    /// Print a trimmed output by short ID
     Show {
         /// Short ID, e.g. #4f9a
         id: String,
@@ -46,12 +46,15 @@ pub enum Command {
         #[arg(long)]
         lines: Option<String>,
     },
-    /// Open the live TUI (not available yet)
+    /// Open the live TUI dashboard
     Top,
     /// Start the MCP server on stdio
     Mcp,
-    /// Scan SKILL.md files and MCP configs for risks (not available yet)
-    Scan { paths: Vec<std::path::PathBuf> },
+    /// Scan skills, rules and MCP configs for risks; exits 1 on findings
+    Scan {
+        /// Files or directories (default: .claude/, .cursor/, .mcp.json, SKILL.md, CLAUDE.md, AGENTS.md)
+        paths: Vec<std::path::PathBuf>,
+    },
     /// Restore original configs from backups and remove AgentDiet
     #[command(visible_alias = "uninstall")]
     Eject {

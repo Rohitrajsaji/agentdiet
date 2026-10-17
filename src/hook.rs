@@ -35,6 +35,8 @@ pub const SNAPSHOT_MAX_BYTES: usize = 2048;
 const SNAPSHOT_ENTRIES: usize = 10;
 /// Words in a prompt that bypass trimming for the rest of the turn (SPEC §2.4).
 pub const ESCAPE_WORDS: [&str; 3] = ["raw", "full", "unfiltered"];
+/// Tool-name prefix of AgentDiet's own MCP tools, which PostToolUse leaves alone.
+pub const OWN_MCP_PREFIX: &str = "mcp__agentdiet__";
 /// SessionStart's line when `on_session_start` is `auto_resume`.
 pub const RESUMED_NOTICE: &str =
     "▶ AgentDiet resumed automatically (on_session_start: auto_resume).";
@@ -230,14 +232,7 @@ fn snapshot(paths: &Paths, state: &State, now: SystemTime) -> Option<String> {
         return None;
     }
     let shas: Vec<&str> = rows.iter().filter_map(|r| r.cas_sha.as_deref()).collect();
-    let ids = Cas::new(paths.cas_dir())
-        .short_ids(&shas, now)
-        .unwrap_or_else(|_| vec![None; shas.len()]);
-    let id_of = |sha: &str| {
-        shas.iter()
-            .position(|s| *s == sha)
-            .and_then(|i| ids.get(i).cloned().flatten())
-    };
+    let ids = Cas::new(paths.cas_dir()).live_ids(&shas, now);
 
     let mut text =
         String::from("AgentDiet memory (after compaction; full output: agentdiet show '#<id>'):");
@@ -256,7 +251,7 @@ fn snapshot(paths: &Paths, state: &State, now: SystemTime) -> Option<String> {
         let id = row
             .cas_sha
             .as_deref()
-            .and_then(id_of)
+            .and_then(|sha| ids.get(sha))
             .map(|id| format!(" #{id}"))
             .unwrap_or_default();
         let line = format!(
@@ -430,6 +425,8 @@ fn text_fields(tool: &str, response: &Value, input: Option<&Value>) -> Vec<(Stri
             vec![("/file/content".into(), source)]
         }
         "WebFetch" => vec![("/result".into(), Source::ModelJson)],
+        // Our own tools' results come from the engine or the Vault already (SPEC §3 Hook router).
+        t if t.starts_with(OWN_MCP_PREFIX) => Vec::new(),
         t if t.starts_with("mcp__") => {
             let blocks = |prefix: &str, items: &[Value]| -> Vec<(String, Source)> {
                 items
@@ -612,6 +609,13 @@ mod tests {
             "ok\n🥗 Diet: kept 2/9 lines Run: agentdiet show '#4f9a1b2c'\n"
         ));
         assert!(!has_breadcrumb("echo 🥗 Diet: Run: agentdiet show '#4f9a'"));
+    }
+
+    #[test]
+    fn own_mcp_tools_are_left_alone() {
+        let response = json!({"content": [{"type": "text", "text": "{\"a\": 1}"}]});
+        assert!(text_fields("mcp__agentdiet__diet_inspect", &response, None).is_empty());
+        assert_eq!(text_fields("mcp__other__x", &response, None).len(), 1);
     }
 
     #[test]

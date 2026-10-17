@@ -25,7 +25,7 @@
 //!
 //! Every operation takes `now` explicitly so expiry is deterministic in tests.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fs;
 use std::io::{self, Read};
@@ -105,6 +105,17 @@ pub struct PutResult {
     pub short_id: String,
 }
 
+/// What [`Cas::stats`] counts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CasStats {
+    /// Live entries.
+    pub live: usize,
+    /// Tombstones: IDs whose content expired.
+    pub expired: usize,
+    /// Total size of the live entries.
+    pub bytes: u64,
+}
+
 /// 1-based, inclusive line range (`--lines 10..40`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LineRange {
@@ -118,8 +129,13 @@ impl LineRange {
         let (a, b) = input.split_once("..").ok_or_else(bad)?;
         let start: usize = a.trim().parse().map_err(|_| bad())?;
         let end: usize = b.trim().parse().map_err(|_| bad())?;
+        Self::new(start, end).map_err(|_| bad())
+    }
+
+    /// `start..=end`, 1-based. A start of 0 or start > end is [`CasError::InvalidRange`].
+    pub fn new(start: usize, end: usize) -> Result<Self, CasError> {
         if start == 0 || start > end {
-            return Err(bad());
+            return Err(CasError::InvalidRange(format!("{start}..{end}")));
         }
         Ok(Self { start, end })
     }
@@ -368,6 +384,39 @@ impl Cas {
             .collect())
     }
 
+    /// [`Cas::short_ids`] as a map from sha to emitted ID, holding only the live entries. Any
+    /// error reads as "nothing live" (callers only decorate output with the IDs).
+    pub fn live_ids(&self, shas: &[&str], now: SystemTime) -> HashMap<String, String> {
+        let ids = self
+            .short_ids(shas, now)
+            .unwrap_or_else(|_| vec![None; shas.len()]);
+        shas.iter()
+            .zip(ids)
+            .filter_map(|(sha, id)| id.map(|id| (sha.to_string(), id)))
+            .collect()
+    }
+
+    /// Entry counts and the live entries' total size. A vault that was never written counts zero
+    /// and is not created. Does not run GC (call [`Cas::gc`] first for an up-to-date view).
+    pub fn stats(&self) -> Result<CasStats, CasError> {
+        let Some(_guard) = self.lock_existing()? else {
+            return Ok(CasStats::default());
+        };
+        let mut stats = CasStats::default();
+        for entry in self.scan()? {
+            match entry.kind {
+                Kind::Live => {
+                    stats.live += 1;
+                    stats.bytes += fs::symlink_metadata(self.log_path(&entry.sha))
+                        .map(|m| m.len())
+                        .unwrap_or(0);
+                }
+                Kind::Tombstone => stats.expired += 1,
+            }
+        }
+        Ok(stats)
+    }
+
     /// The raw (scrubbed) bytes of an entry, optionally sliced by line.
     ///
     /// The bytes are hashed first: an entry that no longer matches its name is
@@ -585,5 +634,48 @@ mod tests {
         );
         let later = now + DEFAULT_TTL + Duration::from_secs(1);
         assert_eq!(cas.short_ids(&[&put.sha], later).unwrap(), vec![None]);
+    }
+
+    #[test]
+    fn line_range_new_validates_like_parse() {
+        assert_eq!(
+            LineRange::new(2, 5).unwrap(),
+            LineRange::parse("2..5").unwrap()
+        );
+        assert!(matches!(
+            LineRange::new(0, 3),
+            Err(CasError::InvalidRange(_))
+        ));
+        assert!(matches!(
+            LineRange::new(4, 3),
+            Err(CasError::InvalidRange(_))
+        ));
+    }
+
+    #[test]
+    fn stats_and_live_ids_count_without_creating_the_vault() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let now = SystemTime::now();
+        let cas = Cas::new(dir.path().join("cas"));
+        assert_eq!(cas.stats().unwrap(), CasStats::default());
+        assert!(cas.live_ids(&["ab"], now).is_empty());
+        assert!(!dir.path().join("cas").exists());
+
+        let old = cas.put(&crate::scrubber::scrub(b"old\n"), now).unwrap();
+        let later = now + DEFAULT_TTL + Duration::from_secs(1);
+        let new = cas
+            .put(&crate::scrubber::scrub(b"fresh!\n"), later)
+            .unwrap();
+        assert_eq!(
+            cas.stats().unwrap(),
+            CasStats {
+                live: 1,
+                expired: 1,
+                bytes: 7
+            }
+        );
+        let ids = cas.live_ids(&[&old.sha, &new.sha], later);
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids.get(&new.sha), Some(&new.short_id));
     }
 }

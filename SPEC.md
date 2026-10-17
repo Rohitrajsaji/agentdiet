@@ -94,7 +94,10 @@ Global state lives in `~/.agentdiet/state.json`:
   "mode": "balanced",
   "raw_tokens_passed_while_paused": 0,
   "on_session_start": "prompt",
-  "last_trimmed_id": null
+  "last_trimmed_id": null,
+  "trimmed_outputs": 0,
+  "tokens_saved": 0,
+  "cas_dereferences": 0
 }
 ```
 
@@ -105,8 +108,19 @@ Global state lives in `~/.agentdiet/state.json`:
 | `raw_tokens_passed_while_paused` | non-negative integer |
 | `on_session_start` | `"prompt"` \| `"auto_resume"` (default `"prompt"`) |
 | `last_trimmed_id` | ID without the `#` (e.g. `"4f9a1b2c"`) of the most recently trimmed output, or `null` (default). Read by the Control Center's "Inspect last trimmed output". Any value of at least 4 hex is accepted on read. |
+| `trimmed_outputs` | non-negative integer: replacements the engine emitted (`Replaced`, §3 Tier 2) |
+| `tokens_saved` | non-negative integer: the sum, over those replacements, of the scrubbed original's estimated tokens minus the emitted text's (§3 Tier 2, "Estimated tokens") |
+| `cas_dereferences` | non-negative integer: successful Vault reads by an agent-facing path, i.e. `agentdiet show` and the MCP tool `diet_inspect` (every breadcrumb and fold marker points at `show`). The Control Center's "Inspect last trimmed output" and `agentdiet top` are not counted. |
 
-- A missing, unreadable or corrupt `state.json` loads as defaults (fail open); unknown fields are ignored.
+- A missing, unreadable or corrupt `state.json` loads as defaults (fail open); unknown fields are ignored,
+  and a missing counter loads as 0.
+- **The three counters are telemetry, best effort and approximate.** `trimmed_outputs` and `tokens_saved`
+  ride the engine's existing `state.json` update for `last_trimmed_id` (one locked write, no extra
+  `fsync`); `cas_dereferences` is one locked update after a successful read. Each waits at most 100 ms for
+  the lock and is dropped when it cannot take it (§3 Tier 3, "`state.json` updates are serialised").
+- **CAS dereference rate** = `cas_dereferences / trimmed_outputs`, shown by `agentdiet top` (§3b) as
+  "n/a" while `trimmed_outputs` is 0 and flagged as a warning when it is **strictly above 20%**: agents
+  are going back to the full output often, so the trimming is probably too aggressive for them.
 
 - Writes are atomic (temp file + rename).
 - Pausing: `agentdiet pause`, the Control Center toggle, or typing `@diet pause` in chat
@@ -267,6 +281,9 @@ these shapes; re-checking them is a deliberate change to this section.
   - MCP tools (`mcp__*`, result a string or an array of `{type: "text", text}` blocks) and
     `WebFetch` (`result`): each text is `ModelJson`. JSON may become TOON; anything else is only
     scrubbed.
+  - AgentDiet's own MCP tools (`mcp__agentdiet__*`) are left untouched: their results were produced by
+    the Diet Engine or the Vault already, and re-processing a `diet_inspect` result would trim (or TOON)
+    the very output the agent asked to see in full.
   - Every other tool is left untouched.
 - **Failing commands.** A Bash command that exits non-zero fires PostToolUseFailure, which can only
   *add* context, never replace the result. The hook therefore cannot shrink a failing `cargo test`;
@@ -685,8 +702,118 @@ lesser form):
   - `diet_inspect` — fetch a CAS entry by `#id`, with an optional line range.
   - `diet_search` — FTS5/BM25 search over `memory.db`.
   - `diet_exec` — run a command through the Diet Engine; returns trimmed output plus a breadcrumb.
-- **`agentdiet scan`** — static AST/regex security scanner for `SKILL.md` files and MCP configs.
-  Flags secrets, dangerous shell commands and prompt-injection patterns; exits non-zero on findings.
+- **`agentdiet scan`** — static regex security scanner for skill, rule and MCP config files.
+  Flags hidden Unicode, secrets, prompt-injection phrases and dangerous shell commands; exits
+  non-zero on findings.
+- **`agentdiet top`** — the live ratatui dashboard (below).
+
+#### MCP server
+
+- **Transport.** Newline-delimited JSON-RPC 2.0 on stdin/stdout, synchronous (one request at a time,
+  no async runtime). Methods: `initialize` (echoes the client's `protocolVersion`), `ping`,
+  `tools/list`, `tools/call`; notifications get no reply; anything else is `-32601`. **Stdout carries
+  JSON-RPC lines only**: engine notes and every other diagnostic go to stderr. The process installs the
+  quiet panic hook (§3 Tier 1, "Panics") and each `tools/call` runs inside `catch_unwind`, so a panic is
+  an `isError` result with the fixed `PANIC_NOTE` and the server keeps serving.
+- **Results.** Every tool result is `{"content": [{"type": "text", "text": …}, …], "isError": bool}`.
+  `isError` is `true` for invalid arguments, an ID that is invalid, not found, expired, ambiguous or
+  corrupt (the text says which, with the candidates of an ambiguous prefix), a command that cannot be
+  spawned, and a command that timed out. A command that ran and exited non-zero is **not** an error:
+  its output and exit status are the result. `tools/call` with an unknown tool name, or without a
+  `name`, is the JSON-RPC error `-32602`.
+- **Project.** The server's working directory is the project whose `.agentdiet/memory.db` is searched
+  and indexed (assistants start MCP servers in the project directory).
+- **`diet_inspect`** `{id: string, start_line?: integer, end_line?: integer}`. `id` is `#4f9a` or `4f9a`
+  (§3 Tier 3). The lines are 1-based and inclusive, as `show --lines`: only `start_line` reads to the
+  end, only `end_line` reads from line 1, `0` or start > end is an error. The text is the stored
+  (scrubbed) bytes, decoded as UTF-8 with invalid sequences replaced. At most **256 KiB** is returned,
+  cut at a line boundary; when cut, a second text block says how many lines were left out and to ask
+  for them with `start_line`/`end_line`. A successful read counts one `cas_dereferences` (§2.3).
+- **`diet_search`** `{query: string, limit?: integer}` (default 10, clamped to 1..50). BM25 order as
+  §3 Tier 3 "memory.db". One line per hit: `#<id> <kind>: <title> — <snippet>`, where `#<id>` is the
+  live entry's emitted ID, `(expired)` when its Vault entry is gone, and absent when the row has no
+  entry. No database yet: "No indexed entries yet." (memory.db is never created just to be read). No
+  hits: "No matches.".
+- **`diet_exec`** `{command: string | string[], cwd?: string}`.
+  - `command` as an array is the argv. As a string it must parse as one simple command
+    (`parse_simple_command`, §3 Tier 2); anything else is an `isError` result asking for an argv
+    array. **No shell is ever started**: there is no `sh -c` fallback.
+  - `cwd` (default: the server's directory; a relative path resolves against it) must be an existing
+    directory. The run is indexed in the server's project memory.db (above), whatever `cwd` is, so
+    `diet_search` finds it.
+  - The child gets stdin `/dev/null` (it must never read the server's JSON-RPC stream), piped stdout and
+    stderr, `AGENTDIET_SHIM_ACTIVE=1` (shims on its `PATH` take the transparent path, so nothing is
+    dieted twice) and **its own process group**. After **120 s** the whole group is killed (`SIGKILL`),
+    so grandchildren holding the pipes cannot keep the call alive. Each stream is captured up to
+    **16 MiB**; the rest is read and discarded, and the result says the stream was truncated (more
+    than 8 MiB is oversize for the engine anyway, P3). `AGENTDIET_MCP_EXEC_TIMEOUT_MS` overrides the
+    timeout (for tests).
+  - Settings come from `state.json` (mode, paused). The same argv and `cwd` as the previous `diet_exec`
+    in the same server process is a retry (`RepeatedCommand`, §2.4); otherwise no bypass. Each stream is
+    one engine call with `Shell { argv, exit }` (exit `Unknown` after a timeout), exactly as the shims'
+    agent path.
+  - The text is the dieted stdout, then, when stderr is not empty, a line `--- stderr ---` and the
+    dieted stderr, then one status line: `[exit N]`, `[signal N]`, or `[timed out after Ns; killed]`.
+    Nothing re-runs the command (P2).
+
+#### Static scanner
+
+`agentdiet scan [paths…]` scans the given files and directories or, with none, these entries of the
+current project when they exist: `.claude/`, `.cursor/`, `.mcp.json`, `SKILL.md`, `CLAUDE.md`,
+`AGENTS.md`. Directories are walked recursively; symlinks are never followed; `.git`, `node_modules`,
+`target` and `.agentdiet` are skipped; files over 4 MiB and binary files (a NUL in the first 8 KiB) are
+skipped. Detection is regex and character based (no AST), pattern-matched and **best effort**: a clean
+report is not a proof of safety. The rules are original (clean-room; SkillSpector's static mode was
+only behaviour inspiration).
+
+Every file gets families **a**, **b** and **d**; *instruction files* (`*.md`, `*.mdc`, `*.txt`,
+`.cursorrules`, `.windsurfrules`) also get **c**. Text rules match per line, case-insensitively.
+
+| Rule | Severity | Matches |
+|---|---|---|
+| `hidden-unicode/bidi` | high | bidirectional controls U+202A–U+202E, U+2066–U+2069 |
+| `hidden-unicode/tag` | high | Unicode tag characters U+E0000–U+E007F (invisible "ASCII smuggling") |
+| `hidden-unicode/zero-width` | medium | U+200B, U+200C, U+2060, U+180E; U+FEFF anywhere but offset 0; U+200D unless both neighbours are non-ASCII (emoji ZWJ sequences pass) |
+| `secret/<scrubber rule id>` | high | any scrubber detector (§3 Tier 3), e.g. `secret/aws-access-key-id` |
+| `injection/ignore-instructions` | high | ignore / disregard / forget / override … previous / prior / above / earlier / system … instructions / rules / prompt / guidelines |
+| `injection/conceal-from-user` | high | do not / don't / never tell / inform / show / mention / reveal / notify … the user; without telling / informing / notifying / asking the user; hide … from the user |
+| `injection/exfiltrate-secrets` | high | send / post / upload / exfiltrate / transmit / forward / leak … environment variables / env vars / `.env` / API keys / credentials / secrets / tokens / SSH keys |
+| `injection/bypass-guardrails` | medium | bypass / disable / turn off / skip / ignore … safety / security checks / guardrails / permission checks / confirmation prompts / sandbox |
+| `shell/pipe-to-shell` | high | `curl` or `wget` piped into `sh`, `bash`, `zsh`, `dash`, `ksh`, `python`, `perl`, `ruby` or `node` (optionally via `sudo`) |
+| `shell/base64-exec` | high | `base64 -d`/`--decode`/`-D` piped into a shell; `eval` of a base64 decode; `exec(base64.b64decode(`; `eval(atob(` |
+| `shell/reverse-shell` | high | `/dev/tcp/` or `/dev/udp/`; `nc`/`ncat`/`netcat` with `-e` or `-c` |
+| `shell/netcat` | medium | any other `nc`/`ncat`/`netcat` invocation with a host and a port |
+| `shell/credential-path` | high | `~/.ssh`, `$HOME/.ssh`, `id_rsa`/`id_ed25519`, `~/.aws`, `.aws/credentials`, `~/.gnupg`, `~/.kube/config`, `~/.netrc`, `~/.docker/config.json` |
+| `shell/env-exfil` | high | `env`/`printenv` piped into `curl`/`wget`/`nc`; `curl`/`wget` with `$(env)`/`$(printenv)` or posting `@.env` |
+
+- **JSON files** also get a structural pass: every string value (after JSON unescaping, so `\u202e`
+  written as an escape is caught) goes through family **a**; each `mcpServers.*`/`servers.*` entry's
+  `command` and `args` joined with spaces, and every `command` string under `hooks`, go through family
+  **d**. Such a finding is reported at the first line containing that value's text (line 1 when none
+  does). Findings are deduplicated by file, line and rule.
+- **Report** (stdout), one line per finding, sorted by path and line:
+  `<path>:<line>:<col>  <SEVERITY>  <rule>  <message>  | <excerpt>`. The excerpt is the line **after
+  scrubbing**, at most 80 characters, with every control, bidi, zero-width and tag character shown as
+  `U+XXXX`, so the report can neither leak a secret nor reorder the terminal. Secret findings carry no
+  excerpt. Last line: `N finding(s) (h high, m medium) in F file(s); scanned S file(s).` or
+  `No findings; scanned S file(s).`, followed on the same line by
+  `Not checked: E path(s) could not be read.` whenever an explicit path failed (exit status 2).
+- **Exit status:** 0 when there are no findings, **1** when there is at least one, **2** when an explicit
+  path does not exist or cannot be read (usage error; nothing else is reported as clean).
+
+#### `agentdiet top`
+
+- Needs a terminal: with stdin or stdout not a TTY it exits 1 with
+  "`agentdiet top` needs an interactive terminal (stdin and stdout must be a TTY)." and draws nothing.
+- Shows: a header with Active/Paused, the Diet Mode and the connected assistants (`init` targets at user
+  scope); the metrics `tokens_saved`, `trimmed_outputs`, `raw_tokens_passed_while_paused`, the last
+  trimmed ID, the Vault (live entries, their size, expired IDs) and the CAS dereference rate (§2.3),
+  highlighted with a warning above 20%; a table of the most recent memory.db rows (`#id` when its Vault
+  entry is live, kind, command or path, summary); and a footer with the keys.
+- Keys: `q`/`Esc` quit, `p` pause/resume, `m` cycles Light → Balanced → Ultra-Lean, `r` refreshes. It also
+  refreshes every 2 s. A failed change (e.g. "state is busy") is shown in the dashboard; it does not exit.
+- Loading runs the Vault GC (§3 Tier 3, item 3) and never creates `memory.db` or the Vault. The terminal is
+  restored on every exit path, including a panic. Control Center item 5 opens it.
 - **`agentdiet eject` / `agentdiet uninstall`** — restore original configs from
   `~/.agentdiet/backups/`, remove agentdiet hook entries and shims. Idempotent. `cas/` and
   `memory.db` are kept unless `--purge` is passed.
@@ -785,6 +912,20 @@ alternating head, new, head, new:
   descriptor lookups and possibly the parent walk, and that cost is **unmeasured**.
 - Hook latency (B2 + the engine's B4 + B5 per PostToolUse) was not re-measured in Slice 4.
 
+**Slice 5 re-measurement** (2026-10-17, same machine and harness, n = 1000 per arm, 50 warm-up). Both
+binaries built with `cargo build --release --locked` and timed through `AGENTDIET_PERF_BIN`, alternating
+head, new, head, new:
+
+| Binary | Size | B1 p50 | B2 p50 | B3 p50 |
+|---|---|---|---|---|
+| Slice 4 (`5b259a7`, sha256 `2dea7f89…`) | 9,492,144 bytes | 3.73, 3.72 ms | 2.49, 2.49 ms | 0.025 ms |
+| Slice 5 (this change, sha256 `dd4328db…`) | 9,823,456 bytes | 3.75, 3.73 ms | 2.50, 2.51 ms | 0.025 ms |
+
+- ratatui, crossterm (one copy, 0.29, shared with inquire 0.9) and the MCP, scanner and TUI code add
+  331,312 bytes and about **0.01–0.02 ms** to B1 and B2, within run-to-run noise. B1 remains **NOT MET**;
+  nothing in Slice 5 touches the shim routing or the engine's hot path. The engine's telemetry counters
+  ride its existing `state.json` write (§2.3), so B5 gains no `fsync`; B4 and B5 were not re-measured.
+
 Notes:
 
 - Routing (B3, 0.03 ms) is about 1% of B1. B1 is consistent with paying for two process images in
@@ -813,7 +954,7 @@ Notes:
 | 3A | dependency cleanup, this specification, shim benchmark | done (B1 requirement still NOT MET) |
 | 3B | Diet Engine library: pipeline, compression, TOON, folding, `show`/ID/memory/state changes marked **[3B]** | done (B4 and B5 requirements still NOT MET, §7): storage prerequisites, the `diet.rs` pipeline, shell compression (`compress.rs`), the TOON subset (`toon.rs`) and signature folding (`folding.rs`, with a bounded parse) are implemented as a library, and the §7 numbers are measured. Nothing is wired to a real entry point until Slice 4 |
 | 4 | hooks **and** PPID shims, wiring the engine to real entry points, shim redesign question (B1) | in progress: hook router (`hook.rs`), agent-path shims and the per-session sidecars are implemented and tested; the shim agent path was checked live under Claude Code 2.1.302 (§3 Tier 1); the Control Center shows the last trimmed entry. Open: B1 still NOT MET and worse than in Slice 3B (§7; the shim redesign is not done), the live Claude Code check of `updatedToolOutput` (§3 Hook router) has not been run, Reads are not folded |
-| 5 | MCP tools (`diet_exec` etc.), scanner, `agentdiet top` | not started |
+| 5 | MCP tools (`diet_exec` etc.), scanner, `agentdiet top` | done: `diet_inspect`/`diet_search`/`diet_exec` in the stdio MCP server (§3b), the static scanner with the §3b rule table, the `agentdiet top` dashboard (also Control Center item 5) and the §2.3 telemetry counters, with end-to-end tests; B1 re-measured (§7, still NOT MET); `top` was driven in an 80x24 pseudo-terminal, directly and through Control Center item 5 (renders, keys work, the terminal is restored and the menu returns). Not done: a live check of the MCP tools inside a real assistant |
 
 Also open: the project license (a user decision, not made here).
 

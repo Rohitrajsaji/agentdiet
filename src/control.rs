@@ -183,9 +183,7 @@ fn handle(paths: &Paths, item: MenuItem, state: &State) -> anyhow::Result<()> {
         MenuItem::InspectLast => print!("{}", inspect_last(paths, state, SystemTime::now())),
         MenuItem::SwitchMode => switch_mode(paths, state)?,
         MenuItem::ManageAssistants => manage_assistants(paths)?,
-        MenuItem::OpenTop => {
-            println!("`agentdiet top` is not available yet (coming in a later slice).")
-        }
+        MenuItem::OpenTop => crate::top::run(paths)?,
     }
     Ok(())
 }

@@ -8,7 +8,7 @@ use clap::Parser;
 
 use agentdiet::cas::{Cas, LineRange};
 use agentdiet::cli::{Cli, Command};
-use agentdiet::{Paths, control, diet, hook, init, mcp, shim};
+use agentdiet::{Paths, control, diet, hook, init, mcp, scan, shim, state, top};
 
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().collect();
@@ -63,16 +63,13 @@ fn run_hook(event: Option<&OsString>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn not_yet(what: &str) -> ExitCode {
-    eprintln!("agentdiet: `{what}` is not available yet (coming in a later slice).");
-    ExitCode::from(2)
-}
-
 /// `agentdiet show #id [--lines a..b]`: print a vault entry (or a slice of it) raw.
 fn show(paths: &Paths, id: &str, lines: Option<&str>) -> anyhow::Result<()> {
     let range = lines.map(LineRange::parse).transpose()?;
     let cas = Cas::new(paths.cas_dir());
     let bytes = cas.read(id, range, SystemTime::now())?;
+    // Best effort: a dereference the lock cannot record within 100 ms is dropped (SPEC §2.3).
+    let _ = state::record_dereference(paths);
     let mut out = std::io::stdout().lock();
     out.write_all(&bytes).context("could not write to stdout")?;
     out.flush().context("could not write to stdout")
@@ -94,12 +91,33 @@ fn run() -> anyhow::Result<ExitCode> {
         Some(Command::Resume) => println!("{}", control::resume(&paths)?),
         Some(Command::Eject { purge }) => init::cmd_eject(&paths, purge)?,
         Some(Command::Mcp) => {
+            // The engine runs here too (`diet_exec`): a panic message must not echo its output.
+            install_quiet_panic_hook();
             let stdin = std::io::stdin();
-            mcp::serve(stdin.lock(), std::io::stdout().lock()).context("MCP server failed")?;
+            mcp::serve(
+                stdin.lock(),
+                std::io::stdout().lock(),
+                &paths,
+                mcp::Options::from_env(),
+            )
+            .context("MCP server failed")?;
         }
         Some(Command::Show { id, lines }) => show(&paths, &id, lines.as_deref())?,
-        Some(Command::Top) => return Ok(not_yet("top")),
-        Some(Command::Scan { .. }) => return Ok(not_yet("scan")),
+        Some(Command::Top) => top::run(&paths)?,
+        Some(Command::Scan { paths: targets }) => {
+            let report = scan::scan(&paths, &targets);
+            for skipped in &report.skipped {
+                eprintln!("agentdiet scan: skipped {skipped}");
+            }
+            for error in &report.errors {
+                eprintln!("agentdiet scan: {error}");
+            }
+            let mut out = std::io::stdout().lock();
+            out.write_all(report.render().as_bytes())
+                .and_then(|()| out.flush())
+                .context("could not write to stdout")?;
+            return Ok(ExitCode::from(report.exit_code()));
+        }
         // Normally intercepted above; kept so the match stays exhaustive.
         Some(Command::Hook { .. }) => {}
     }

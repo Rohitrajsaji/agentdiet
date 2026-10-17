@@ -129,17 +129,37 @@ fn mcp_server_completes_the_handshake() {
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
     assert_eq!(lines[0]["result"]["serverInfo"]["name"], "agentdiet");
-    assert_eq!(lines[1]["result"]["tools"], serde_json::json!([]));
+    assert_eq!(lines[1]["result"]["tools"].as_array().unwrap().len(), 3);
 }
 
 #[test]
-fn later_slice_commands_fail_cleanly() {
+fn top_without_a_terminal_fails_with_a_clear_message() {
     let env = Env::empty();
-    for args in [vec!["top"], vec!["scan"]] {
-        let out = run(&env, &args);
-        assert_eq!(out.status.code(), Some(2), "{args:?}");
-        assert!(String::from_utf8_lossy(&out.stderr).contains("not available yet"));
-    }
+    let out = run(&env, &["top"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty(), "nothing drawn");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains(agentdiet::top::NO_TTY), "{err}");
+}
+
+#[test]
+fn show_counts_a_dereference_only_when_it_succeeds() {
+    use agentdiet::cas::Cas;
+    let env = Env::empty();
+    let put = Cas::new(env.paths.cas_dir())
+        .put(
+            &agentdiet::scrubber::scrub(b"stored\n"),
+            std::time::SystemTime::now(),
+        )
+        .unwrap();
+    assert!(!run(&env, &["show", "#beef"]).status.success());
+    assert!(
+        !env.paths.state_file().exists(),
+        "a failed show counts nothing"
+    );
+    let out = run(&env, &["show", &format!("#{}", put.short_id)]);
+    assert_eq!(stdout(&out), "stored\n");
+    assert_eq!(state(&env)["cas_dereferences"], 1);
 }
 
 #[test]

@@ -401,10 +401,39 @@ fn post_tool_use_trims_stores_indexes_and_keeps_every_other_field() {
     );
     let saved: Value = serde_json::from_str(&env.read(&env.paths.state_file())).unwrap();
     assert_eq!(saved["last_trimmed_id"], id.as_str());
+    assert_eq!(saved["trimmed_outputs"], 1);
+    let saved_tokens = agentdiet::diet::estimate_tokens(original.as_bytes())
+        - agentdiet::diet::estimate_tokens(text.as_bytes());
+    assert_eq!(saved["tokens_saved"], saved_tokens as u64);
+    assert_eq!(saved["cas_dereferences"], 1, "the `show` above");
     let db = MemoryDb::open(&env.paths.memory_db()).unwrap();
     let hits = db.search("cargo test", 5).unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].kind, "command");
+}
+
+#[test]
+fn agentdiets_own_mcp_results_are_left_alone() {
+    let env = Env::empty();
+    // A big JSON document would become TOON as any other MCP tool's result.
+    let rows: Vec<Value> = (0..300)
+        .map(|i| json!({"id": i, "name": format!("row {i}"), "ok": true}))
+        .collect();
+    let doc = serde_json::to_string_pretty(&rows).unwrap();
+    let response = json!({"content": [{"type": "text", "text": doc}]});
+    let post = |tool: &str| {
+        hook(
+            &env,
+            "PostToolUse",
+            json!({"tool_name": tool, "tool_input": {}, "tool_response": response, "tool_use_id": "toolu_m"}),
+        )
+    };
+    assert!(
+        !post("mcp__other__fetch").stdout.is_empty(),
+        "someone else's tool is dieted"
+    );
+    assert!(post("mcp__agentdiet__diet_inspect").stdout.is_empty());
+    assert!(post("mcp__agentdiet__diet_exec").stdout.is_empty());
 }
 
 #[test]

@@ -17,7 +17,14 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 # dirs: cross-platform home/config dir resolution (called only from main.rs); pure Rust.
 dirs = "6"
-inquire = "0.7"
+# inquire 0.9: same crossterm (0.29) as ratatui's backend, so the binary carries one crossterm, not two.
+inquire = "0.9"
+# ratatui: the `agentdiet top` TUI (mandated by CLAUDE.md). Defaults off: no calendar widget (`time`),
+# macros or layout cache (`lru`); only the crossterm backend. Pure Rust.
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+# crossterm: ratatui's terminal backend; `top` uses it directly for key events and raw mode. Must stay
+# the version ratatui-crossterm resolves (0.29) so only one copy is linked. libc/rustix only.
+crossterm = "0.29"
 serde = { version = "1", features = ["derive"] }
 # preserve_order: re-serialised user configs keep their key order. raw_value: toon.rs keeps each JSON
 # number's original text via `RawValue`; unlike `arbitrary_precision` it adds a type and changes nothing

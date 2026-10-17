@@ -630,7 +630,12 @@ fn persistence(report: &mut Report, n: usize) {
         let mut t = 0u64;
         let s = measure(3, n, || {
             t += 1;
-            agentdiet::state::record_telemetry(&paths, Some("4f9a1b2c"), t).unwrap();
+            let telemetry = agentdiet::state::Telemetry {
+                last_trimmed_id: Some("4f9a1b2c"),
+                paused_tokens: t,
+                ..Default::default()
+            };
+            agentdiet::state::record_telemetry(&paths, &telemetry).unwrap();
         });
         report.row(
             "persist",

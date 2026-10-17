@@ -451,7 +451,7 @@ fn drain(pipe: Option<impl Read>) -> Vec<u8> {
     bytes
 }
 
-fn exit_status(status: &std::process::ExitStatus) -> ExitStatus {
+pub(crate) fn exit_status(status: &std::process::ExitStatus) -> ExitStatus {
     if let Some(code) = status.code() {
         return ExitStatus::Code(code);
     }

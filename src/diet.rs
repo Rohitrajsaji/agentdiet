@@ -56,7 +56,7 @@ pub enum ExitStatus {
 }
 
 impl ExitStatus {
-    fn describe(self) -> String {
+    pub fn describe(self) -> String {
         match self {
             ExitStatus::Code(c) => format!("exit {c}"),
             ExitStatus::Signal(s) => format!("signal {s}"),
@@ -721,15 +721,29 @@ impl<'a> Engine<'a> {
             paused_tokens: None,
             note: None,
         };
-        outcome.note = self.record(&source, &summary, &put.sha, &put.short_id);
+        let saved = original_tokens.saturating_sub(estimate_tokens(&outcome.output));
+        outcome.note = self.record(&source, &summary, &put.sha, &put.short_id, saved);
         outcome
     }
 
     /// Best-effort bookkeeping after a successful replacement. Returns a bounded note if any of
     /// it failed; the replacement is emitted regardless (P6).
-    fn record(&self, source: &Source, summary: &str, sha: &str, id: &str) -> Option<String> {
+    fn record(
+        &self,
+        source: &Source,
+        summary: &str,
+        sha: &str,
+        id: &str,
+        tokens_saved: usize,
+    ) -> Option<String> {
         let mut failed: Vec<&str> = Vec::new();
-        if state::record_telemetry(self.paths, Some(id), 0).is_err() {
+        let telemetry = state::Telemetry {
+            last_trimmed_id: Some(id),
+            trimmed: true,
+            tokens_saved: tokens_saved as u64,
+            ..state::Telemetry::default()
+        };
+        if state::record_telemetry(self.paths, &telemetry).is_err() {
             failed.push("state update");
         }
         let (kind, title) = match source {
@@ -757,7 +771,14 @@ impl<'a> Engine<'a> {
     /// Paused-token accounting once the outcome is known (best effort, like every telemetry write).
     fn after(&self, mut outcome: Outcome) -> Outcome {
         if let Some(tokens) = outcome.paused_tokens
-            && state::record_telemetry(self.paths, None, tokens as u64).is_err()
+            && state::record_telemetry(
+                self.paths,
+                &state::Telemetry {
+                    paused_tokens: tokens as u64,
+                    ..state::Telemetry::default()
+                },
+            )
+            .is_err()
             && outcome.note.is_none()
         {
             outcome.note = Some(note("agentdiet: paused-token count not updated"));

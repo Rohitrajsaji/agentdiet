@@ -79,6 +79,36 @@ pub struct State {
     pub on_session_start: OnSessionStart,
     /// Short ID (e.g. `4f9a`) of the most recently trimmed output.
     pub last_trimmed_id: Option<String>,
+    /// Replacements the engine emitted (telemetry, best effort).
+    pub trimmed_outputs: u64,
+    /// Estimated tokens those replacements saved (telemetry, best effort).
+    pub tokens_saved: u64,
+    /// Successful agent-facing Vault reads: `show` and `diet_inspect` (telemetry, best effort).
+    pub cas_dereferences: u64,
+}
+
+impl State {
+    /// `cas_dereferences / trimmed_outputs`, or `None` while nothing has been trimmed.
+    pub fn dereference_rate(&self) -> Option<f64> {
+        (self.trimmed_outputs > 0)
+            .then(|| self.cas_dereferences as f64 / self.trimmed_outputs as f64)
+    }
+}
+
+/// A dereference rate above this is flagged by `agentdiet top` (SPEC §2.3).
+pub const DEREFERENCE_WARN_RATE: f64 = 0.20;
+
+/// One engine telemetry update; see [`record_telemetry`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Telemetry<'a> {
+    /// The ID of an output that was just replaced.
+    pub last_trimmed_id: Option<&'a str>,
+    /// Estimated tokens passed while paused.
+    pub paused_tokens: u64,
+    /// A replacement was emitted (counts one `trimmed_outputs`).
+    pub trimmed: bool,
+    /// Estimated tokens that replacement saved.
+    pub tokens_saved: u64,
 }
 
 /// Whether a state mutation actually changed anything.
@@ -169,21 +199,30 @@ pub fn update(paths: &Paths, f: impl FnOnce(&mut State)) -> Result<(State, Chang
     update_within(paths, EXPLICIT_LOCK_TIMEOUT, f)
 }
 
-/// Engine telemetry: remember the last trimmed ID and add to the paused-token
-/// counter in one locked update. Waits at most [`TELEMETRY_LOCK_TIMEOUT`]; the
-/// caller drops the update on any error rather than delaying or failing a hook.
-pub fn record_telemetry(
-    paths: &Paths,
-    last_trimmed_id: Option<&str>,
-    paused_tokens: u64,
-) -> Result<(), StateError> {
+/// Engine telemetry: the last trimmed ID, the paused-token counter and the trimming counters, in
+/// one locked update. Waits at most [`TELEMETRY_LOCK_TIMEOUT`]; the caller drops the update on any
+/// error rather than delaying or failing a hook.
+pub fn record_telemetry(paths: &Paths, telemetry: &Telemetry<'_>) -> Result<(), StateError> {
     update_within(paths, TELEMETRY_LOCK_TIMEOUT, |state| {
-        if let Some(id) = last_trimmed_id {
+        if let Some(id) = telemetry.last_trimmed_id {
             state.last_trimmed_id = Some(id.to_string());
         }
         state.raw_tokens_passed_while_paused = state
             .raw_tokens_passed_while_paused
-            .saturating_add(paused_tokens);
+            .saturating_add(telemetry.paused_tokens);
+        if telemetry.trimmed {
+            state.trimmed_outputs = state.trimmed_outputs.saturating_add(1);
+            state.tokens_saved = state.tokens_saved.saturating_add(telemetry.tokens_saved);
+        }
+    })
+    .map(drop)
+}
+
+/// Count one successful agent-facing Vault read (`show`, `diet_inspect`). Same lock policy as
+/// [`record_telemetry`]; the caller ignores a failure.
+pub fn record_dereference(paths: &Paths) -> Result<(), StateError> {
+    update_within(paths, TELEMETRY_LOCK_TIMEOUT, |state| {
+        state.cas_dereferences = state.cas_dereferences.saturating_add(1);
     })
     .map(drop)
 }
@@ -221,7 +260,10 @@ mod tests {
   "mode": "balanced",
   "raw_tokens_passed_while_paused": 0,
   "on_session_start": "prompt",
-  "last_trimmed_id": null
+  "last_trimmed_id": null,
+  "trimmed_outputs": 0,
+  "tokens_saved": 0,
+  "cas_dereferences": 0
 }"#;
         let state: State = serde_json::from_str(json).unwrap();
         assert_eq!(state, State::default());
@@ -239,6 +281,9 @@ mod tests {
             raw_tokens_passed_while_paused: 7,
             on_session_start: OnSessionStart::AutoResume,
             last_trimmed_id: Some("4f9a".into()),
+            trimmed_outputs: 3,
+            tokens_saved: 900,
+            cas_dereferences: 1,
         };
         let v = serde_json::to_value(&state).unwrap();
         assert_eq!(v["status"], "paused");
@@ -253,6 +298,7 @@ mod tests {
         let state: State = serde_json::from_str(r#"{"status":"paused","future":1}"#).unwrap();
         assert_eq!(state.status, Status::Paused);
         assert_eq!(state.mode, Mode::Balanced);
+        assert_eq!(state.trimmed_outputs, 0, "a Slice 4 file has no counters");
     }
 
     #[test]
@@ -363,7 +409,12 @@ mod tests {
         let held = fsutil::lock_exclusive(&p.state_lock_file(), Duration::from_secs(1)).unwrap();
 
         let started = std::time::Instant::now();
-        let err = record_telemetry(&p, Some("4f9a1b2c"), 10).unwrap_err();
+        let telemetry = Telemetry {
+            last_trimmed_id: Some("4f9a1b2c"),
+            paused_tokens: 10,
+            ..Telemetry::default()
+        };
+        let err = record_telemetry(&p, &telemetry).unwrap_err();
         assert!(matches!(err, StateError::Busy(_)), "{err}");
         assert!(
             started.elapsed() < Duration::from_secs(1),
@@ -376,10 +427,34 @@ mod tests {
         assert!(!p.state_file().exists(), "nothing was written while busy");
 
         drop(held);
-        record_telemetry(&p, Some("4f9a1b2c"), 10).unwrap();
+        record_telemetry(&p, &telemetry).unwrap();
         let s = load(&p);
         assert_eq!(s.last_trimmed_id.as_deref(), Some("4f9a1b2c"));
         assert_eq!(s.raw_tokens_passed_while_paused, 10);
+    }
+
+    #[test]
+    fn trimming_and_dereference_counters_accumulate() {
+        let dir = TempDir::new().unwrap();
+        let p = paths(&dir);
+        assert_eq!(load(&p).dereference_rate(), None);
+        for saved in [100, 250] {
+            let telemetry = Telemetry {
+                last_trimmed_id: Some("4f9a1b2c"),
+                trimmed: true,
+                tokens_saved: saved,
+                ..Telemetry::default()
+            };
+            record_telemetry(&p, &telemetry).unwrap();
+        }
+        record_dereference(&p).unwrap();
+        let s = load(&p);
+        assert_eq!(
+            (s.trimmed_outputs, s.tokens_saved, s.cas_dereferences),
+            (2, 350, 1)
+        );
+        assert_eq!(s.dereference_rate(), Some(0.5));
+        assert_eq!(s.raw_tokens_passed_while_paused, 0);
     }
 
     #[cfg(unix)]

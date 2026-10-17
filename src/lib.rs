@@ -4,7 +4,8 @@
 //! and `init` / `eject`. Slice 2: secret scrubber, CAS vault and project
 //! memory index. Slice 3B: the Diet Engine (`diet`, `compress`, `toon`,
 //! `folding`). Slice 4: the hook router (`hook`), agent-path shims (`shim`) and
-//! per-session sidecars (`session`). The TUI and scanner land later.
+//! per-session sidecars (`session`). Slice 5: the MCP tools (`mcp`), the static scanner (`scan`)
+//! and the `agentdiet top` dashboard (`top`).
 
 use std::path::{Path, PathBuf};
 
@@ -19,11 +20,13 @@ pub mod hook;
 pub mod init;
 pub mod mcp;
 pub mod memory;
+pub mod scan;
 pub mod scrubber;
 pub mod session;
 pub mod shim;
 pub mod state;
 pub mod toon;
+pub mod top;
 
 /// Every filesystem location the library touches, injected by the caller.
 ///
