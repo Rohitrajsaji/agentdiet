@@ -601,8 +601,8 @@ Requirements are not redefined to match a measurement.
 | **B1 — shim end-to-end overhead** | Wall time of spawning a shimmed command until it exits, minus the same command spawned directly (`E2 − E0`), human path, warm | < 0.2 ms | **NOT MET.** Median **2.24 ms** (p95 2.34, p99 2.59; n = 1000 iteration-matched pairs). |
 | B2 — process launch | Spawning `agentdiet hook noop` minus spawning the direct command (`E1 − E0`) | none; context for B1 | median 1.12 ms (p95 1.20, p99 1.24; n = 1000) |
 | B3 — in-process routing | `shim_name` + `resolve_real` on a synthetic `PATH`, up to the `exec` call | none; context for B1 | median 0.027 ms (p95 0.029, p99 0.030; n = 10000) |
-| **B4 — Diet Engine fast path** | Pure transform (classify, scrub, candidate, checks) of an input of up to 256 KiB, in process, warm, no I/O | < 10 ms | not measured yet **[3B]** |
-| **B5 — persistence** | Durable Vault write (`fsync` file and directory), GC, ID selection, index and state update; measured with 0, 100 and 1000 entries in the Vault | reported with B4; the engine's end-to-end budget is B4 + B5 + process launch (B2) < 10 ms | not measured yet **[3B]** |
+| **B4 — Diet Engine fast path** | Pure transform (classify, scrub, candidate, checks) of an input of up to 256 KiB, in process, warm, no I/O | < 10 ms | **NOT MET** at 256 KiB. Worst p50 **247 ms** (adversarial "numbers and punctuation", `read` action); worst p99 258 ms. Realistic 256 KiB Rust source through the fold path: p50 **28.8 ms** (tree-sitter parse alone is ~22 ms). Realistic 256 KiB JSON → TOON: p50 9.9 ms, p99 11.9 ms. Realistic 256 KiB cargo, pytest, npm: p50 5.4–7.8 ms. Adversarial "secrets everywhere" `shell`: p50 13.8 ms. Measured at `7fedbb3`, release, n = 60 per row. |
+| **B5 — persistence** | Durable Vault write (`fsync` file and directory), GC, ID selection, index and state update; measured with 0, 100 and 1000 entries in the Vault | reported with B4; the engine's end-to-end budget is B4 + B5 + process launch (B2) < 10 ms | **MISS** on the end-to-end budget. `Engine::run` on 64 KiB: p50 **24 ms** at 0, 100 and 1000 entries (flat in entry count). Floors: `fsync` of a 32 KiB file plus its directory p50 8.1 ms; `state::record_telemetry` p50 9.5–9.8 ms; `Cas::put` p50 10.9–12.0 ms. Cold first `Engine::run` (30 fresh processes) p50 38 ms. |
 
 Measured on Darwin 27.0.0 (macOS), Apple M1, aarch64, rustc 1.99.1, release build with
 `lto = true` (binary 1,432,480 bytes, ad-hoc code signature, sha256 `689e4da7…`, the artifact of
@@ -637,7 +637,7 @@ Notes:
 | 1 | scaffold, state ledger, Control Center, `init`/`eject` | done |
 | 2 | scrubber, Vault, FTS5 memory | done |
 | 3A | dependency cleanup, this specification, shim benchmark | done (B1 requirement still NOT MET) |
-| 3B | Diet Engine library: pipeline, compression, TOON, folding, `show`/ID/memory/state changes marked **[3B]** | in progress: storage prerequisites and the `diet.rs` pipeline (library only, no transforms yet) are implemented; shell compression (`compress.rs`), the TOON subset (`toon.rs`) and signature folding (`folding.rs`) are implemented; the Slice 3B performance numbers (§7) are still to be measured |
+| 3B | Diet Engine library: pipeline, compression, TOON, folding, `show`/ID/memory/state changes marked **[3B]** | in progress: storage prerequisites and the `diet.rs` pipeline (library only, no transforms yet) are implemented; shell compression (`compress.rs`), the TOON subset (`toon.rs`) and signature folding (`folding.rs`) are implemented; the Slice 3B performance numbers are measured (§7): B4 and B5 are both missed, recorded as misses |
 | 4 | hooks **and** PPID shims, wiring the engine to real entry points, shim redesign question (B1) | not started |
 | 5 | MCP tools (`diet_exec` etc.), scanner, `agentdiet top` | not started |
 
