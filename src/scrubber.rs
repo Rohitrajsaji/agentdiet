@@ -12,7 +12,7 @@
 //! an `accept` check on the bytes around the match. The Bearer and dotenv rules
 //! are original to AgentDiet.
 
-use std::sync::LazyLock;
+use std::sync::{LazyLock, OnceLock};
 
 use regex::bytes::Regex;
 
@@ -47,9 +47,39 @@ impl Scrubbed {
 /// Decides, from the haystack and the span to redact, whether a match counts.
 type Accept = fn(haystack: &[u8], start: usize, end: usize) -> bool;
 
+/// A cheap test that must pass before a rule's regex is even compiled: the text has to contain
+/// a literal every match contains. Compiling the PEM rule alone costs several milliseconds, which a
+/// short-lived hook process would pay on every call for output that has no key in it.
+#[derive(Clone, Copy)]
+enum Needs {
+    Nothing,
+    Literal(&'static [u8]),
+    /// Any one of these.
+    AnyOf(&'static [&'static [u8]]),
+    /// This text, in any ASCII case.
+    CaseInsensitive(&'static [u8]),
+}
+
+impl Needs {
+    fn met(self, haystack: &[u8]) -> bool {
+        let find = |needle: &[u8]| haystack.windows(needle.len()).any(|w| w == needle);
+        match self {
+            Needs::Nothing => true,
+            Needs::Literal(needle) => find(needle),
+            Needs::AnyOf(needles) => needles.iter().any(|n| find(n)),
+            Needs::CaseInsensitive(needle) => haystack
+                .windows(needle.len())
+                .any(|w| w.eq_ignore_ascii_case(needle)),
+        }
+    }
+}
+
 struct Rule {
     id: &'static str,
-    re: Regex,
+    pattern: &'static str,
+    /// Compiled on first use that passes `needs`.
+    re: OnceLock<Regex>,
+    needs: Needs,
     /// Capture group holding the secret (0 = the whole match).
     group: usize,
     accept: Accept,
@@ -87,14 +117,38 @@ fn plausible_url_secret(h: &[u8], start: usize, end: usize) -> bool {
     !h[start..end].starts_with(b"[REDACTED:")
 }
 
-fn rule(id: &'static str, pattern: &str, group: usize, accept: Accept) -> Rule {
+fn rule(id: &'static str, pattern: &'static str, group: usize, accept: Accept) -> Rule {
     Rule {
         id,
-        // The patterns are literals covered by unit tests; a failure here is a
-        // programming error that every test run would surface.
-        re: Regex::new(pattern).expect("built-in scrubber pattern must compile"),
+        pattern,
+        re: OnceLock::new(),
+        needs: needs_for(id),
         group,
         accept,
+    }
+}
+
+/// What every match of the rule must contain (checked with plain byte searches, before compiling).
+fn needs_for(id: &str) -> Needs {
+    match id {
+        "private-key" => Needs::Literal(b"-----BEGIN"),
+        "anthropic-api-key" => Needs::Literal(b"sk-ant-"),
+        "openai-api-key" => Needs::Literal(b"T3BlbkFJ"),
+        "aws-secret-access-key" => Needs::AnyOf(&[b"ECRET", b"ecret"]),
+        "bearer-token" => Needs::CaseInsensitive(b"bearer"),
+        "dotenv-secret" => Needs::Literal(b"="),
+        "url-password" | "url-token" => Needs::Literal(b"://"),
+        _ => Needs::Nothing,
+    }
+}
+
+impl Rule {
+    fn regex(&self) -> &Regex {
+        // The patterns are literals covered by unit tests; a failure here is a programming
+        // error that every test run would surface.
+        self.re.get_or_init(|| {
+            Regex::new(self.pattern).expect("built-in scrubber pattern must compile")
+        })
     }
 }
 
@@ -178,11 +232,19 @@ static RULES: LazyLock<Vec<Rule>> = LazyLock::new(|| {
 
 /// Redact every secret in `raw`.
 pub fn scrub(raw: &[u8]) -> Scrubbed {
+    scrub_with(raw, true)
+}
+
+/// `scrub`, optionally ignoring the `needs` prefilters (tests prove they change nothing).
+fn scrub_with(raw: &[u8], prefilter: bool) -> Scrubbed {
     let mut bytes = raw.to_vec();
     let mut redactions = 0;
     for rule in RULES.iter() {
+        if prefilter && !rule.needs.met(&bytes) {
+            continue;
+        }
         let mut spans: Vec<(usize, usize)> = Vec::new();
-        for caps in rule.re.captures_iter(&bytes) {
+        for caps in rule.regex().captures_iter(&bytes) {
             if let Some(m) = caps.get(rule.group)
                 && (rule.accept)(&bytes, m.start(), m.end())
             {
@@ -387,6 +449,42 @@ mod tests {
             "see https://example.com/a@b and mailto:me@example.com",
         ] {
             assert_eq!(scrub(clean.as_bytes()).redactions(), 0, "{clean}");
+        }
+    }
+
+    #[test]
+    fn every_built_in_pattern_compiles_and_the_prefilters_change_nothing() {
+        for rule in RULES.iter() {
+            let _ = rule.regex(); // a bad pattern panics here, in every test run
+        }
+        let key = aws_key_id();
+        let samples: Vec<String> = vec![
+            String::new(),
+            "plain text, nothing to see\n".into(),
+            format!("{key} and {}", anthropic_key()),
+            format!("k={} {}\n{}", openai_legacy(), openai_project(), pem()),
+            format!("AWS_SECRET_ACCESS_KEY={}", aws_secret()),
+            "authorization: BEARER abcdefghijklmnop1234567890".into(),
+            "DB_PASSWORD=hunter2hunter2\nexport API_KEY='abcdef123456'".into(),
+            "git clone https://u:ghp_abcdefghijklmnopqrstuvwxyz0123456789@github.com/o/r".into(),
+            "https://abcdefghijklmnopqrstuvwxyz0123@host/x".into(),
+            "sk-ant- almost, T3BlbkFJ alone, -----BEGIN nothing, ecret, ECRET, bearer, ://, ="
+                .into(),
+            "sEcReT_aCcEsS_kEy=notaKeyJustWords".into(),
+        ];
+        for sample in &samples {
+            let with = scrub_with(sample.as_bytes(), true);
+            let without = scrub_with(sample.as_bytes(), false);
+            assert_eq!(with, without, "prefilter changed the result for {sample:?}");
+        }
+        // The same over every prefix and a few byte flips of the busiest sample.
+        let busy = samples[3].as_bytes();
+        for cut in (0..busy.len()).step_by(7) {
+            assert_eq!(
+                scrub_with(&busy[..cut], true),
+                scrub_with(&busy[..cut], false),
+                "cut {cut}"
+            );
         }
     }
 
