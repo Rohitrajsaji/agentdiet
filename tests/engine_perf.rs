@@ -706,7 +706,8 @@ fn engine_cold_child() {
         std::str::from_utf8(&rust).unwrap(),
     );
     let parse_ms = t.elapsed().as_secs_f64() * 1000.0;
-    assert!(parsed.is_some());
+    // A parse abandoned at `PARSE_BUDGET` (a loaded machine) is a result to report, not a failure.
+    let parse_done = u8::from(parsed.is_some());
 
     let t = Instant::now();
     let out = Engine::new(&paths).run(
@@ -718,7 +719,9 @@ fn engine_cold_child() {
     );
     let run_ms = t.elapsed().as_secs_f64() * 1000.0;
     assert!(out.id.is_some());
-    println!("COLD scrub_ms={scrub_ms:.3} parse_ms={parse_ms:.3} run_ms={run_ms:.3}");
+    println!(
+        "COLD scrub_ms={scrub_ms:.3} parse_ms={parse_ms:.3} run_ms={run_ms:.3} parse_done={parse_done}"
+    );
 }
 
 #[test]
@@ -728,6 +731,7 @@ fn engine_cold_start() {
     let exe = std::env::current_exe().unwrap();
     let rounds = iters(30).min(60);
     let (mut scrub_ms, mut parse_ms, mut run_ms) = (Vec::new(), Vec::new(), Vec::new());
+    let mut parses_abandoned = 0;
     for _ in 0..rounds {
         let tmp = TempDir::new().unwrap();
         fs::create_dir_all(tmp.path().join("home")).unwrap();
@@ -757,6 +761,7 @@ fn engine_cold_start() {
         scrub_ms.push(field("scrub_ms"));
         parse_ms.push(field("parse_ms"));
         run_ms.push(field("run_ms"));
+        parses_abandoned += usize::from(field("parse_done") == 0.0);
     }
     println!("\n== cold: first call in a fresh process ({rounds} processes) ==");
     let mut report = Report { rows: Vec::new() };
@@ -772,7 +777,11 @@ fn engine_cold_start() {
         "first tree-sitter parse, 64 KiB Rust",
         64 * KIB,
         stats(parse_ms),
-        "",
+        &if parses_abandoned == 0 {
+            String::new()
+        } else {
+            format!("{parses_abandoned} of {rounds} parses were abandoned at the parse budget")
+        },
     );
     report.row("cold", "first Engine::run, 64 KiB cargo test", 64 * KIB, stats(run_ms), "includes the scrubber's cold start, fsyncs, SQLite open; excludes process launch (see perf.rs B2)");
 }

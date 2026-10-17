@@ -1005,3 +1005,98 @@ fn fold_marker_text_matches_the_spec_for_both_styles() {
         "...  # folded L120-188: agentdiet show '#4f9a1b2c' --lines 120..188"
     );
 }
+
+// ---- bounded parse ----------------------------------------------------------------------------
+
+/// A source whose first top-level item is several KiB long, so the 2 KiB probe cuts through it.
+/// `pad` shifts where the cut falls.
+fn long_first_item(language: Language, pad: usize) -> String {
+    let lead = "x".repeat(pad);
+    let mut src = String::new();
+    match language {
+        Language::Rust => {
+            src.push_str(&format!(
+                "// {lead}\nuse std::collections::BTreeMap;\n\nimpl Store {{\n"
+            ));
+            for n in 0..30 {
+                src.push_str(&format!(
+                    "    pub fn method_{n}(&self, input: &BTreeMap<String, u64>) -> u64 {{\n"
+                ));
+                for k in 0..14 {
+                    src.push_str(&format!(
+                        "        let value_{n}_{k} = compute_something_rather_long(input, {k});\n"
+                    ));
+                }
+                src.push_str("        0\n    }\n\n");
+            }
+            src.push_str("}\n");
+        }
+        Language::Python => {
+            src.push_str(&format!("# {lead}\nclass Store:\n"));
+            for n in 0..30 {
+                src.push_str(&format!("    def method_{n}(self, items):\n"));
+                src.push_str("        message = \"\"\"stage\n        a multi-line string with def inside: def fake(): pass\n        \"\"\"\n");
+                for k in 0..12 {
+                    src.push_str(&format!(
+                        "        value_{n}_{k} = compute_something_rather_long(items, {k})\n"
+                    ));
+                }
+                src.push_str("        return message\n\n");
+            }
+        }
+        _ => {
+            src.push_str(&format!("// {lead}\nexport class Store {{\n"));
+            for n in 0..30 {
+                src.push_str(&format!("  method{n}(input) {{\n"));
+                for k in 0..14 {
+                    src.push_str(&format!(
+                        "    const value_{n}_{k} = computeSomethingRatherLong(input, {k});\n"
+                    ));
+                }
+                src.push_str("    return 0;\n  }\n\n");
+            }
+            src.push_str("}\n");
+        }
+    }
+    src
+}
+
+#[test]
+fn a_function_or_class_that_spans_the_probe_cut_is_still_folded() {
+    for (name, language) in [
+        ("store.rs", Language::Rust),
+        ("store.py", Language::Python),
+        ("store.js", Language::JavaScript),
+        ("store.ts", Language::TypeScript),
+    ] {
+        for pad in [0, 1, 5, 17, 33, 60] {
+            let src = long_first_item(language, pad);
+            assert!(
+                src.len() > 8 * 2048,
+                "{name}: the first item must span the probe's cut"
+            );
+            assert!(parse(language, &src).is_some(), "{name} pad {pad} is valid");
+            let folded = fold(name, Extent::Complete, src.as_bytes(), Mode::UltraLean)
+                .unwrap_or_else(|| panic!("{name} pad {pad} was not folded"));
+            let view = render(&folded, "abcdef12");
+            assert!(view.len() < src.len() / 2, "{name} pad {pad}");
+            parse(language, &view).unwrap_or_else(|| panic!("{name} pad {pad}: view must parse"));
+        }
+    }
+}
+
+#[test]
+fn text_that_is_not_source_is_left_unchanged_in_every_language() {
+    let mut text = String::new();
+    let mut i = 0;
+    while text.len() < 256 * 1024 {
+        text.push_str(&format!("{i}: [{}] {{{}}} ({})\n", i * 7, i * 13, i % 5));
+        i += 1;
+    }
+    for name in ["x.rs", "x.py", "x.js", "x.ts", "x.tsx"] {
+        assert!(
+            fold(name, Extent::Complete, text.as_bytes(), Mode::UltraLean).is_none(),
+            "{name}"
+        );
+    }
+}

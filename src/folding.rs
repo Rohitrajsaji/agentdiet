@@ -11,8 +11,8 @@
 //! made the scrubbed text shorter than the file on disk.
 //!
 //! Any doubt means "unchanged": a read that is not [`Extent::Complete`], an unknown extension,
-//! non-UTF-8 bytes, any parse error, a parse that overruns [`PARSE_BUDGET`], or a body that is not
-//! worth folding.
+//! non-UTF-8 bytes, any parse error, a parse that overruns [`PARSE_BUDGET`], a first 2 KiB that does
+//! not look like source (see `looks_like_source`), or a body that is not worth folding.
 
 use std::ops::ControlFlow;
 use std::time::{Duration, Instant};
@@ -24,10 +24,27 @@ use crate::diet::{
 };
 use crate::state::Mode;
 
-/// A hostile input that keeps the parser busy without ever reporting an error is abandoned after
-/// this long. It is a guard, not a tuning knob: the parse otherwise stops at the first syntax error
-/// (any error means "unchanged"), and a valid 256 KiB source takes about 20 ms (SPEC §7, B4).
-pub const PARSE_BUDGET: Duration = Duration::from_millis(300);
+/// A parse that runs longer than this is abandoned and the file is left unchanged. It is a guard
+/// against hostile input, not a tuning knob: the parser does not stop at the first syntax error, so
+/// without it text that is not source code would run the parse to the end of the input. A valid
+/// 256 KiB source takes about 22 ms on the reference machine (SPEC §7), so on a slower or busier
+/// machine the largest files may go unfolded.
+///
+/// An unoptimized build parses about ten times slower and the tests run in parallel, so it gets ten
+/// times the time; otherwise the debug test suite would measure the build profile, not the rule.
+pub const PARSE_BUDGET: Duration =
+    Duration::from_millis(if cfg!(debug_assertions) { 300 } else { 30 });
+
+/// How much of a file [`looks_like_source`] parses before deciding whether to parse all of it.
+const PROBE_BYTES: usize = 2048;
+
+/// The probe's limit, in progress-callback steps (the parser calls back once per fixed batch of its
+/// internal operations, so the count is the same on every machine and in every build profile, unlike
+/// a deadline). Measured over the first 2 KiB of the test fixtures in all five languages, cut at
+/// every line boundary and shifted through the file: valid code needs at most 20 steps; number-and-
+/// bracket text needs 71 or more. Prose and diagnostics need fewer steps than valid code (error
+/// recovery is slow per step), so they are rejected by the structural rules instead.
+const PROBE_MAX_STEPS: usize = 40;
 
 /// The ID used to size markers before the real one exists (the shortest an emitted ID can be).
 const PLACEHOLDER_ID: &str = "00000000";
@@ -95,12 +112,36 @@ pub fn count_lines(text: &[u8]) -> usize {
 
 /// Parse `text` as `language`; `None` on any error, timeout, or failure to set the grammar up.
 pub fn parse(language: Language, text: &str) -> Option<tree_sitter::Tree> {
+    let tree = parse_within(language, text, Limit::Time(PARSE_BUDGET))?;
+    (!tree.root_node().has_error()).then_some(tree)
+}
+
+/// When a parse is abandoned.
+#[derive(Debug, Clone, Copy)]
+enum Limit {
+    /// After this much wall-clock time.
+    Time(Duration),
+    /// After this many progress callbacks: a measure of the parser's work, not of the machine.
+    Steps(usize),
+}
+
+/// Parse `text` as `language`, abandoning the parse at `limit`. Unlike [`parse`], a tree with
+/// syntax errors is returned as it is: `None` only on a timeout or a grammar failure.
+fn parse_within(language: Language, text: &str, limit: Limit) -> Option<tree_sitter::Tree> {
     let mut parser = Parser::new();
     parser.set_language(&language.grammar()).ok()?;
-    let deadline = Instant::now() + PARSE_BUDGET;
-    let mut progress = |state: &tree_sitter::ParseState| {
-        // A parse error already decides the answer ("unchanged"): do not spend time recovering.
-        if state.has_error() || Instant::now() >= deadline {
+    let started = Instant::now();
+    let mut steps = 0usize;
+    // The parser reports `has_error` only once the error is on its stack, which for non-source text
+    // is not until the end of the input (measured: 2000+ callbacks, none with the flag set). Do not
+    // count on it to end the parse early; the limit is the guard.
+    let mut progress = |_: &tree_sitter::ParseState| {
+        steps += 1;
+        let over = match limit {
+            Limit::Time(budget) => started.elapsed() >= budget,
+            Limit::Steps(max) => steps > max,
+        };
+        if over {
             ControlFlow::Break(())
         } else {
             ControlFlow::Continue(())
@@ -108,12 +149,102 @@ pub fn parse(language: Language, text: &str) -> Option<tree_sitter::Tree> {
     };
     let options = ParseOptions::new().progress_callback(&mut progress);
     let bytes = text.as_bytes();
-    let tree = parser.parse_with_options(
+    parser.parse_with_options(
         &mut |i, _| &bytes[i.min(bytes.len())..],
         None,
         Some(options),
-    )?;
-    (!tree.root_node().has_error()).then_some(tree)
+    )
+}
+
+/// Whether `root` has an `ERROR` or `MISSING` node that starts before the start of its last child.
+/// The root itself is not counted: an unclosed construct at the end of a prefix may make it an
+/// `ERROR` node, and everything inside the last child belongs to that unclosed construct.
+fn has_error_before_last_item(root: Node<'_>) -> bool {
+    let Some(last) = root
+        .child_count()
+        .checked_sub(1)
+        .and_then(|n| root.child(n))
+    else {
+        return false;
+    };
+    let limit = last.start_byte();
+    let mut cursor = root.walk();
+    if !cursor.goto_first_child() {
+        return false;
+    }
+    let mut depth = 1;
+    loop {
+        let node = cursor.node();
+        if (node.is_error() || node.is_missing()) && node.start_byte() < limit {
+            return true;
+        }
+        // A subtree with no error in it has nothing to find; an error that starts at or after the
+        // limit has only descendants that start there too.
+        if node.has_error() && !node.is_error() && cursor.goto_first_child() {
+            depth += 1;
+            continue;
+        }
+        while !cursor.goto_next_sibling() {
+            if depth == 1 {
+                return false;
+            }
+            cursor.goto_parent();
+            depth -= 1;
+        }
+    }
+}
+
+/// Whether `root`'s `ERROR` children cover nearly all of a prefix of `len` bytes and none of them
+/// holds a well-formed node of more than one line (a function, a block, a statement list). That is
+/// text the grammar found no structure in, such as diagnostics or prose, which Rust's grammar
+/// swallows into one `ERROR` node without a single error before the last item. A construct left open
+/// by the cut is different: its `ERROR` node holds the complete functions and statements before the
+/// cut.
+fn is_mostly_unstructured_error(root: Node<'_>, len: usize) -> bool {
+    let mut error_bytes = 0;
+    let mut structured = false;
+    let mut cursor = root.walk();
+    for child in root.children(&mut cursor) {
+        if !child.is_error() {
+            continue;
+        }
+        error_bytes += child.end_byte() - child.start_byte();
+        let mut inner = child.walk();
+        structured |= child.children(&mut inner).any(|node| {
+            node.is_named()
+                && !node.has_error()
+                && node.end_position().row > node.start_position().row
+        });
+    }
+    error_bytes * 10 >= len * 9 && !structured
+}
+
+/// A cheap test, before the full parse, that `text` is source code and not something that merely
+/// has a source file's extension. Parsing the first [`PROBE_BYTES`] bytes (cut at a line boundary)
+/// within [`PROBE_MAX_STEPS`] is enough: valid code takes a fraction of that, while text the grammar
+/// cannot make sense of burns about a microsecond per byte in error recovery. A construct left open
+/// by the cut is not evidence of anything and does not count (see [`has_error_before_last_item`]
+/// and [`is_mostly_unstructured_error`]). Short texts and prefixes without a line break are not
+/// probed.
+fn looks_like_source(language: Language, text: &str) -> bool {
+    if text.len() <= PROBE_BYTES {
+        return true;
+    }
+    let Some(newline) = text.as_bytes()[..PROBE_BYTES]
+        .iter()
+        .rposition(|b| *b == b'\n')
+    else {
+        return true;
+    };
+    // The newline is one byte, so the cut is on a character boundary.
+    let prefix = &text[..=newline];
+    match parse_within(language, prefix, Limit::Steps(PROBE_MAX_STEPS)) {
+        Some(tree) => {
+            let root = tree.root_node();
+            !has_error_before_last_item(root) && !is_mostly_unstructured_error(root, prefix.len())
+        }
+        None => false,
+    }
 }
 
 /// A region of the text to replace by a marker.
@@ -282,6 +413,9 @@ pub fn fold(path: &str, extent: Extent, scrubbed: &[u8], mode: Mode) -> Option<C
     {
         return None;
     }
+    if !looks_like_source(language, text) {
+        return None;
+    }
     let tree = parse(language, text)?;
     let params = ModeParams::for_mode(mode);
     let regions = collect(language, tree.root_node(), text, &params);
@@ -324,4 +458,146 @@ pub fn fold(path: &str, extent: Extent, scrubbed: &[u8], mode: Mode) -> Option<C
         )],
         lines: Some((kept, total_lines)),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL: [Language; 5] = [
+        Language::Rust,
+        Language::Python,
+        Language::JavaScript,
+        Language::TypeScript,
+        Language::Tsx,
+    ];
+
+    fn numbers_and_punctuation(target: usize) -> String {
+        repeated(target, |i| {
+            format!("{i}: [{}] {{{}}} ({})\n", i * 7, i * 13, i % 5)
+        })
+    }
+
+    fn repeated(target: usize, line: impl Fn(usize) -> String) -> String {
+        let mut s = String::new();
+        let mut i = 0;
+        while s.len() < target {
+            s.push_str(&line(i));
+            i += 1;
+        }
+        s
+    }
+
+    fn fixture(name: &str) -> String {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/folding/");
+        std::fs::read_to_string(format!("{path}{name}")).unwrap()
+    }
+
+    #[test]
+    fn text_that_is_not_source_is_rejected_by_the_probe_without_a_full_parse() {
+        // The first goes through the step limit, the other two are what Rust's grammar swallows
+        // into a single `ERROR` node, with no error before the last item and few steps.
+        let texts = [
+            ("numbers", numbers_and_punctuation(256 * 1024)),
+            (
+                "diagnostics",
+                repeated(256 * 1024, |i| {
+                    format!("error: something failed at step {i}: warning, fatal\n")
+                }),
+            ),
+            (
+                "multibyte prose",
+                repeated(256 * 1024, |i| {
+                    format!("日本語のテスト {i} — héllo wörld 😀 ok\n")
+                }),
+            ),
+        ];
+        for (kind, text) in &texts {
+            for language in ALL {
+                assert!(
+                    !looks_like_source(language, text),
+                    "{kind} as {}",
+                    language.name()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn short_text_and_text_without_a_line_break_are_not_probed() {
+        let short = numbers_and_punctuation(PROBE_BYTES - 100);
+        assert!(short.len() <= PROBE_BYTES);
+        let one_line = "x ".repeat(PROBE_BYTES);
+        for language in ALL {
+            assert!(looks_like_source(language, &short));
+            assert!(looks_like_source(language, &one_line));
+        }
+    }
+
+    #[test]
+    fn real_sources_pass_the_probe_at_every_cut_through_the_first_2_kib() {
+        for (name, language) in [
+            ("inventory.rs", Language::Rust),
+            ("pricing.py", Language::Python),
+            ("cart.js", Language::JavaScript),
+            ("store.ts", Language::TypeScript),
+            ("Table.tsx", Language::Tsx),
+        ] {
+            let text = fixture(name);
+            // Shifting the file by a few characters moves the cut through every kind of construct
+            // the fixtures contain (open functions, impls, classes, multi-line strings, JSX).
+            for shift in 0..48 {
+                let shifted = format!("{}{text}", "\n".repeat(shift));
+                assert!(
+                    looks_like_source(language, &shifted),
+                    "{name} shifted by {shift} lines"
+                );
+            }
+            let mut lim = 512;
+            while lim <= PROBE_BYTES.min(text.len()) {
+                let cut = text[..lim].rfind('\n').map_or(0, |i| i + 1);
+                lim += 29;
+                if cut == 0 {
+                    continue;
+                }
+                let tree =
+                    parse_within(language, &text[..cut], Limit::Time(Duration::from_secs(5)))
+                        .unwrap();
+                assert!(
+                    !has_error_before_last_item(tree.root_node()),
+                    "{name} cut at {cut} is a valid file cut short"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_error_before_the_last_top_level_node_is_found_and_one_inside_it_is_not() {
+        let broken_first = "fn a() { let = ; }\nfn b() {}\nfn c() {}\n";
+        let tree = parse_within(
+            Language::Rust,
+            broken_first,
+            Limit::Time(Duration::from_secs(5)),
+        )
+        .unwrap();
+        assert!(has_error_before_last_item(tree.root_node()));
+        let open_last = "fn a() {}\nfn b() {\n    let x = 1;\n";
+        let tree = parse_within(
+            Language::Rust,
+            open_last,
+            Limit::Time(Duration::from_secs(5)),
+        )
+        .unwrap();
+        assert!(tree.root_node().has_error());
+        assert!(!has_error_before_last_item(tree.root_node()));
+    }
+
+    #[test]
+    fn a_clean_parse_and_an_empty_tree_have_no_error_before_the_last_item() {
+        for text in ["", "fn a() {}\nfn b() {}\n"] {
+            let tree =
+                parse_within(Language::Rust, text, Limit::Time(Duration::from_secs(5))).unwrap();
+            assert!(!has_error_before_last_item(tree.root_node()));
+        }
+    }
 }

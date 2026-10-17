@@ -394,6 +394,31 @@ lesser form):
   be the file's, and it is not described as a complete file. The input is the file's own bytes; a
   tool's decorated rendering (such as `cat -n` line prefixes) must be converted to file bytes by the
   hook layer **[4]** or not folded at all.
+- **Bounded parse.** The parser does not report a syntax error until it has read the whole input, so
+  text that is not source code would otherwise run it to the end of the input. Two guards bound
+  that cost:
+  - *Prefix probe.* A file longer than 2 KiB first has its first 2 KiB, cut at a line boundary,
+    parsed with a work limit of **40 progress-callback steps** (the parser calls back once per fixed
+    batch of its internal operations, so the limit measures work, not time, and behaves the same on
+    every machine and build). Over the test fixtures in all five languages, cut at every line
+    boundary and shifted through the file, valid code needed at most 20 steps and number-and-bracket
+    text at least 71. Prose and diagnostics need *fewer* steps than valid code, so only the
+    structural rules below catch them.
+    The file is left unchanged if the probe exceeds the limit; or if the prefix has a syntax error
+    (an `ERROR` or `MISSING` node) that starts **before the start of the prefix's last top-level
+    node**; or if `ERROR` nodes cover at least 90% of the prefix and hold no well-formed node of more
+    than one line (prose or diagnostics, which Rust's grammar swallows into a single `ERROR` node
+    with few steps). A construct left open by the cut (an unclosed function, `impl`, block or
+    triple-quoted string) is none of these: its errors lie inside the last top-level node, and its
+    `ERROR` node holds the complete functions before the cut. A prefix with no line break is not
+    probed.
+  - *Full parse.* The whole parse has a **30 ms** deadline in a release build (300 ms in an
+    unoptimized one, which parses about ten times slower); overrun leaves the file unchanged. A valid
+    source whose parse takes longer than that on the machine, for example under heavy load, is
+    therefore not folded.
+  Text that looks like source to the prefix probe is bounded only by the full-parse deadline. Tests
+  cover a valid function, `impl` and class spanning the probe's cut (still folded) and non-source text
+  in each language (unchanged without a full parse).
 - The parse runs on the **scrubbed** text, so every line number is already a line of the Vault copy.
   The mode's token minimum does not apply to folding; the 300-line rule, the body-length rule and the
   saving requirement do.
@@ -601,8 +626,8 @@ Requirements are not redefined to match a measurement.
 | **B1 — shim end-to-end overhead** | Wall time of spawning a shimmed command until it exits, minus the same command spawned directly (`E2 − E0`), human path, warm | < 0.2 ms | **NOT MET.** Median **2.24 ms** (p95 2.34, p99 2.59; n = 1000 iteration-matched pairs). |
 | B2 — process launch | Spawning `agentdiet hook noop` minus spawning the direct command (`E1 − E0`) | none; context for B1 | median 1.12 ms (p95 1.20, p99 1.24; n = 1000) |
 | B3 — in-process routing | `shim_name` + `resolve_real` on a synthetic `PATH`, up to the `exec` call | none; context for B1 | median 0.027 ms (p95 0.029, p99 0.030; n = 10000) |
-| **B4 — Diet Engine fast path** | Pure transform (classify, scrub, candidate, checks) of an input of up to 256 KiB, in process, warm, no I/O | < 10 ms | **NOT MET** at 256 KiB. Worst p50 **247 ms** (adversarial "numbers and punctuation", `read` action); worst p99 258 ms. Realistic 256 KiB Rust source through the fold path: p50 **28.8 ms** (tree-sitter parse alone is ~22 ms). Realistic 256 KiB JSON → TOON: p50 9.9 ms, p99 11.9 ms. Realistic 256 KiB cargo, pytest, npm: p50 5.4–7.8 ms. Adversarial "secrets everywhere" `shell`: p50 13.8 ms. Measured at `7fedbb3`, release, n = 60 per row. |
-| **B5 — persistence** | Durable Vault write (`fsync` file and directory), GC, ID selection, index and state update; measured with 0, 100 and 1000 entries in the Vault | reported with B4; the engine's end-to-end budget is B4 + B5 + process launch (B2) < 10 ms | **MISS** on the end-to-end budget. `Engine::run` on 64 KiB: p50 **24 ms** at 0, 100 and 1000 entries (flat in entry count). Floors: `fsync` of a 32 KiB file plus its directory p50 8.1 ms; `state::record_telemetry` p50 9.5–9.8 ms; `Cas::put` p50 10.9–12.0 ms. Cold first `Engine::run` (30 fresh processes) p50 38 ms. |
+| **B4 — Diet Engine fast path** | Pure transform (classify, scrub, candidate, checks) of an input of up to 256 KiB, in process, warm, no I/O | < 10 ms | **NOT MET** at 256 KiB. Worst p50 **28.7 ms**: realistic Rust source through the fold path (p99 29.6 ms; the tree-sitter parse alone is ~22 ms, so a large valid file cannot meet the budget while it is folded). Also over 10 ms at p50: adversarial "secrets everywhere" `shell` 13.7 ms and `read` 12.9 ms (the scrubber takes 6.2 ms on clean text of this size), "deep (60) JSON, large leaf" `json` 12.7 ms (TOON's 10-pass bound) and "diagnostic on every line" `read` 10.0 ms. Realistic 256 KiB JSON → TOON: p50 9.8 ms, p99 over 10 ms in every run (10.2–36.2 ms). Other realistic 256 KiB rows: cargo 7.7 ms, pytest 6.7 ms, npm 5.4 ms. The hostile "numbers and punctuation" `read` was p50 **247 ms** until the bounded parse (§3, Signature folding) and is now 8.4 ms (p99 8.8 ms); "multibyte text" `read` is 8.5 ms. Several rows show isolated p99 spikes of 26–37 ms (n = 60) that follow no one input. Larger inputs (not judged): 1 MiB of Rust is now left unchanged after ~57 ms where it used to fold in ~117 ms, because it exceeds the 30 ms parse deadline. Measured at `10d1ad6` plus the bounded-parse change, release, n = 60 per row. |
+| **B5 — persistence** | Durable Vault write (`fsync` file and directory), GC, ID selection, index and state update; measured with 0, 100 and 1000 entries in the Vault | reported with B4; the engine's end-to-end budget is B4 + B5 + process launch (B2) < 10 ms | **MISS** on the end-to-end budget. `Engine::run` on 64 KiB: p50 **22–26 ms** at 0, 100 and 1000 entries (flat in entry count; three runs). Floors: `fsync` of a 32 KiB file plus its directory p50 8.1–9.3 ms; `state::record_telemetry` p50 8.6–10.4 ms; `Cas::put` p50 10.5–12.6 ms. Cold first `Engine::run` (30 fresh processes) p50 38–43 ms. |
 
 Measured on Darwin 27.0.0 (macOS), Apple M1, aarch64, rustc 1.99.1, release build with
 `lto = true` (binary 1,432,480 bytes, ad-hoc code signature, sha256 `689e4da7…`, the artifact of
@@ -637,7 +662,7 @@ Notes:
 | 1 | scaffold, state ledger, Control Center, `init`/`eject` | done |
 | 2 | scrubber, Vault, FTS5 memory | done |
 | 3A | dependency cleanup, this specification, shim benchmark | done (B1 requirement still NOT MET) |
-| 3B | Diet Engine library: pipeline, compression, TOON, folding, `show`/ID/memory/state changes marked **[3B]** | in progress: storage prerequisites and the `diet.rs` pipeline (library only, no transforms yet) are implemented; shell compression (`compress.rs`), the TOON subset (`toon.rs`) and signature folding (`folding.rs`) are implemented; the Slice 3B performance numbers are measured (§7): B4 and B5 are both missed, recorded as misses |
+| 3B | Diet Engine library: pipeline, compression, TOON, folding, `show`/ID/memory/state changes marked **[3B]** | done (B4 and B5 requirements still NOT MET, §7): storage prerequisites, the `diet.rs` pipeline, shell compression (`compress.rs`), the TOON subset (`toon.rs`) and signature folding (`folding.rs`, with a bounded parse) are implemented as a library, and the §7 numbers are measured. Nothing is wired to a real entry point until Slice 4 |
 | 4 | hooks **and** PPID shims, wiring the engine to real entry points, shim redesign question (B1) | not started |
 | 5 | MCP tools (`diet_exec` etc.), scanner, `agentdiet top` | not started |
 
