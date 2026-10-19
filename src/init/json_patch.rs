@@ -15,11 +15,12 @@ use serde_json::{Map, Value, json};
 use crate::basename;
 
 /// Claude Code events agentdiet registers a hook for.
-pub const CLAUDE_EVENTS: [&str; 5] = [
+pub const CLAUDE_EVENTS: [&str; 6] = [
     "SessionStart",
     "UserPromptSubmit",
     "PreToolUse",
     "PostToolUse",
+    "PostToolUseFailure",
     "PreCompact",
 ];
 
@@ -139,7 +140,7 @@ pub fn has_mcp(text: &str, key: &str) -> bool {
 // ---- Claude Code hooks --------------------------------------------------
 
 fn is_tool_event(event: &str) -> bool {
-    matches!(event, "PreToolUse" | "PostToolUse")
+    matches!(event, "PreToolUse" | "PostToolUse" | "PostToolUseFailure")
 }
 
 /// `"<exe>" hook <Event>`

@@ -58,6 +58,9 @@ libc = "0.2"
 [dev-dependencies]
 # tempfile: isolated TempDir homes/projects for tests only.
 tempfile = "3"
+# proptest: property tests for the prompt-directive parser, the scanner's literal filter and the
+# EXPERIENCE.md renderer. Tests only; never linked into the binary.
+proptest = { version = "1", default-features = false, features = ["std"] }
 
 [profile.release]
 lto = true

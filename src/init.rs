@@ -15,6 +15,7 @@ pub mod backup;
 pub mod diff;
 pub mod eject;
 pub mod json_patch;
+pub mod rule_pointer;
 pub mod shims;
 pub mod targets;
 pub mod toml_block;

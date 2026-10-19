@@ -272,6 +272,7 @@ fn project_scope_writes_only_inside_the_project() {
     for rel in [
         ".claude/settings.json",
         ".mcp.json",
+        ".claude/rules/agentdiet.md",
         ".cursor/mcp.json",
         ".gemini/settings.json",
         ".vscode/mcp.json",
@@ -281,6 +282,10 @@ fn project_scope_writes_only_inside_the_project() {
     }
     let settings = json(&env, root.join(".claude/settings.json"));
     assert_eq!(hook_count(&settings, "PreToolUse"), 1);
+    assert_eq!(hook_count(&settings, "PostToolUseFailure"), 1);
+    let pointer = env.read(&root.join(".claude/rules/agentdiet.md"));
+    assert_eq!(pointer.lines().count(), 1, "a one-line pointer: {pointer}");
+    assert!(pointer.contains("EXPERIENCE.md"));
     assert!(json(&env, root.join(".vscode/mcp.json"))["servers"]["agentdiet"].is_object());
 
     // User-level files are untouched.

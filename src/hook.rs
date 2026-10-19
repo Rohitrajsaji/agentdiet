@@ -19,9 +19,11 @@ use crate::compress::parse_simple_command;
 use crate::control;
 use crate::diet::{
     Bypass, Engine, ExitStatus, Extent, Input, PANIC_NOTE, PAUSED_NOTICE, Settings, Source,
+    estimate_tokens,
 };
 use crate::fsutil;
-use crate::memory::MemoryDb;
+use crate::memory::{MemoryDb, Origin, RunKind, RunOutcome};
+use crate::runlog;
 use crate::session::{self, Key};
 use crate::state::{self, OnSessionStart, State, Status};
 
@@ -33,8 +35,9 @@ pub const MAX_PAYLOAD_BYTES: usize = 32 * 1024 * 1024;
 pub const SNAPSHOT_MAX_BYTES: usize = 2048;
 /// How many memory.db entries the snapshot lists at most.
 const SNAPSHOT_ENTRIES: usize = 10;
-/// Words in a prompt that bypass trimming for the rest of the turn (SPEC §2.4).
-pub const ESCAPE_WORDS: [&str; 3] = ["raw", "full", "unfiltered"];
+/// Prompt tokens that bypass trimming for the next tool call (SPEC §2.4). Lowercase; matched in
+/// any ASCII case.
+pub const FULL_DIRECTIVES: [&str; 3] = ["@diet:full", "/diet-full", "--diet-full"];
 /// Tool-name prefix of AgentDiet's own MCP tools, which PostToolUse leaves alone.
 pub const OWN_MCP_PREFIX: &str = "mcp__agentdiet__";
 /// SessionStart's line when `on_session_start` is `auto_resume`.
@@ -48,6 +51,8 @@ pub enum Event {
     UserPromptSubmit,
     PreToolUse,
     PostToolUse,
+    /// A tool call that failed. Record-only: it never changes what the agent sees (SPEC §3 Tier 1).
+    PostToolUseFailure,
     PreCompact,
 }
 
@@ -58,6 +63,7 @@ impl Event {
             "UserPromptSubmit" => Event::UserPromptSubmit,
             "PreToolUse" => Event::PreToolUse,
             "PostToolUse" => Event::PostToolUse,
+            "PostToolUseFailure" => Event::PostToolUseFailure,
             "PreCompact" => Event::PreCompact,
             _ => return None,
         })
@@ -127,6 +133,10 @@ fn dispatch(event: Event, payload: &[u8], paths: &Paths, now: SystemTime) -> Res
             Response::default()
         }
         Event::PostToolUse => post_tool_use(&paths, &payload, key.as_ref()),
+        Event::PostToolUseFailure => {
+            post_tool_use_failure(&paths, &payload, key.as_ref());
+            Response::default()
+        }
         // Claude Code discards PreCompact output; the snapshot comes from SessionStart(compact).
         Event::PreCompact => Response::default(),
     }
@@ -286,10 +296,22 @@ fn words(text: &str) -> impl Iterator<Item = &str> {
         .filter(|w| !w.is_empty())
 }
 
-/// `true` if the prompt contains `raw`, `full` or `unfiltered` as a whole word, in any case.
-/// `fully` and `full-stack` are other words.
-pub fn has_escape_word(prompt: &str) -> bool {
-    words(prompt).any(|w| ESCAPE_WORDS.iter().any(|e| w.eq_ignore_ascii_case(e)))
+/// `true` if the prompt carries one of [`FULL_DIRECTIVES`] as a whole token, in any ASCII case.
+/// Prose never does: "full report", "raw" and "unfiltered" are words, not directives. A token
+/// glued to a path, an address or a longer word (`docs/diet-full`, `x@diet:full`,
+/// `@diet:fullscreen`) does not count.
+pub fn has_full_directive(prompt: &str) -> bool {
+    // ASCII lowercasing keeps every byte offset.
+    let lower = prompt.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let starts_token = |b: u8| !(is_word_byte(b) || matches!(b, b'/' | b'@' | b':' | b'.'));
+    FULL_DIRECTIVES.iter().any(|directive| {
+        lower.match_indices(directive).any(|(at, _)| {
+            let end = at + directive.len();
+            (at == 0 || starts_token(bytes[at - 1]))
+                && bytes.get(end).is_none_or(|b| !is_word_byte(*b))
+        })
+    })
 }
 
 /// The first `@diet pause` / `@diet resume` in a prompt (case-insensitive, whole words).
@@ -332,10 +354,14 @@ fn user_prompt_submit(paths: &Paths, payload: &Map<String, Value>, key: Option<&
         Some(Err(e)) => notes.push(note(format!("agentdiet: {e:#}"))),
         None => {}
     }
-    // Every prompt sets the flag afresh, so a bypass lasts exactly one turn.
-    let raw = has_escape_word(prompt);
+    // Every prompt arms or disarms the flag afresh and drops a binding no call ever spent (an
+    // interrupted call), so a directive covers at most one tool call.
+    let armed = has_full_directive(prompt);
     if let Some(key) = key
-        && let Err(e) = session::update(paths, key, |s| s.raw_turn = raw)
+        && let Err(e) = session::update(paths, key, |s| {
+            s.raw_turn = armed;
+            s.raw_tool_use = None;
+        })
     {
         notes.push(note(format!("agentdiet: {e}")));
     }
@@ -370,14 +396,22 @@ fn pre_tool_use(paths: &Paths, payload: &Map<String, Value>, key: Option<&Key>) 
         str_field(payload, "cwd").unwrap_or_default(),
     );
     let id = str_field(payload, "tool_use_id").map(|id| fsutil::sha256_hex(id.as_bytes()));
-    // Best effort: a sidecar that cannot be updated only means no retry is detected.
+    // Best effort: a sidecar that cannot be updated only means no retry is detected and no
+    // directive is bound.
     let _ = session::update(paths, key, |s| {
         if s.last_hook_sig.as_deref() == Some(sig.as_str())
-            && let Some(id) = id
+            && let Some(id) = id.clone()
         {
             s.retry_tool_use = Some(id);
         }
         s.last_hook_sig = Some(sig);
+        // An armed directive belongs to this call, and to no later one (SPEC §2.4).
+        if s.raw_turn
+            && let Some(id) = id
+        {
+            s.raw_tool_use = Some(id);
+            s.raw_turn = false;
+        }
     });
 }
 
@@ -450,24 +484,181 @@ fn text_fields(tool: &str, response: &Value, input: Option<&Value>) -> Vec<(Stri
     }
 }
 
+/// Spend a full-output directive bound to this call, if it is. Returns whether it was: the call's
+/// output is then bypassed. Every tool call spends its own binding, whether or not it has output
+/// the engine would touch (SPEC §2.4).
+fn spend_directive(paths: &Paths, key: Option<&Key>, id: Option<&str>) -> bool {
+    let (Some(key), Some(id)) = (key, id) else {
+        return false;
+    };
+    if session::load(paths, key).raw_tool_use.as_deref() != Some(id) {
+        return false;
+    }
+    // The output is bypassed even if the sidecar cannot be rewritten: the binding was read, and
+    // a stale one is cleared by the next prompt anyway.
+    let _ = session::update(paths, key, |s| {
+        if s.raw_tool_use.as_deref() == Some(id) {
+            s.raw_tool_use = None;
+        }
+    });
+    true
+}
+
+fn post_tool_use_failure(paths: &Paths, payload: &Map<String, Value>, key: Option<&Key>) {
+    let id = str_field(payload, "tool_use_id").map(|id| fsutil::sha256_hex(id.as_bytes()));
+    spend_directive(paths, key, id.as_deref());
+    // A user's interrupt says nothing about the command.
+    if payload.get("is_interrupt").and_then(Value::as_bool) == Some(true) {
+        return;
+    }
+    let (Some(tool), input) = (str_field(payload, "tool_name"), payload.get("tool_input")) else {
+        return;
+    };
+    let error = str_field(payload, "error").unwrap_or_default();
+    let tokens = estimate_tokens(error.as_bytes()) as u64;
+    let label = key.and_then(runlog::session_label);
+    let (kind, family, title, outcome, exit_code) = match tool {
+        "Bash" => {
+            let command = input_str(input, "command");
+            (
+                RunKind::Shell,
+                runlog::shell_family(&command),
+                command,
+                RunOutcome::Fail,
+                exit_code_line(error),
+            )
+        }
+        "Read" => (
+            RunKind::Read,
+            "Read".to_string(),
+            input_str(input, "file_path"),
+            RunOutcome::Miss,
+            None,
+        ),
+        "Grep" | "Glob" => (
+            RunKind::Search,
+            tool.to_string(),
+            search_title(input),
+            RunOutcome::Miss,
+            None,
+        ),
+        _ => return,
+    };
+    // Best effort, like all telemetry; a failure's own output is never stored.
+    let _ = runlog::record(
+        paths,
+        &runlog::Run {
+            origin: Origin::Hook,
+            kind,
+            family: &family,
+            title: &title,
+            outcome,
+            exit_code,
+            raw_tokens: tokens,
+            emitted_tokens: tokens,
+            cas_sha: None,
+            session: label.as_ref(),
+        },
+    );
+}
+
+/// `N` from an error whose first line is `Exit code N` (PostToolUseFailure for a Bash command).
+fn exit_code_line(error: &str) -> Option<i32> {
+    error
+        .lines()
+        .next()?
+        .trim()
+        .strip_prefix("Exit code ")?
+        .trim()
+        .parse()
+        .ok()
+}
+
+fn input_str(input: Option<&Value>, name: &str) -> String {
+    input
+        .and_then(|i| i.get(name))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// `pattern`, or `pattern in path` when the search was scoped.
+fn search_title(input: Option<&Value>) -> String {
+    let pattern = input_str(input, "pattern");
+    match input_str(input, "path") {
+        path if path.is_empty() => pattern,
+        path => format!("{pattern} in {path}"),
+    }
+}
+
+/// Whether a Grep/Glob result found anything, from the count fields it carries (`numFiles`,
+/// `filenames`, `numLines`, `numMatches`, `content`). `None` when it carries none of them: an
+/// unrecognised shape is not recorded rather than guessed at.
+fn search_found(response: &Value) -> Option<bool> {
+    let mut seen = false;
+    let mut found = false;
+    for name in ["numFiles", "numLines", "numMatches"] {
+        if let Some(n) = response.get(name).and_then(Value::as_u64) {
+            seen = true;
+            found |= n > 0;
+        }
+    }
+    if let Some(files) = response.get("filenames").and_then(Value::as_array) {
+        seen = true;
+        found |= !files.is_empty();
+    }
+    if let Some(content) = response.get("content").and_then(Value::as_str) {
+        seen = true;
+        found |= !content.trim().is_empty();
+    }
+    seen.then_some(found)
+}
+
 fn post_tool_use(paths: &Paths, payload: &Map<String, Value>, key: Option<&Key>) -> Response {
+    let id = str_field(payload, "tool_use_id").map(|id| fsutil::sha256_hex(id.as_bytes()));
+    let full = spend_directive(paths, key, id.as_deref());
     let (Some(tool), Some(response)) = (
         str_field(payload, "tool_name"),
         payload.get("tool_response"),
     ) else {
         return Response::default();
     };
-    let fields = text_fields(tool, response, payload.get("tool_input"));
+    let input = payload.get("tool_input");
+    let label = key.and_then(runlog::session_label);
+    if matches!(tool, "Grep" | "Glob") {
+        if let Some(found) = search_found(response) {
+            let _ = runlog::record(
+                paths,
+                &runlog::Run {
+                    origin: Origin::Hook,
+                    kind: RunKind::Search,
+                    family: tool,
+                    title: &search_title(input),
+                    outcome: if found {
+                        RunOutcome::Ok
+                    } else {
+                        RunOutcome::Miss
+                    },
+                    exit_code: None,
+                    raw_tokens: estimate_tokens(response.to_string().as_bytes()) as u64,
+                    emitted_tokens: estimate_tokens(response.to_string().as_bytes()) as u64,
+                    cas_sha: None,
+                    session: label.as_ref(),
+                },
+            );
+        }
+        return Response::default();
+    }
+    let fields = text_fields(tool, response, input);
     if fields.is_empty() {
         return Response::default();
     }
 
     let state = state::load(paths);
     let sidecar = key.map(|k| session::load(paths, k)).unwrap_or_default();
-    let id = str_field(payload, "tool_use_id").map(|id| fsutil::sha256_hex(id.as_bytes()));
     let bypass = if id.is_some() && sidecar.retry_tool_use == id {
         Bypass::RepeatedCommand
-    } else if sidecar.raw_turn {
+    } else if full {
         Bypass::RawNextTurn
     } else {
         Bypass::None
@@ -476,6 +667,7 @@ fn post_tool_use(paths: &Paths, payload: &Map<String, Value>, key: Option<&Key>)
         mode: state.mode,
         paused: state.status == Status::Paused,
         bypass,
+        head_tail: false,
     };
     let mut engine = Engine::new(paths);
     if let Some(Key::Session(id)) = key
@@ -487,11 +679,14 @@ fn post_tool_use(paths: &Paths, payload: &Map<String, Value>, key: Option<&Key>)
     let mut updated = response.clone();
     let mut changed = false;
     let mut notes = Vec::new();
+    let (mut raw_tokens, mut emitted_tokens, mut sha) = (0usize, 0usize, None);
+    let mut dieted_by_shim = false;
     for (pointer, source) in fields {
         let Some(text) = updated.pointer(&pointer).and_then(Value::as_str) else {
             continue;
         };
         if matches!(source, Source::Shell { .. }) && has_breadcrumb(text) {
+            dieted_by_shim = true;
             continue;
         }
         let outcome = engine.run(
@@ -502,12 +697,51 @@ fn post_tool_use(paths: &Paths, payload: &Map<String, Value>, key: Option<&Key>)
             &settings,
         );
         notes.extend(outcome.note);
+        raw_tokens += estimate_tokens(text.as_bytes());
+        emitted_tokens += estimate_tokens(&outcome.output);
+        sha = sha.or(outcome.sha);
         if outcome.output != text.as_bytes()
             && let Some(slot) = updated.pointer_mut(&pointer)
         {
             *slot = Value::String(String::from_utf8_lossy(&outcome.output).into_owned());
             changed = true;
         }
+    }
+
+    // The run log (SPEC §3 Tier 3, "Run log"): every successful Bash call (one a shim dieted was
+    // logged by the shim), and Reads big enough to matter.
+    let logged = match tool {
+        "Bash" if !dieted_by_shim => {
+            let command = input_str(input, "command");
+            Some((RunKind::Shell, runlog::shell_family(&command), command))
+        }
+        "Read" if raw_tokens as u64 >= runlog::BLOAT_TOKENS => {
+            let path = response
+                .pointer("/file/filePath")
+                .and_then(Value::as_str)
+                .map_or_else(|| input_str(input, "file_path"), str::to_string);
+            Some((RunKind::Read, "Read".to_string(), path))
+        }
+        _ => None,
+    };
+    if let Some((kind, family, title)) = logged
+        && let Err(note) = runlog::record(
+            paths,
+            &runlog::Run {
+                origin: Origin::Hook,
+                kind,
+                family: &family,
+                title: &title,
+                outcome: RunOutcome::Ok,
+                exit_code: (kind == RunKind::Shell).then_some(0),
+                raw_tokens: raw_tokens as u64,
+                emitted_tokens: emitted_tokens as u64,
+                cas_sha: sha.as_deref(),
+                session: label.as_ref(),
+            },
+        )
+    {
+        notes.push(note);
     }
     if !changed {
         return Response {
@@ -532,28 +766,112 @@ mod tests {
     use super::*;
 
     #[test]
-    fn escape_words_are_whole_words_in_any_case() {
+    fn only_explicit_directive_tokens_request_full_output() {
         for yes in [
-            "raw",
-            "show me the RAW output",
-            "Full.",
-            "(full) log please",
-            "give me unfiltered logs",
-            "raw/data.json",
-            "'raw'",
+            "@diet:full",
+            "rerun the build @diet:full",
+            "rerun it @DIET:FULL please",
+            "`@diet:full`",
+            "(--diet-full)",
+            "cargo test --diet-full",
+            "please /diet-full the next one",
+            "@diet:full.",
+            "line one\n/diet-full\n",
         ] {
-            assert!(has_escape_word(yes), "{yes}");
+            assert!(has_full_directive(yes), "{yes}");
         }
         for no in [
-            "fully done",
-            "full-stack app",
-            "rawhide",
-            "draw it",
-            "unfilteredness",
-            "raw_bytes",
+            // The dogfooding prompt that used to switch trimming off.
+            "add the full report link to the footer",
+            "full",
+            "raw",
+            "unfiltered",
+            "show me the RAW output",
+            "(full) log please",
+            "build the full-stack app",
+            "print the full path",
+            "@diet:fullscreen",
+            "--diet-fully",
+            "---diet-full",
+            "x@diet:full",
+            "see docs/diet-full for details",
+            "user@diet:full",
+            "@diet full",
+            "@diet pause",
             "",
         ] {
-            assert!(!has_escape_word(no), "{no}");
+            assert!(!has_full_directive(no), "{no}");
+        }
+    }
+
+    mod prop {
+        use proptest::prelude::*;
+
+        use super::super::has_full_directive;
+
+        /// Words that used to trigger the escape hatch, or look like they might.
+        const PROSE_WORDS: &[&str] = &[
+            "full",
+            "Full",
+            "FULL",
+            "fully",
+            "full-stack",
+            "full path",
+            "full report link",
+            "raw",
+            "unfiltered",
+            "report",
+            "link",
+            "(full)",
+            "full.",
+            "@full",
+            "--full",
+            "/full",
+            // Not a bare `diet`: `(full)` + `/` + `diet` + `-` + `full` would spell a real
+            // `/diet-full` token.
+            "dietary",
+            "@diet",
+            "pause",
+        ];
+
+        fn prose() -> impl Strategy<Value = String> {
+            prop::collection::vec(
+                (
+                    prop::sample::select(PROSE_WORDS),
+                    prop::sample::select(&[" ", "\n", ", ", ". ", ": ", "/", "-"][..]),
+                ),
+                0..40,
+            )
+            .prop_map(|parts| parts.into_iter().map(|(w, s)| format!("{w}{s}")).collect())
+        }
+
+        /// Arbitrary text that cannot spell any directive (none contains `diet`).
+        fn free_text() -> impl Strategy<Value = String> {
+            "[a-zA-Z0-9 ,.()'\"!?:/@_\n-]{0,120}".prop_filter("no directive spelling", |s| {
+                !s.to_ascii_lowercase().contains("diet")
+            })
+        }
+
+        proptest! {
+            #[test]
+            fn prose_never_requests_full_output(text in prose()) {
+                prop_assert!(!has_full_directive(&text), "{text:?}");
+            }
+
+            #[test]
+            fn free_text_never_requests_full_output(text in free_text()) {
+                prop_assert!(!has_full_directive(&text), "{text:?}");
+            }
+
+            #[test]
+            fn a_spaced_directive_anywhere_requests_it(
+                before in free_text(),
+                after in free_text(),
+                directive in prop::sample::select(&["@diet:full", "/diet-full", "--diet-full", "@Diet:Full"][..]),
+            ) {
+                let text = format!("{before} {directive} {after}");
+                prop_assert!(has_full_directive(&text), "{text:?}");
+            }
         }
     }
 

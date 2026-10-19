@@ -92,7 +92,7 @@ fn counter(env: &Env, name: &str) -> u64 {
 }
 
 #[test]
-fn tools_list_advertises_the_three_tools_with_schemas() {
+fn tools_list_advertises_the_four_tools_with_schemas() {
     let env = Env::empty();
     let replies = session(
         &env,
@@ -106,11 +106,19 @@ fn tools_list_advertises_the_three_tools_with_schemas() {
     assert_eq!(replies[0]["result"]["capabilities"], json!({"tools": {}}));
     let tools = replies[1]["result"]["tools"].as_array().unwrap();
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["diet_inspect", "diet_search", "diet_exec"]);
+    assert_eq!(
+        names,
+        ["diet_inspect", "diet_search", "diet_exec", "diet_reflect"]
+    );
     let required = |i: usize| tools[i]["inputSchema"]["required"].clone();
     assert_eq!(required(0), json!(["id"]));
     assert_eq!(required(1), json!(["query"]));
     assert_eq!(required(2), json!(["command"]));
+    assert_eq!(
+        required(3),
+        Value::Null,
+        "every diet_reflect argument is optional"
+    );
     for t in tools {
         assert_eq!(t["inputSchema"]["type"], "object");
         assert!(!t["description"].as_str().unwrap().is_empty());
@@ -436,4 +444,156 @@ fn diet_exec_stdin_is_not_the_json_rpc_stream() {
     );
     assert_eq!(text(&replies[0]["result"]), "[exit 0]\n");
     assert_eq!(replies[1]["id"], 2, "the ping still reached the server");
+}
+
+/// An executable named `name` that prints `body` from a file and exits `code`.
+fn fake_tool(env: &Env, name: &str, body: &str, code: i32) -> std::path::PathBuf {
+    let file = env.paths.project_root.join(format!("{name}-output.txt"));
+    std::fs::write(&file, body).unwrap();
+    let script = env.paths.project_root.join(name);
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\ncat '{}'\nexit {code}\n", file.display()),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    script
+}
+
+/// About 2,000 lines shaped like `npm ls --all`: a dependency tree, many `deduped` lines, one
+/// unmet peer dependency in the middle.
+fn npm_ls_tree() -> String {
+    let mut out = String::from("germany-masters-2027@0.1.0 /Users/dev/germany-masters-2027\n");
+    for top in 0..100 {
+        out.push_str(&format!("├─┬ package-{top:03}@{top}.2.3\n"));
+        for dep in 0..19 {
+            let suffix = if dep % 2 == 0 { " deduped" } else { "" };
+            out.push_str(&format!("│ ├── dep-{top:03}-{dep:02}@1.{dep}.0{suffix}\n"));
+        }
+        if top == 50 {
+            out.push_str("│ ├── UNMET PEER DEPENDENCY react@^17.0.0\n");
+        }
+    }
+    out.push_str("└── zod@3.23.8\n");
+    out
+}
+
+fn breadcrumb_id(t: &str) -> String {
+    t.lines()
+        .find_map(|l| l.split("agentdiet show '#").nth(1))
+        .and_then(|rest| rest.split('\'').next())
+        .expect("a breadcrumb")
+        .to_string()
+}
+
+/// Dogfooding regression: `npm ls --all` (about 1,900 lines) came back whole, with no breadcrumb,
+/// `trimmed_outputs` 0 and `tokens_saved` 0.
+#[test]
+fn diet_exec_trims_a_2000_line_npm_ls_stores_it_and_counts_it() {
+    let env = Env::empty();
+    let tree = npm_ls_tree();
+    assert!(tree.lines().count() > 2000);
+    let npm = fake_tool(&env, "npm", &tree, 0);
+    let r = call_one(
+        &env,
+        "diet_exec",
+        json!({"command": [npm.display().to_string(), "ls", "--all"]}),
+    );
+    assert_eq!(r["isError"], false);
+    let t = text(&r);
+    assert!(
+        t.lines().count() < 120,
+        "compact: {} lines\n{t}",
+        t.lines().count()
+    );
+    assert!(
+        t.starts_with("germany-masters-2027@0.1.0"),
+        "the head is kept: {t}"
+    );
+    assert!(t.contains("└── zod@3.23.8"), "the tail is kept");
+    assert!(
+        t.contains("UNMET PEER DEPENDENCY react@^17.0.0"),
+        "problems are kept: {t}"
+    );
+    assert!(t.contains("elided"), "{t}");
+    assert!(t.trim_end().ends_with("[exit 0]"), "{t}");
+    let id = breadcrumb_id(&t);
+
+    // Recoverable byte for byte.
+    let full = call_one(&env, "diet_inspect", json!({"id": id}));
+    assert_eq!(text(&full), tree);
+
+    // Counted in state.json and in the run log.
+    assert_eq!(counter(&env, "trimmed_outputs"), 1);
+    assert!(counter(&env, "tokens_saved") > 10_000, "{}", state(&env));
+    let db = MemoryDb::open(&env.paths.memory_db()).unwrap();
+    let runs = db.runs(10).unwrap();
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert_eq!(
+        (
+            runs[0].origin.as_str(),
+            runs[0].family.as_str(),
+            runs[0].outcome.as_str()
+        ),
+        ("mcp", "npm", "ok")
+    );
+    assert!(runs[0].title.ends_with("npm ls --all"), "{}", runs[0].title);
+    assert!(
+        runs[0]
+            .cas_sha
+            .as_deref()
+            .is_some_and(|s| s.starts_with(&id))
+    );
+    assert!(runs[0].raw_tokens > 10 * runs[0].emitted_tokens);
+}
+
+/// A command no rule knows is still cut to its head, its tail and its diagnostics when it is long.
+#[test]
+fn diet_exec_cuts_any_long_output_to_head_tail_and_diagnostics() {
+    let env = Env::empty();
+    let mut body = String::new();
+    for i in 0..1500 {
+        body.push_str(&format!("row {i:04}: value={}\n", i * 7));
+        if i == 700 {
+            body.push_str("error: checksum mismatch in row 0700\n");
+        }
+    }
+    let tool = fake_tool(&env, "report-gen", &body, 3);
+    let r = call_one(
+        &env,
+        "diet_exec",
+        json!({"command": [tool.display().to_string()]}),
+    );
+    let t = text(&r);
+    assert!(t.contains("row 0000: value=0"));
+    assert!(t.contains("row 1499: value=10493"));
+    assert!(t.contains("error: checksum mismatch in row 0700"), "{t}");
+    assert!(
+        t.contains("row 0699: value=4893"),
+        "context around the error"
+    );
+    assert!(!t.contains("row 0400: value="), "the middle is elided");
+    assert!(t.trim_end().ends_with("[exit 3]"));
+    let id = breadcrumb_id(&t);
+    assert_eq!(
+        text(&call_one(&env, "diet_inspect", json!({"id": id}))),
+        body
+    );
+
+    // Machine-readable output is never cut, however long.
+    let json_body: String = std::iter::once("[\n".to_string())
+        .chain((0..1500).map(|i| format!("  {{\"row\": {i}}},\n")))
+        .chain(std::iter::once("  {\"row\": -1}\n]\n".to_string()))
+        .collect();
+    let tool = fake_tool(&env, "report-json", &json_body, 0);
+    let r = call_one(
+        &env,
+        "diet_exec",
+        json!({"command": [tool.display().to_string(), "--json"]}),
+    );
+    assert!(text(&r).starts_with(&json_body), "untouched");
 }

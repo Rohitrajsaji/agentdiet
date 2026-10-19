@@ -12,6 +12,11 @@
 //! and [`MemoryDb::index`] is a single `INSERT … ON CONFLICT DO NOTHING`, so
 //! repeats collapse atomically while the same output produced by a different
 //! command or session keeps its own row.
+//!
+//! Schema v3 adds the **run log** (`runs`): one row per command or tool call the hooks, shims and
+//! `diet_exec` saw, trimmed or not, with its exit status and token counts. `agentdiet stats`
+//! counts it and `agentdiet reflect` mines it (SPEC §3 Tier 3, "Run log"). Like everything here it
+//! holds scrubbed text only.
 
 use std::collections::HashSet;
 use std::io;
@@ -23,7 +28,7 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 use crate::fsutil;
 use crate::scrubber::Scrubbed;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// How long SQLite (and our WAL retry) waits on another writer before reporting `Busy`.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
@@ -67,6 +72,30 @@ END;
 /// nullable columns would allow.
 const SCHEMA_V2_COLUMN: &str = "ALTER TABLE entries ADD COLUMN dedupe_key TEXT NOT NULL DEFAULT ''";
 const SCHEMA_V2_INDEX: &str = "CREATE UNIQUE INDEX entries_dedupe ON entries(dedupe_key)";
+
+/// Added in schema v3: the run log.
+const SCHEMA_V3: &str = "
+CREATE TABLE runs(
+    id             INTEGER PRIMARY KEY,
+    created_ms     INTEGER NOT NULL,
+    origin         TEXT NOT NULL,
+    kind           TEXT NOT NULL,
+    family         TEXT NOT NULL,
+    title          TEXT NOT NULL,
+    outcome        TEXT NOT NULL,
+    exit_code      INTEGER,
+    raw_tokens     INTEGER NOT NULL,
+    emitted_tokens INTEGER NOT NULL,
+    cas_sha        TEXT,
+    session        TEXT
+);
+CREATE INDEX runs_session ON runs(session, id);
+";
+
+/// The run log keeps at most this many rows; older ones are dropped on insert.
+pub const MAX_RUNS: i64 = 10_000;
+/// How long recording a run waits for another writer before it is dropped (a hook must not wait).
+pub const RUN_BUSY_TIMEOUT: Duration = Duration::from_millis(100);
 
 #[derive(Debug, thiserror::Error)]
 pub enum MemoryError {
@@ -122,6 +151,117 @@ pub struct Hit {
     pub score: f64,
 }
 
+/// Which entry point saw a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// A shim's agent path.
+    Shim,
+    /// The MCP tool `diet_exec`.
+    Mcp,
+    /// A Claude Code hook (PostToolUse, PostToolUseFailure).
+    Hook,
+}
+
+impl Origin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Origin::Shim => "shim",
+            Origin::Mcp => "mcp",
+            Origin::Hook => "hook",
+        }
+    }
+}
+
+/// What a run was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunKind {
+    /// A command (argv or shell text).
+    Shell,
+    /// A file read.
+    Read,
+    /// A file or content search (Grep, Glob).
+    Search,
+}
+
+impl RunKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RunKind::Shell => "shell",
+            RunKind::Read => "read",
+            RunKind::Search => "search",
+        }
+    }
+}
+
+/// How a run ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunOutcome {
+    Ok,
+    /// A command that exited non-zero, was killed, or a tool call that failed.
+    Fail,
+    /// A search that found nothing, or a read of a path that is not there.
+    Miss,
+}
+
+impl RunOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RunOutcome::Ok => "ok",
+            RunOutcome::Fail => "fail",
+            RunOutcome::Miss => "miss",
+        }
+    }
+}
+
+/// One run to record. Text is scrubbed by construction.
+#[derive(Debug, Clone, Copy)]
+pub struct NewRun<'a> {
+    pub origin: Origin,
+    pub kind: RunKind,
+    /// The executable's base name (`npm`), or the tool name (`Read`, `Grep`).
+    pub family: &'a Scrubbed,
+    /// The command line, path or pattern.
+    pub title: &'a Scrubbed,
+    pub outcome: RunOutcome,
+    pub exit_code: Option<i32>,
+    /// Estimated tokens of the output before AgentDiet ([`crate::diet::estimate_tokens`]).
+    pub raw_tokens: u64,
+    /// Estimated tokens of what the agent was given.
+    pub emitted_tokens: u64,
+    /// The Vault entry holding the full output, when one was stored.
+    pub cas_sha: Option<&'a str>,
+    pub session: Option<&'a Scrubbed>,
+}
+
+/// One recorded run, as [`MemoryDb::runs`] returns it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunRow {
+    pub id: i64,
+    pub created_ms: i64,
+    pub origin: String,
+    pub kind: String,
+    pub family: String,
+    pub title: String,
+    pub outcome: String,
+    pub exit_code: Option<i64>,
+    pub raw_tokens: i64,
+    pub emitted_tokens: i64,
+    pub cas_sha: Option<String>,
+    pub session: Option<String>,
+}
+
+/// Totals over the run log for one origin.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunTotals {
+    pub runs: u64,
+    /// Runs whose outcome is `fail` (a search `miss` is not a failure).
+    pub failed: u64,
+    /// Runs whose output was replaced (a Vault entry was referenced).
+    pub trimmed: u64,
+    pub raw_tokens: u64,
+    pub emitted_tokens: u64,
+}
+
 /// One indexed event, as [`MemoryDb::recent`] returns it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Recent {
@@ -147,6 +287,11 @@ impl MemoryDb {
     /// `/var` or a project under a linked directory.) Only the final component is guarded; a
     /// swap in the instant between SQLite's `open` and the check is detected, not prevented.
     pub fn open(path: &Path) -> Result<Self, MemoryError> {
+        Self::open_with_timeout(path, BUSY_TIMEOUT)
+    }
+
+    /// [`MemoryDb::open`], waiting at most `busy` for another writer (instead of 2 s).
+    pub fn open_with_timeout(path: &Path, busy: Duration) -> Result<Self, MemoryError> {
         let io_err = |source| MemoryError::Io {
             path: path.display().to_string(),
             source,
@@ -168,8 +313,8 @@ impl MemoryDb {
         )?;
         fsutil::require_same_file(&checked, &path).map_err(io_err)?;
         drop(checked);
-        conn.busy_timeout(BUSY_TIMEOUT)?;
-        enable_wal(&conn)?;
+        conn.busy_timeout(busy)?;
+        enable_wal(&conn, busy)?;
         migrate(&mut conn)?;
         Ok(Self { conn })
     }
@@ -273,6 +418,101 @@ impl MemoryDb {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// Append one run to the run log, dropping rows beyond the newest [`MAX_RUNS`]. `cas_sha`
+    /// must be 64 lowercase hex; `session` scrubbed text of at most [`MAX_SESSION_LEN`] bytes.
+    pub fn record_run(&self, run: &NewRun<'_>) -> Result<i64, MemoryError> {
+        if let Some(sha) = run.cas_sha
+            && !is_sha256_hex(sha)
+        {
+            return Err(MemoryError::InvalidMetadata("cas_sha"));
+        }
+        if run
+            .session
+            .is_some_and(|s| s.as_bytes().len() > MAX_SESSION_LEN)
+        {
+            return Err(MemoryError::InvalidMetadata("session"));
+        }
+        let created_ms = i64::try_from(fsutil::now_millis()).unwrap_or(i64::MAX);
+        let tokens = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
+        self.conn.execute(
+            "INSERT INTO runs(created_ms, origin, kind, family, title, outcome, exit_code,
+                              raw_tokens, emitted_tokens, cas_sha, session)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                created_ms,
+                run.origin.as_str(),
+                run.kind.as_str(),
+                run.family.to_lossy_string(),
+                run.title.to_lossy_string(),
+                run.outcome.as_str(),
+                run.exit_code,
+                tokens(run.raw_tokens),
+                tokens(run.emitted_tokens),
+                run.cas_sha,
+                run.session.map(Scrubbed::to_lossy_string),
+            ],
+        )?;
+        let id = self.conn.last_insert_rowid();
+        self.conn
+            .execute("DELETE FROM runs WHERE id <= ?1", params![id - MAX_RUNS])?;
+        Ok(id)
+    }
+
+    /// The newest `limit` runs, oldest first.
+    pub fn runs(&self, limit: usize) -> Result<Vec<RunRow>, MemoryError> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut stmt = self.conn.prepare(
+            "SELECT id, created_ms, origin, kind, family, title, outcome, exit_code, raw_tokens,
+                    emitted_tokens, cas_sha, session
+             FROM (SELECT * FROM runs ORDER BY id DESC LIMIT ?1) ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(params![limit], |row| {
+            Ok(RunRow {
+                id: row.get(0)?,
+                created_ms: row.get(1)?,
+                origin: row.get(2)?,
+                kind: row.get(3)?,
+                family: row.get(4)?,
+                title: row.get(5)?,
+                outcome: row.get(6)?,
+                exit_code: row.get(7)?,
+                raw_tokens: row.get(8)?,
+                emitted_tokens: row.get(9)?,
+                cas_sha: row.get(10)?,
+                session: row.get(11)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Totals per origin (`shim`, `mcp`, `hook`), in that order; an origin with no runs is all 0.
+    pub fn run_totals(&self) -> Result<Vec<(Origin, RunTotals)>, MemoryError> {
+        let mut out = Vec::new();
+        for origin in [Origin::Shim, Origin::Mcp, Origin::Hook] {
+            let totals = self.conn.query_row(
+                "SELECT count(*),
+                        coalesce(sum(outcome = 'fail'), 0),
+                        coalesce(sum(cas_sha IS NOT NULL), 0),
+                        coalesce(sum(raw_tokens), 0),
+                        coalesce(sum(emitted_tokens), 0)
+                 FROM runs WHERE origin = ?1",
+                params![origin.as_str()],
+                |row| {
+                    let n = |i: usize| row.get::<_, i64>(i).map(|v| u64::try_from(v).unwrap_or(0));
+                    Ok(RunTotals {
+                        runs: n(0)?,
+                        failed: n(1)?,
+                        trimmed: n(2)?,
+                        raw_tokens: n(3)?,
+                        emitted_tokens: n(4)?,
+                    })
+                },
+            )?;
+            out.push((origin, totals));
+        }
+        Ok(out)
+    }
+
     /// The active journal mode (`wal` once opened).
     pub fn journal_mode(&self) -> Result<String, MemoryError> {
         Ok(self
@@ -285,8 +525,8 @@ impl MemoryDb {
 /// another connection is mid-initialisation, so a concurrent first open can see `SQLITE_BUSY`
 /// immediately; retry for as long as the connection's own busy timeout would have waited. Once
 /// the mode is WAL it is persistent and later opens are no-ops.
-fn enable_wal(conn: &Connection) -> Result<(), MemoryError> {
-    let deadline = std::time::Instant::now() + BUSY_TIMEOUT;
+fn enable_wal(conn: &Connection, busy: Duration) -> Result<(), MemoryError> {
+    let deadline = std::time::Instant::now() + busy;
     loop {
         // Setting journal_mode returns a row, so `execute` would fail.
         match conn
@@ -359,6 +599,9 @@ fn migrate(conn: &mut Connection) -> Result<(), MemoryError> {
         fill_dedupe_keys(&tx)?;
         tx.execute_batch(SCHEMA_V2_INDEX)?;
     }
+    if version < 3 {
+        tx.execute_batch(SCHEMA_V3)?;
+    }
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
     Ok(())
@@ -396,6 +639,14 @@ fn fill_dedupe_keys(tx: &rusqlite::Transaction<'_>) -> Result<(), MemoryError> {
         delete.execute([id])?;
     }
     Ok(())
+}
+
+/// Record one run in the project's memory.db at `db_path`, creating it if needed and waiting at
+/// most [`RUN_BUSY_TIMEOUT`] for another writer. Best effort: the caller drops a failure.
+pub fn record_run(db_path: &Path, run: &NewRun<'_>) -> Result<(), MemoryError> {
+    MemoryDb::open_with_timeout(db_path, RUN_BUSY_TIMEOUT)?
+        .record_run(run)
+        .map(drop)
 }
 
 /// Turn free text into a safe FTS5 expression: each whitespace-separated token

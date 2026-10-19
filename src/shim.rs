@@ -10,7 +10,9 @@ use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::diet::{Bypass, Engine, ExitStatus, Input, Settings, Source};
+use crate::diet::{Bypass, Engine, ExitStatus, Input, Settings, Source, estimate_tokens};
+use crate::memory::{Origin, RunKind};
+use crate::runlog;
 use crate::session::{self, Key};
 use crate::{Paths, basename, is_agentdiet_exe, state};
 
@@ -541,7 +543,9 @@ fn diet_streams(
         session::update(&paths, key, |s| s.last_shim_sig = Some(sig.clone())).unwrap_or_default();
     let bypass = if before.last_shim_sig.as_deref() == Some(sig.as_str()) {
         Bypass::RepeatedCommand
-    } else if before.raw_turn {
+    } else if before.raw_tool_use.is_some() || before.raw_turn {
+        // Inside the tool call a full-output directive is bound to (or about to be, if no
+        // PreToolUse ran). The shim never spends it: the call's own PostToolUse does (SPEC §2.4).
         Bypass::RawNextTurn
     } else {
         Bypass::None
@@ -550,6 +554,7 @@ fn diet_streams(
         mode: state.mode,
         paused: state.status == state::Status::Paused,
         bypass,
+        head_tail: false,
     };
 
     let mut engine = Engine::new(&paths);
@@ -558,8 +563,14 @@ fn diet_streams(
     {
         engine = engine.with_session(label);
     }
+    let family = argv
+        .first()
+        .map(|a| basename(a).to_string())
+        .unwrap_or_default();
+    let title = argv.join(" ");
     let source = Source::Shell { argv, exit };
     let mut notes = Vec::new();
+    let mut sha = None;
     let mut run = |bytes: &[u8]| {
         let outcome = engine.run(
             &Input {
@@ -569,10 +580,30 @@ fn diet_streams(
             &settings,
         );
         notes.extend(outcome.note);
+        sha = sha.take().or(outcome.sha);
         outcome.output
     };
     let out = run(stdout);
     let err = run(stderr);
+
+    // Every agent-path run is logged, trimmed or not (SPEC §3 Tier 3, "Run log").
+    let label = runlog::session_label(key);
+    let logged = runlog::record(
+        &paths,
+        &runlog::Run {
+            origin: Origin::Shim,
+            kind: RunKind::Shell,
+            family: &family,
+            title: &title,
+            outcome: runlog::outcome_of(exit),
+            exit_code: runlog::exit_code_of(exit),
+            raw_tokens: (estimate_tokens(stdout) + estimate_tokens(stderr)) as u64,
+            emitted_tokens: (estimate_tokens(&out) + estimate_tokens(&err)) as u64,
+            cas_sha: sha.as_deref(),
+            session: label.as_ref(),
+        },
+    );
+    notes.extend(logged.err());
     Some((out, err, notes))
 }
 

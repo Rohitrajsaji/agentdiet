@@ -48,6 +48,18 @@ pub enum Command {
     },
     /// Open the live TUI dashboard
     Top,
+    /// Print trimming counters and this workspace's run log totals
+    Stats {
+        /// Print JSON instead of text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Learn repo-specific recipes and pitfalls from the run log into EXPERIENCE.md (no LLM)
+    Reflect {
+        /// Print what would be written; write nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Start the MCP server on stdio
     Mcp,
     /// Scan skills, rules and MCP configs for risks; exits 1 on findings

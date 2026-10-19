@@ -8,7 +8,7 @@ use clap::Parser;
 
 use agentdiet::cas::{Cas, LineRange};
 use agentdiet::cli::{Cli, Command};
-use agentdiet::{Paths, control, diet, hook, init, mcp, scan, shim, state, top};
+use agentdiet::{Paths, control, diet, hook, init, mcp, reflect, scan, shim, state, stats, top};
 
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().collect();
@@ -104,6 +104,22 @@ fn run() -> anyhow::Result<ExitCode> {
         }
         Some(Command::Show { id, lines }) => show(&paths, &id, lines.as_deref())?,
         Some(Command::Top) => top::run(&paths)?,
+        Some(Command::Stats { json }) => {
+            let stats = stats::collect(&paths).context("could not read the run log")?;
+            if json {
+                println!("{}", stats.to_json());
+            } else {
+                print!("{}", stats.render());
+            }
+        }
+        Some(Command::Reflect { dry_run }) => {
+            let report =
+                reflect::reflect(&paths, dry_run, SystemTime::now()).context("reflect failed")?;
+            if dry_run {
+                print!("{}", report.text);
+            }
+            println!("{}", report.summary());
+        }
         Some(Command::Scan { paths: targets }) => {
             let report = scan::scan(&paths, &targets);
             for skipped in &report.skipped {

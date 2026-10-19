@@ -14,14 +14,17 @@ use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::{Map, Value, json};
 
-use crate::Paths;
 use crate::cas::{Cas, LineRange};
 use crate::compress::parse_simple_command;
-use crate::diet::{Bypass, Engine, ExitStatus, Input, PANIC_NOTE, Settings, Source};
-use crate::memory::MemoryDb;
+use crate::diet::{
+    Bypass, Engine, ExitStatus, Input, PANIC_NOTE, Settings, Source, estimate_tokens,
+};
+use crate::memory::{MemoryDb, Origin, RunKind};
+use crate::runlog;
 use crate::session;
 use crate::shim::{self, NESTED_ENV};
 use crate::state::{self, Status};
+use crate::{Paths, basename};
 
 const DEFAULT_PROTOCOL: &str = "2024-11-05";
 
@@ -161,6 +164,19 @@ fn tool_list() -> Value {
                 },
                 "required": ["command"]
             }
+        },
+        {
+            "name": "diet_reflect",
+            "description": "Mine this project's AgentDiet run log for repo-specific lessons (commands \
+                            that failed and what worked next, outputs that keep costing over 1,000 \
+                            tokens, searches that found nothing) and write them to EXPERIENCE.md at the \
+                            project root (at most 2 KB, no LLM). Returns the file.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "dry_run": { "type": "boolean", "default": false, "description": "Return the text without writing the file" }
+                }
+            }
         }
     ])
 }
@@ -227,6 +243,7 @@ impl Server<'_> {
         match name {
             "diet_inspect" => inspect(self.paths, args, SystemTime::now()),
             "diet_search" => search(self.paths, args, SystemTime::now()),
+            "diet_reflect" => reflect_tool(self.paths, args, SystemTime::now()),
             _ => self.exec(args),
         }
     }
@@ -292,11 +309,20 @@ impl Server<'_> {
             } else {
                 Bypass::None
             },
+            // The agent asked for a dieted run: long output of any command may be cut.
+            head_tail: true,
         };
         let exit = run.exit.unwrap_or(ExitStatus::Unknown);
+        let family = argv
+            .first()
+            .map(|a| basename(a).to_string())
+            .unwrap_or_default();
+        let title = argv.join(" ");
         let source = Source::Shell { argv, exit };
         let engine = Engine::new(self.paths);
-        let diet = |bytes: &[u8]| {
+        let mut sha = None;
+        let mut emitted_tokens = 0;
+        let mut diet = |bytes: &[u8]| {
             let outcome = engine.run(
                 &Input {
                     bytes,
@@ -307,10 +333,33 @@ impl Server<'_> {
             if let Some(note) = outcome.note {
                 eprintln!("{note}");
             }
+            sha = sha.take().or(outcome.sha);
+            emitted_tokens += estimate_tokens(&outcome.output);
             String::from_utf8_lossy(&outcome.output).into_owned()
         };
         let out = diet(&run.stdout.bytes);
         let err = diet(&run.stderr.bytes);
+
+        // Logged whether or not it was trimmed (SPEC §3 Tier 3, "Run log"); best effort.
+        let logged = runlog::record(
+            self.paths,
+            &runlog::Run {
+                origin: Origin::Mcp,
+                kind: RunKind::Shell,
+                family: &family,
+                title: &title,
+                outcome: runlog::outcome_of(exit),
+                exit_code: runlog::exit_code_of(exit),
+                raw_tokens: (estimate_tokens(&run.stdout.bytes)
+                    + estimate_tokens(&run.stderr.bytes)) as u64,
+                emitted_tokens: emitted_tokens as u64,
+                cas_sha: sha.as_deref(),
+                session: None,
+            },
+        );
+        if let Err(note) = logged {
+            eprintln!("{note}");
+        }
 
         let mut text = out;
         let push_line = |text: &mut String, line: &str| {
@@ -349,8 +398,20 @@ impl Server<'_> {
     }
 }
 
-fn tool_names() -> [&'static str; 3] {
-    ["diet_inspect", "diet_search", "diet_exec"]
+fn tool_names() -> [&'static str; 4] {
+    ["diet_inspect", "diet_search", "diet_exec", "diet_reflect"]
+}
+
+fn reflect_tool(paths: &Paths, args: &Map<String, Value>, now: SystemTime) -> Value {
+    let dry_run = match args.get("dry_run") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return err_text("`dry_run` must be a boolean"),
+    };
+    match crate::reflect::reflect(paths, dry_run, now) {
+        Ok(report) => tool_result(vec![report.text.clone(), report.summary()], false),
+        Err(e) => err_text(crate::diet::note(&format!("reflect failed: {e}"))),
+    }
 }
 
 /// An optional positive integer argument; `Err` if present but not one.

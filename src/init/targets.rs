@@ -6,7 +6,7 @@ use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
 use super::json_patch::{self, PatchError};
-use super::toml_block;
+use super::{rule_pointer, toml_block};
 use crate::Paths;
 
 #[derive(
@@ -72,6 +72,8 @@ pub enum PatchKind {
     Mcp { key: String, typed: bool },
     /// Marker-delimited block in Codex's `config.toml`.
     CodexBlock,
+    /// The one-line `EXPERIENCE.md` pointer in a Claude Code rules file.
+    RulePointer,
 }
 
 impl PatchKind {
@@ -88,6 +90,7 @@ impl PatchKind {
             PatchKind::ClaudeHooks => json_patch::patch_claude_hooks(current, exe),
             PatchKind::Mcp { key, typed } => json_patch::patch_mcp(current, key, *typed, exe),
             PatchKind::CodexBlock => toml_block::patch(current, exe),
+            PatchKind::RulePointer => rule_pointer::patch(current),
         }
     }
 
@@ -97,6 +100,7 @@ impl PatchKind {
             PatchKind::ClaudeHooks => json_patch::unpatch_claude_hooks(text),
             PatchKind::Mcp { key, .. } => json_patch::unpatch_mcp(text, key),
             PatchKind::CodexBlock => toml_block::unpatch(text),
+            PatchKind::RulePointer => rule_pointer::unpatch(text),
         }
     }
 
@@ -105,6 +109,7 @@ impl PatchKind {
             PatchKind::ClaudeHooks => json_patch::has_claude_hooks(text),
             PatchKind::Mcp { key, .. } => json_patch::has_mcp(text, key),
             PatchKind::CodexBlock => toml_block::has_block(text),
+            PatchKind::RulePointer => rule_pointer::is_present(text),
         }
     }
 }
@@ -132,10 +137,18 @@ pub fn files(paths: &Paths, target: Target, project: bool) -> Option<Vec<FileSpe
                 home.join(".claude.json"),
                 PatchKind::mcp("mcpServers", true),
             ),
+            spec(
+                home.join(".claude/rules/agentdiet.md"),
+                PatchKind::RulePointer,
+            ),
         ],
         (Target::Claude, true) => vec![
             spec(root.join(".claude/settings.json"), PatchKind::ClaudeHooks),
             spec(root.join(".mcp.json"), PatchKind::mcp("mcpServers", true)),
+            spec(
+                root.join(".claude/rules/agentdiet.md"),
+                PatchKind::RulePointer,
+            ),
         ],
         (Target::Cursor, false) => vec![spec(
             home.join(".cursor/mcp.json"),
@@ -243,7 +256,9 @@ mod tests {
     #[test]
     fn claude_gets_hooks_and_mcp() {
         let f = files(&paths(), Target::Claude, false).unwrap();
-        assert_eq!(f.len(), 2);
+        assert_eq!(f.len(), 3);
         assert_eq!(f[0].kind, PatchKind::ClaudeHooks);
+        assert_eq!(f[2].kind, PatchKind::RulePointer);
+        assert!(f[2].path.ends_with(".claude/rules/agentdiet.md"));
     }
 }

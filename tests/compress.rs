@@ -3,7 +3,7 @@
 //! The fixtures under `tests/fixtures/compress/` were written for this project from the tools'
 //! documented output formats; none is copied from a reference repository.
 
-use agentdiet::compress::{compress, detect, parse_simple_command};
+use agentdiet::compress::{compress, detect, head_tail_min_lines, parse_simple_command};
 use agentdiet::diet::{Candidate, ExitStatus, Layout};
 use agentdiet::state::Mode;
 
@@ -29,7 +29,7 @@ fn body(c: &Candidate) -> &[u8] {
 }
 
 fn run(cmd: &str, input: &[u8], mode: Mode) -> Option<Candidate> {
-    compress(&argv(cmd), ExitStatus::Code(0), input, mode)
+    compress(&argv(cmd), ExitStatus::Code(0), input, mode, false)
 }
 
 fn lines(bytes: &[u8]) -> Vec<&[u8]> {
@@ -83,6 +83,10 @@ fn dispatch_recognises_the_tool_and_subcommand_not_text() {
         "go test ./...",
         "go test -v -run TestX ./pkg",
         "npm install",
+        "npm ls",
+        "npm ls --all",
+        "pnpm list --depth Infinity",
+        "yarn list",
         "npm ci --no-audit",
         "pnpm add left-pad",
         "yarn add react",
@@ -124,7 +128,6 @@ fn dispatch_recognises_the_tool_and_subcommand_not_text() {
         "git -x clone r",
         "go build ./...",
         "go vet ./...",
-        "npm ls",
         "npm run build",
         "npm view react version",
         "npm test",
@@ -147,6 +150,8 @@ fn dispatch_recognises_the_tool_and_subcommand_not_text() {
         "go test -list . ./...",
         "go test -c",
         "npm install --json",
+        "npm ls --all --json",
+        "npm ls --parseable",
         "npm ci --parseable",
         "pnpm install --reporter=json --json",
         "git clone --porcelain r",
@@ -894,4 +899,159 @@ fn a_warning_between_noise_lines_keeps_its_neighbours_within_the_mode_distance()
             "{mode:?}"
         );
     }
+}
+
+// ---- head/tail fallback (diet_exec only) ----------------------------------------------------------
+
+fn numbered(n: usize, eol: &str) -> Vec<u8> {
+    (1..=n)
+        .map(|i| format!("line {i}{eol}"))
+        .collect::<String>()
+        .into_bytes()
+}
+
+#[test]
+fn head_tail_is_off_unless_asked_and_never_cuts_data_commands() {
+    let input = numbered(1000, "\n");
+    let cut = |cmd: &str, head_tail| {
+        compress(
+            &argv(cmd),
+            ExitStatus::Code(0),
+            &input,
+            Mode::Balanced,
+            head_tail,
+        )
+    };
+    assert_eq!(
+        cut("report-gen", false),
+        None,
+        "hooks and shims: no rule, no change"
+    );
+    assert!(cut("report-gen", true).is_some());
+    for data in [
+        "git diff",
+        "git log -p",
+        "git show HEAD",
+        "git -C x blame f",
+        "tool --json",
+        "git status --short",
+    ] {
+        assert_eq!(cut(data, true), None, "{data}");
+    }
+    // Short output is never cut.
+    let short = numbered(head_tail_min_lines(Mode::Balanced), "\n");
+    assert_eq!(
+        compress(
+            &argv("report-gen"),
+            ExitStatus::Code(0),
+            &short,
+            Mode::Balanced,
+            true
+        ),
+        None
+    );
+}
+
+#[test]
+fn head_tail_markers_give_exact_vault_line_ranges_and_keep_crlf() {
+    let input = numbered(1000, "\r\n");
+    let c = compress(
+        &argv("report-gen"),
+        ExitStatus::Code(1),
+        &input,
+        Mode::Balanced,
+        true,
+    )
+    .unwrap();
+    let body = String::from_utf8(body(&c).to_vec()).unwrap();
+    // Balanced: head 20, tail 10.
+    assert!(body.starts_with("line 1\r\n"));
+    assert!(
+        body.contains("line 20\r\n[… 970 lines elided: 21..990 …]\r\nline 991\r\n"),
+        "{body}"
+    );
+    assert!(body.ends_with("line 1000\r\n"));
+    assert_eq!(c.lines, Some((30, 1000)));
+    assert!(!body.contains("\n\n") && body.split("\r\n").all(|l| !l.contains('\n')));
+}
+
+#[test]
+fn a_tool_rule_that_already_shrinks_enough_wins_over_head_tail() {
+    let mut out = String::new();
+    for i in 0..600 {
+        out.push_str(&format!("test tests::case_{i:04} ... ok\n"));
+    }
+    out.push_str("test result: ok. 600 passed; 0 failed\n");
+    let c = compress(
+        &argv("cargo test"),
+        ExitStatus::Code(0),
+        out.as_bytes(),
+        Mode::Balanced,
+        true,
+    )
+    .unwrap();
+    assert!(c.details[0].starts_with("cargo test: "), "{:?}", c.details);
+}
+
+/// Live `npm ls --all` of a Next.js app: 78 `UNMET OPTIONAL DEPENDENCY` lines (other platforms'
+/// binaries) and package names such as `es-errors` are not problems in a dependency tree.
+#[test]
+fn a_dependency_tree_keeps_only_real_tree_problems() {
+    let mut tree = String::from("app@0.1.0 /p/app\n");
+    for i in 0..400 {
+        tree.push_str(&format!("│ ├── es-errors@1.{i}.0 deduped\n"));
+        tree.push_str(&format!(
+            "│ ├── UNMET OPTIONAL DEPENDENCY lightningcss-x{i}@1.32.0\n"
+        ));
+        tree.push_str(&format!("│ ├── pkg-{i}@2.0.0\n"));
+    }
+    tree.insert_str(
+        tree.len() / 2,
+        "│ ├── UNMET PEER DEPENDENCY react@^17.0.0\n│ ├── left-pad@1.0.0 invalid: \"^2\" from the root project\n",
+    );
+    let c = compress(
+        &argv("npm ls --all"),
+        ExitStatus::Code(1),
+        tree.as_bytes(),
+        Mode::Balanced,
+        true,
+    )
+    .unwrap();
+    let text = String::from_utf8(body(&c).to_vec()).unwrap();
+    assert!(
+        text.contains("UNMET PEER DEPENDENCY react@^17.0.0"),
+        "{text}"
+    );
+    assert!(text.contains("left-pad@1.0.0 invalid"));
+    let kept = c.lines.unwrap().0;
+    assert!(
+        kept <= 20 + 10 + 2 * 7,
+        "head, tail and two problems with context: {kept}\n{text}"
+    );
+}
+
+/// The `npm ls` tool rule (shims and hooks, no head/tail) protects only real tree problems too: an
+/// `es-errors` line is not a diagnostic that keeps the deduped lines around it.
+#[test]
+fn the_tree_rule_does_not_treat_package_names_as_diagnostics() {
+    let mut tree = String::from("app@0.1.0 /p/app\n");
+    for i in 0..300 {
+        tree.push_str(&format!("│ ├── es-errors@1.{i}.0\n"));
+        tree.push_str(&format!("│ ├── dep-{i}@1.0.0 deduped\n"));
+        tree.push_str(&format!(
+            "│ ├── UNMET OPTIONAL DEPENDENCY lightningcss-x{i}@1.32.0\n"
+        ));
+        tree.push_str(&format!("│ ├── other-{i}@2.0.0 deduped\n"));
+    }
+    let c = compress(
+        &argv("npm ls --all"),
+        ExitStatus::Code(0),
+        tree.as_bytes(),
+        Mode::Balanced,
+        false,
+    )
+    .unwrap();
+    let (kept, total) = c.lines.unwrap();
+    // Everything but the 600 deduped lines (minus the protected tail) stays.
+    assert!(kept <= total - 590, "kept {kept}/{total}");
 }

@@ -236,3 +236,57 @@ fn symlinks_are_not_followed() {
     assert_eq!(out.status.code(), Some(0), "{}", stdout(&out));
     assert!(String::from_utf8_lossy(&out.stderr).contains("symlink, not followed"));
 }
+
+/// Dogfooding regression: `.claude/skills/ui-ux-pro-max/scripts/reasoning_contract.py:47-48` were
+/// reported as hardcoded secrets because their names contain `TOKEN`. A string set and a compiled
+/// regex are not credentials; the same names holding real credentials still are.
+#[test]
+fn token_named_constants_are_secrets_only_when_they_hold_a_credential() {
+    let env = Env::empty();
+    let rel = ".claude/skills/ui-ux-pro-max/scripts/reasoning_contract.py";
+    let mut lines: Vec<String> = (1..47).map(|i| format!("# line {i}")).collect();
+    lines.push(r#"TOKEN_ACTION_PREFIXES = {"constraint", "style"}"#.to_string());
+    lines.push(r#"TOKEN_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")"#.to_string());
+    lines.push(r#"SECRET_PREFIXES = ["sk-", "ghp_", "xoxb-"]"#.to_string());
+    lines.push("API_KEY_PATTERN = '^[A-Za-z0-9_-]{20,}$'".to_string());
+    lines.push("MAX_TOKENS = 4096".to_string());
+    lines.push("ACCESS_TOKEN = os.environ.get(\"ACCESS_TOKEN\", \"\")".to_string());
+    lines.push("SECRET_KEY = settings.SECRET_KEY".to_string());
+    lines.push("TOKEN_PLACEHOLDER = \"your-token-goes-here\"".to_string());
+    put(&env, rel, &(lines.join("\n") + "\n"));
+    let out = scan(&env, &[]);
+    assert_eq!(out.status.code(), Some(0), "{}", stdout(&out));
+    assert!(findings(&out).is_empty(), "{}", stdout(&out));
+
+    // Real credentials behind the same kinds of names are still found. Assembled at runtime.
+    let github = ["gh", "p_"].concat() + &"aZ3k9QxW7mPq".repeat(3);
+    let slack = ["xo", "xb-"].concat() + "2417-90183-Zq8XkW3mP7rT";
+    let entropic = "q8Zr2LxV9mN4tB7wK1pY3cH6dF0s".to_string();
+    let hex = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08".to_string();
+    let secrets = format!(
+        "GITHUB_TOKEN = \"{github}\"\nSLACK_TOKEN='{slack}'\nexport SERVICE_SECRET={entropic}\n\
+         WEBHOOK_SECRET_KEY = \"{hex}\"\n"
+    );
+    put(&env, ".claude/skills/leaky/config.py", &secrets);
+    let out = scan(&env, &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    let leaky: Vec<_> = findings(&out)
+        .into_iter()
+        .filter(|(loc, _)| loc.contains("leaky"))
+        .collect();
+    assert_eq!(
+        leaky,
+        (1..=4)
+            .map(|n| (
+                format!(".claude/skills/leaky/config.py:{n}"),
+                "secret/dotenv-secret".to_string()
+            ))
+            .collect::<Vec<_>>(),
+        "{}",
+        stdout(&out)
+    );
+    let report = stdout(&out);
+    for secret in [&github, &slack, &entropic, &hex] {
+        assert!(!report.contains(secret.as_str()), "never echoed");
+    }
+}

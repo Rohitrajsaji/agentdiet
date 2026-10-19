@@ -71,7 +71,7 @@ Running bare `agentdiet` opens an interactive Control Center menu (`inquire`), i
 
   | Target | User scope | `--project` |
   |---|---|---|
-  | Claude Code | hooks in `~/.claude/settings.json`; MCP in `~/.claude.json` (`mcpServers`) | `.claude/settings.json`; `.mcp.json` |
+  | Claude Code | hooks in `~/.claude/settings.json`; MCP in `~/.claude.json` (`mcpServers`); pointer in `~/.claude/rules/agentdiet.md` | `.claude/settings.json`; `.mcp.json`; `.claude/rules/agentdiet.md` |
   | Cursor | `~/.cursor/mcp.json` (`mcpServers`) | `.cursor/mcp.json` |
   | Windsurf | `~/.codeium/windsurf/mcp_config.json` (`mcpServers`) | not supported; skipped with a notice |
   | Gemini CLI | `~/.gemini/settings.json` (`mcpServers`) | `.gemini/settings.json` |
@@ -79,8 +79,13 @@ Running bare `agentdiet` opens an interactive Control Center menu (`inquire`), i
   | Codex | `~/.codex/config.toml`, marker block `[mcp_servers.agentdiet]` | `.codex/config.toml` |
   | Shims | `~/.agentdiet/shims/<cmd>` symlinks to the binary | always global |
 
-  Claude Code gets hooks for SessionStart, UserPromptSubmit, PreToolUse, PostToolUse and
-  PreCompact; the other assistants get only the MCP entry until the hook slice.
+  Claude Code gets hooks for SessionStart, UserPromptSubmit, PreToolUse, PostToolUse,
+  PostToolUseFailure and PreCompact, and a **one-line pointer** to `EXPERIENCE.md` (§3b "Reflect")
+  in a rules file of its own. Claude Code loads every `.claude/rules/*.md` (and `~/.claude/rules/*.md`)
+  without `paths` frontmatter at launch (code.claude.com/docs/en/memory, read 2026-10-19), so no
+  CLAUDE.md is edited. The line ends with the marker `<!-- agentdiet:experience-pointer -->`; patching
+  appends or refreshes that one line and `eject` removes only it (or the whole file, when `init`
+  created it and nobody edited it). The other assistants get only the MCP entry until the hook slice.
 - Shim commands: `git`, `cargo`, `pytest`, `npm`, `pnpm`, `yarn`, `go`, `make`, `ruff`, `docker`,
   `gh`. What a shim does with them is decided per call (§3 Tier 1, "Shim decision order").
 
@@ -148,11 +153,23 @@ Global state lives in `~/.agentdiet/state.json`:
 
 ### 2.4 Escape Hatches
 
-- If a UserPromptSubmit contains `raw`, `full` or `unfiltered`, compression is bypassed for the
-  **next turn only**: every tool output until the next UserPromptSubmit, which sets or clears the
-  flag again (SessionStart clears it too). Matching is whole-word and case-insensitive, where a word
-  is a maximal run of ASCII letters, digits, `_` and `-`, so "fully" or "full-stack" do not trigger
-  it, while "raw." or "(full)" do.
+- **Full-output directive.** If a UserPromptSubmit contains one of the explicit directive tokens
+  `@diet:full`, `/diet-full` or `--diet-full`, compression is bypassed for **exactly one tool
+  execution**: the next tool call of that session. Natural language never triggers it: "full report
+  link", "raw data", "unfiltered", "full-stack" and "full path" are prose, not directives.
+  - Matching is case-insensitive and token-exact: the directive must start the prompt or follow a
+    character that is not a letter, digit, `_`, `-`, `/`, `@`, `:` or `.`, and must end the prompt or
+    be followed by a character that is not a letter, digit, `_` or `-`. So `` `@diet:full` `` and
+    `(--diet-full)` trigger it, while `@diet:fullscreen`, `--diet-fully`, `x@diet:full` and the path
+    `docs/diet-full` do not. `@diet:full` is the primary spelling: a prompt that *starts* with
+    `/diet-full` may be taken by the assistant as a slash command before any hook sees it.
+  - Lifecycle: UserPromptSubmit **arms** the flag (`raw_turn`) and every other prompt disarms it.
+    The next PreToolUse **binds** it to that call: it stores the sha256 of the call's `tool_use_id`
+    (`raw_tool_use`) and disarms `raw_turn`. That call's PostToolUse (or PostToolUseFailure, for a
+    failing call) **consumes** it: the output is bypassed and the binding is cleared. A shim running
+    inside the bound call (a shimmed `cargo` in that Bash command) bypasses too, and never clears the
+    binding, so the same call's PostToolUse still sees it. An interrupted call that fires neither
+    event leaves a binding that the next UserPromptSubmit or SessionStart clears.
 - Running the exact same command twice in a row auto-expands the output on the retry. "Same" means
   identical structured argv (and working directory) as the immediately preceding tool call in the
   same session. Tracking:
@@ -170,7 +187,8 @@ Global state lives in `~/.agentdiet/state.json`:
     those agents have no hooks, so only retries apply to them.
   - Sidecars live at `~/.agentdiet/sessions/<first 32 hex of sha256(key)>.json` (directory `0700`,
     files `0600`) and hold only `raw_turn` and sha256 hashes (the previous hook signature, the
-    previous shim signature, the retry's `tool_use_id`): never command text (P1). Every
+    previous shim signature, the retry's `tool_use_id`, the directive-bound `tool_use_id`): never
+    command text (P1). Every
     read-modify-write holds `sessions/.lock` for at most 100 ms; a sidecar that cannot be read,
     written or locked counts as "no bypass" (fail open). Sidecars are scratch state, written
     atomically but without `fsync`: a crash can only lose a bypass. SessionStart deletes sidecars
@@ -201,7 +219,11 @@ Global state lives in `~/.agentdiet/state.json`:
   4. stdout is a character device (`> /dev/null`) → transparent.
   5. `compress::detect(argv)` finds no compressible shape → transparent. Only recognised shapes with
      finite output are captured, so dev servers (`npm run dev`, `cargo run`), `gh … --json` and
-     interactive commands are never buffered.
+     interactive commands are never buffered. `npm run …` is never a recognised shape for that
+     reason, which is why a typical web build (`npm run build`, `npm run lint`) is not captured by a
+     shim: under Claude Code its successful output is still scrubbed and logged by PostToolUse, and a
+     failure is logged by PostToolUseFailure. The transparent path `exec`s by design (B1, and a
+     human's interactive command must own its terminal); it records nothing.
   6. stdout is not the **same open file as the parent's stdout** → transparent. Identity is device and
      inode (macOS `proc_pidfdinfo` vnode info, Linux `stat` of `/proc/<pid>/fd/1`) or, for a macOS
      pipe, the pipe's kernel handle; an identity that cannot be read counts as different. A command
@@ -262,9 +284,11 @@ these shapes; re-checking them is a deliberate change to this section.
   `memory.db` entries (kind, title, ID if the Vault entry is live), all of it already-scrubbed text.
   memory.db is never created just to be read.
 - **UserPromptSubmit:** `@diet pause` / `@diet resume` (case-insensitive, whole words, anywhere in
-  the prompt) set the status and print the one-line confirmation of `agentdiet pause`/`resume`; the
-  escape words set the raw-turn flag (§2.4).
-- **PreToolUse:** records the retry signature (§2.4); prints nothing.
+  the prompt) set the status and print the one-line confirmation of `agentdiet pause`/`resume`; a
+  full-output directive arms the raw-turn flag and any other prompt disarms it and clears a stale
+  binding (§2.4).
+- **PreToolUse:** records the retry signature and binds an armed raw-turn flag to this call (§2.4);
+  prints nothing.
 - **PostToolUse:** builds engine settings from `state.json` (mode, paused) and the sidecar (bypass:
   a marked retry is `RepeatedCommand`, else the raw-turn flag is `RawNextTurn`) and runs the engine
   per text field; it prints the replacement JSON only if some field's bytes changed. A copy of
@@ -287,7 +311,12 @@ these shapes; re-checking them is a deliberate change to this section.
   - Every other tool is left untouched.
 - **Failing commands.** A Bash command that exits non-zero fires PostToolUseFailure, which can only
   *add* context, never replace the result. The hook therefore cannot shrink a failing `cargo test`;
-  the shim (agent path) is what diets failing commands. PostToolUseFailure is not registered.
+  the shim (agent path) is what diets failing commands. PostToolUseFailure is registered
+  **record-only**: it prints nothing, spends a full-output directive bound to the call (§2.4) and
+  records the failure in the run log (§3 Tier 3, "Run log"). Its payload (code.claude.com/docs/en/hooks,
+  read 2026-10-19) carries `tool_name`, `tool_input`, `tool_use_id` and an `error` string whose first
+  line is `Exit code N` for a Bash command that ran; the rest of `error` is display text and is never
+  stored.
 - **PreCompact:** exits `0` with no output and never blocks compaction; the snapshot is delivered by
   the SessionStart that follows (above).
 - **Panics.** The hook and the agent shim install a panic hook that prints only `PANIC_NOTE` to
@@ -371,7 +400,7 @@ wins**.
     that is neither "not found" nor "expired", and returns no content. **[3B]**
     Today `show` returns the bytes without re-hashing, and `put` fsyncs the file but not its
     directory; both gaps are closed in 3B.
-- **P7 — Bypass.** Paused status, a `raw`/`full`/`unfiltered` prompt (next turn only), and the same
+- **P7 — Bypass.** Paused status, a full-output directive (`@diet:full`, next tool call only), and the same
   command run twice in a row (§2.4) skip trimming, TOON and folding, and write nothing to the
   Vault. Scrubbing still applies (P3).
 
@@ -474,6 +503,7 @@ breadcrumb. A large number of warnings is never a reason to drop them.
   | pytest | progress dots and `PASSED` lines. FAILURES/ERRORS sections and the short summary are kept. |
   | go test | `=== RUN`, `--- PASS`, `ok pkg` lines. `--- FAIL` blocks and panics are kept. |
   | npm, pnpm, yarn | progress lines; repeated `warn deprecated` lines grouped with a count. `ERR!` lines are kept. |
+| npm/pnpm `ls`, `list`, `ll`, `la`; `yarn list` | tree lines ending in ` deduped` (a package already shown elsewhere), counted. Every other line is kept. Only the tree's own problem markers (head/tail fallback, below) protect their neighbours: `es-errors` and `UNMET OPTIONAL DEPENDENCY` are not diagnostics here. `--json` and `--parseable` are machine-readable and never altered. |
   | git | transfer progress only. |
   | make | `make[N]: Entering/Leaving directory` lines. |
   | docker | layer pull/download progress. Step headers and errors are kept. |
@@ -482,6 +512,33 @@ breadcrumb. A large number of warnings is never a reason to drop them.
 
 - Rules informed by other tools are recorded in code as `// pattern ref: <repo>/<path> (behavior
   only)` and follow the clean-room rules in `CLAUDE.md`.
+
+#### Head/tail fallback (`diet_exec` only)
+
+`diet_exec` is a request by the agent for a dieted run, so its output gets one more rule that hooks
+and shims never apply (they see output such as a `cat` or a `git diff` that must not be cut, and
+"unknown tools are left unchanged" still holds for them). When the output of a `diet_exec` command has
+more than `4 × (head + tail)` lines, where *tail* is the mode's "last lines always kept" and *head* is
+twice that (Light 40 + 20, Balanced 20 + 10, Ultra-Lean 10 + 5, so more than 240 / 120 / 60 lines), and
+no tool rule above brings it down to that many kept lines, it is cut to:
+
+- its first *head* and last *tail* lines;
+- every problem line with the mode's context lines around it. A problem line is a dependency-tree
+  marker (`UNMET ` except `UNMET OPTIONAL`, ` invalid`, ` extraneous`, ` missing`, `ERR!`,
+  `npm error`) or, except in an `npm`/`pnpm`/`yarn` tree listing, one of the protection rule's
+  generic diagnostics. In a tree, package names such as `es-errors` are not diagnostics and an
+  `UNMET OPTIONAL DEPENDENCY` is another platform's optional binary (a live Next.js tree had 78 of
+  them);
+- one marker line per elided run, `[… N lines elided: A..B …]`, where `A..B` is the exact 1-based
+  line range in the Vault copy (`agentdiet show '#<id>' --lines A..B`, or `diet_inspect` with
+  `start_line`/`end_line`), with the run's own line ending.
+
+Machine-readable invocations are never cut (`--json` and the other flags above, `git diff`/`log`/
+`show`/`blame` and `git status --short`). The mode's token minimum, the saving gate (P5), persist-first
+(P6) and the breadcrumb all apply as to any replacement; the breadcrumb's summary reads
+`<tool>: N lines elided (head H, tail T and problem lines kept)`. A tool rule that already shrinks the
+output to at most the limit wins (a `cargo test` keeps its failure sections whole). Known miss: output
+that is one enormous line is not cut.
 
 #### TOON encoding
 
@@ -612,9 +669,56 @@ lesser form):
    and `zsh`. The summary is scrubbed and at most 160 bytes, e.g. `kept 42/1830 lines; cargo test:
    1780 passing lines collapsed; exit 101; 2 secrets redacted (not recoverable)`. The whole line
    counts against the no-inflation check (P5).
-7. **Index summaries** into `.agentdiet/memory.db` (project-local SQLite, WAL, FTS5 + BM25).
-   PreCompact recovery uses this index to re-surface relevant context. Index rows hold scrubbed
-   text only (P1).
+7. **Index summaries** into `.agentdiet/memory.db` (project-local SQLite, WAL, FTS5 + BM25) in the
+   **workspace root** (below). PreCompact recovery uses this index to re-surface relevant context.
+   Index rows hold scrubbed text only (P1).
+
+#### Workspace root
+
+memory.db and `EXPERIENCE.md` live in one directory per project, the *workspace root*, so that a
+command run in `app/src` records into the same memory.db as one run at the top:
+
+1. `AGENTDIET_WORKSPACE`, when it names a directory (absolute, or relative to the working directory).
+2. Otherwise the nearest directory, starting at the working directory (a hook's payload `cwd`, the
+   MCP server's directory, a shim's current directory) and walking up at most 64 levels, that already
+   holds a regular file `.agentdiet/memory.db` or has a `.git` entry (a directory, or a worktree's
+   file). The nearest marker wins, so a package that deliberately has its own memory.db keeps it.
+3. Otherwise the working directory itself.
+
+The home directory is never a workspace root and the walk never goes above it: `~/.agentdiet` is the
+global directory, not a project's. `init --project` still writes assistant configs to the working
+directory itself. Discovery runs only where memory.db is used: never on the transparent shim path.
+
+#### Run log
+
+Schema v3 of memory.db adds a `runs` table: one row per command or tool call an entry point saw,
+trimmed or not, holding the time, the origin (`shim`, `mcp`, `hook`), the kind (`shell`, `read`,
+`search`), the family (the executable's base name, or the tool name), the title (the command line,
+path or pattern: scrubbed, then cut to 240 bytes, so a secret straddling the cut is still redacted),
+the outcome (`ok`, `fail`, `miss`), the exit code (`128 + n` for a signal; none when unknown), the
+estimated tokens before and after AgentDiet, the Vault entry when one was stored and the session
+label (the agent's session id, `pid:<n>` or `agent:unknown`). It never holds output.
+
+- **Writers.** A shim's agent path and `diet_exec`: every run, with its exit status. PostToolUse:
+  every successful Bash call except one a shim already dieted (it carries a breadcrumb and the shim
+  logged it), Reads of at least 1,000 estimated tokens, and Grep/Glob calls whose result carries a
+  count field (`numFiles`, `filenames`, `numLines`, `numMatches`, `content`): zero is a `miss`. The
+  result shapes are not documented by Claude Code. Glob's was checked live (below); Grep's was not. A
+  result with none of those fields is not logged. PostToolUseFailure: Bash (`fail`, exit
+  code from the `Exit code N` line), Read, Grep and Glob (`miss`); a user interrupt is not logged.
+- **Bounds.** Telemetry, best effort: memory.db is opened with a 100 ms busy timeout and a failure is
+  at most a bounded stderr note; it never changes what the agent is given. The newest 10,000 rows are
+  kept. Logging adds a SQLite open and insert to every hooked Bash call and every agent-path shim run;
+  that cost is measured in §7.
+- A binary from before schema v3 refuses a v3 memory.db ("schema version 3 is newer"), and fails open
+  as for any memory.db error.
+- **Live check (2026-10-19, Claude Code 2.1.303, headless `claude -p` in a Next.js project after
+  `agentdiet init --only claude --project`, release binary of this change).** The prompt contained the
+  words "full report link" and armed nothing. A Glob with no matches was logged `miss` and one with
+  matches `ok`; `git status --shortt` came back through PostToolUseFailure and was logged `fail` with
+  exit code 129, and the corrected `git status --short` `ok` with exit 0; all four rows carried the
+  run's session id. Asked whether any startup instruction mentioned `EXPERIENCE.md`, the model quoted
+  the pointer line from `.claude/rules/agentdiet.md`.
 
 #### Tier 3 details (Slice 2)
 
@@ -651,7 +755,7 @@ lesser form):
   comment). Case-insensitive, hex only, at least 4 characters.
 - **Slicing** splits on `\n` and keeps line endings (CRLF and a missing trailing newline survive).
   A start of 0 or start > end is an error; an end past EOF clamps; a start past EOF yields nothing.
-- **memory.db** has one `entries` table (`kind` is `command` | `read` | `decision`) mirrored into
+- **memory.db** has an `entries` table (`kind` is `command` | `read` | `decision`) mirrored into
   an FTS5 table over `title` and `body`. Results are ordered by `bm25()` ascending (lower is
   better) with title weighted above body. Query tokens are quoted as FTS5 phrases and ANDed, so
   user text can never produce an FTS syntax error.
@@ -710,10 +814,13 @@ lesser form):
 
 ### 3b. Interfaces & Tools (outside the hot path)
 
-- **`agentdiet mcp`** — stdio JSON-RPC 2.0 MCP server exposing three tools:
+- **`agentdiet mcp`** — stdio JSON-RPC 2.0 MCP server exposing four tools:
   - `diet_inspect` — fetch a CAS entry by `#id`, with an optional line range.
   - `diet_search` — FTS5/BM25 search over `memory.db`.
   - `diet_exec` — run a command through the Diet Engine; returns trimmed output plus a breadcrumb.
+  - `diet_reflect` — `agentdiet reflect` (below) as a tool.
+- **`agentdiet stats [--json]`** — the §2.3 counters plus the workspace's run log totals (below).
+- **`agentdiet reflect [--dry-run]`** — learn `EXPERIENCE.md` from the run log, with no LLM (below).
 - **`agentdiet scan`** — static regex security scanner for skill, rule and MCP config files.
   Flags hidden Unicode, secrets, prompt-injection phrases and dangerous shell commands; exits
   non-zero on findings.
@@ -733,8 +840,9 @@ lesser form):
   spawned, and a command that timed out. A command that ran and exited non-zero is **not** an error:
   its output and exit status are the result. `tools/call` with an unknown tool name, or without a
   `name`, is the JSON-RPC error `-32602`.
-- **Project.** The server's working directory is the project whose `.agentdiet/memory.db` is searched
-  and indexed (assistants start MCP servers in the project directory).
+- **Project.** The workspace root (§3 Tier 3) of the server's working directory is the project whose
+  `.agentdiet/memory.db` is searched and indexed and whose `EXPERIENCE.md` `diet_reflect` writes
+  (assistants start MCP servers in the project directory).
 - **`diet_inspect`** `{id: string, start_line?: integer, end_line?: integer}`. `id` is `#4f9a` or `4f9a`
   (§3 Tier 3). The lines are 1-based and inclusive, as `show --lines`: only `start_line` reads to the
   end, only `end_line` reads from line 1, `0` or start > end is an error. The text is the stored
@@ -767,6 +875,58 @@ lesser form):
   - The text is the dieted stdout, then, when stderr is not empty, a line `--- stderr ---` and the
     dieted stderr, then one status line: `[exit N]`, `[signal N]`, or `[timed out after Ns; killed]`.
     Nothing re-runs the command (P2).
+  - Engine calls from `diet_exec` enable the head/tail fallback (§3 Tier 2), so long output of any
+    command that is not machine-readable comes back as a compact summary with a breadcrumb, and each
+    run is logged (§3 Tier 3, "Run log", origin `mcp`).
+- **`diet_reflect`** `{dry_run?: boolean}` (default `false`). Runs `reflect` (below) in the server's
+  project; the result is two text blocks, the file's text and the one-line summary. A failure is an
+  `isError` result.
+
+#### Stats
+
+`agentdiet stats` prints the §2.3 counters (all projects, from `state.json`) and, per origin (`shim`,
+`mcp`, `hook`), the workspace's run log totals: runs, failed runs, runs whose output was replaced,
+and estimated tokens before and after. `--json` prints one JSON object with the same numbers. It
+never creates memory.db; without one, the run log totals are zero and the text says nothing has been
+recorded.
+
+#### Reflect
+
+`agentdiet reflect` turns the workspace's run log into `EXPERIENCE.md` at the workspace root, with
+**no model calls**: the same run log and Vault give the same bytes. The structure follows Harness²'s
+separation of an immutable base harness (the assistant's own instructions, which AgentDiet never
+edits) from an evidence-backed experience file (behaviour reference only; Apache-2.0, nothing copied).
+
+1. **Propose.** Over the newest 2,000 runs, grouped by session (runs without one, by origin), in log
+   order, with a shim run and the PostToolUse of the same Bash call within 120 s counted once:
+   - *Recipe:* a `shell` run that failed, followed within the next 5 runs and 30 minutes by a
+     successful run of the same family whose words differ from it only by flags (a flag only one side
+     has, with the value right after it) or by at most as many plain words, each within an edit
+     distance of 40% of its counterpart (`biuld` → `build`), and by at most 4 words in all. The same
+     words again is a flaky retry, not a recipe. Tokens: the failed output.
+   - *Bloat:* a successful run of at least 1,000 estimated tokens. Tokens: its output.
+   - *Miss:* a `search` or `read` that found nothing, with the first later successful `search` or
+     `read` of a different title (the same window) as its correction, if any.
+   One lesson per cue (the failing command, the bloated title, the missed path or pattern): repeats add
+   occurrences and tokens and the newest witness supplies the correction and the evidence, so entries
+   never duplicate.
+2. **Probe.** A recipe or miss is kept when it wasted at least 500 estimated tokens or was seen at
+   least twice; bloat must be seen at least twice. Kept lessons are ranked by impact (tokens + 250 per
+   occurrence), then by recency, then by kind and cue.
+3. **Compose.** The lessons are rendered in rank order, each as one line citing the live Vault ID of
+   its newest witness (`#4f9a1b2c`) or that run's UTC time, into a block between
+   `<!-- agentdiet:experience:begin -->` and `<!-- agentdiet:experience:end -->`, under the headings
+   "Command recipes", "Context bloat" and "Search and path misses". A lesson that does not fit is
+   skipped, so **the whole file is at most 2,048 bytes** (unless its hand-written part alone is
+   larger); text outside the markers is kept byte for byte, and a file without markers gets the
+   block appended. Titles are shown at most 72 characters; a cut recipe also names the words it
+   added and dropped. A file whose bytes would not change is not rewritten.
+
+Everything rendered comes from the run log, which holds scrubbed text only (P1). Known limits: a
+recipe means "this worked next", not "this is why it failed" (a test that fails and then passes after
+a fix with a different filter reads as a recipe); search misses depend on the unverified Grep/Glob
+result fields (§3 Tier 3, "Run log"). Nothing runs `reflect` automatically: it is run by hand, by an
+agent through `diet_reflect`, or by a user's own hook.
 
 #### Static scanner
 
@@ -786,7 +946,7 @@ Every file gets families **a**, **b** and **d**; *instruction files* (`*.md`, `*
 | `hidden-unicode/bidi` | high | bidirectional controls U+202A–U+202E, U+2066–U+2069 |
 | `hidden-unicode/tag` | high | Unicode tag characters U+E0000–U+E007F (invisible "ASCII smuggling") |
 | `hidden-unicode/zero-width` | medium | U+200B, U+200C, U+2060, U+180E; U+FEFF anywhere but offset 0; U+200D unless both neighbours are non-ASCII (emoji ZWJ sequences pass) |
-| `secret/<scrubber rule id>` | high | any scrubber detector (§3 Tier 3), e.g. `secret/aws-access-key-id` |
+| `secret/<scrubber rule id>` | high | any scrubber detector (§3 Tier 3), e.g. `secret/aws-access-key-id`; for `secret/dotenv-secret` only when the value is a credential (below) |
 | `injection/ignore-instructions` | high | ignore / disregard / forget / override … previous / prior / above / earlier / system … instructions / rules / prompt / guidelines |
 | `injection/conceal-from-user` | high | do not / don't / never tell / inform / show / mention / reveal / notify … the user; without telling / informing / notifying / asking the user; hide … from the user |
 | `injection/exfiltrate-secrets` | high | send / post / upload / exfiltrate / transmit / forward / leak … environment variables / env vars / `.env` / API keys / credentials / secrets / tokens / SSH keys |
@@ -798,6 +958,19 @@ Every file gets families **a**, **b** and **d**; *instruction files* (`*.md`, `*
 | `shell/credential-path` | high | `~/.ssh`, `$HOME/.ssh`, `id_rsa`/`id_ed25519`, `~/.aws`, `.aws/credentials`, `~/.gnupg`, `~/.kube/config`, `~/.netrc`, `~/.docker/config.json` |
 | `shell/env-exfil` | high | `env`/`printenv` piped into `curl`/`wget`/`nc`; `curl`/`wget` with `$(env)`/`$(printenv)` or posting `@.env` |
 
+- **Secret-named assignments.** The scrubber's `dotenv-secret` rule fires on any assignment to a name
+  containing `SECRET`, `TOKEN`, `API_KEY` and the like, which is right for redaction (a false
+  redaction is cheap) but wrong for a scanner (a false finding fails a build). The scanner reports such
+  an assignment only when its value is **one literal** (a quoted string, optionally `r`/`b`/`u`/`f`
+  prefixed and followed only by `;`, `,` or a comment, or a bare `.env` token) that is not a pattern
+  (no `\ ^ $ | ( ) [ ] { } * ?`, not a raw `r"…"` string), has no whitespace, and either starts with
+  a known credential prefix (`sk-ant-`, `sk-proj-`, `ghp_`, `github_pat_`, `AKIA`, `xoxb-`; at least
+  16 characters) or is a generated-looking secret: at least 20 characters with Shannon entropy of at
+  least 4.2 bits per character, or, for an all-hex value (which tops out at 4 bits), at least 32
+  characters and 3.0 bits. Calls (`re.compile(…)`), collections (`{"a", "b"}`, `[…]`), attribute
+  lookups (`settings.SECRET_KEY`), numbers and short or low-entropy placeholders are not reported.
+  Known miss: a short hand-written password (`PASSWORD=hunter2`) is no longer reported by the scanner;
+  the runtime scrubber still redacts it.
 - **JSON files** also get a structural pass: every string value (after JSON unescaping, so `\u202e`
   written as an escape is caught) goes through family **a**; each `mcpServers.*`/`servers.*` entry's
   `command` and `args` joined with spaces, and every `command` string under `hooks`, go through family
@@ -840,7 +1013,8 @@ Every file gets families **a**, **b** and **d**; *instruction files* (`*.md`, `*
 
 - **Global — `~/.agentdiet/`:** `state.json`, `backups/`, `shims/`, `cas/`, `sessions/` (retry and
   raw-turn sidecars, §2.4)
-- **Project-local — `.agentdiet/`:** `memory.db`
+- **Project-local, in the workspace root (§3 Tier 3):** `.agentdiet/memory.db`; `EXPERIENCE.md`
+  (`agentdiet reflect`)
 
 ## 5. Commands
 
@@ -854,6 +1028,8 @@ Every file gets families **a**, **b** and **d**; *instruction files* (`*.md`, `*
 | `agentdiet top` | Opens the TUI |
 | `agentdiet mcp` | Starts the MCP server |
 | `agentdiet scan [paths]` | Runs the security scanner |
+| `agentdiet stats [--json]` | Prints trimming counters and the workspace's run log totals |
+| `agentdiet reflect [--dry-run]` | Writes `EXPERIENCE.md` from the run log (no LLM) |
 | `agentdiet eject` / `agentdiet uninstall [--purge]` | Restores backups and removes agentdiet |
 | `agentdiet hook <event>` | Internal; invoked by assistant hooks |
 
@@ -938,6 +1114,32 @@ head, new, head, new:
   nothing in Slice 5 touches the shim routing or the engine's hot path. The engine's telemetry counters
   ride its existing `state.json` write (§2.3), so B5 gains no `fsync`; B4 and B5 were not re-measured.
 
+**Dogfooding-fix re-measurement** (2026-10-19, same machine, release binaries built with
+`cargo build --release --locked` from `e9daa72` (head, 9,823,456 bytes, sha256 `dfce2790…`) and this
+change (9,939,344 bytes, sha256 `8c1f9822…`), timed through `AGENTDIET_PERF_BIN`, alternating head,
+new, head, new, n = 1000 per arm):
+
+| Binary | B1 p50 | B2 p50 |
+|---|---|---|
+| head (`e9daa72`) | 3.48, 3.33 ms | 2.32, 2.29 ms |
+| this change | 3.40, 3.50 ms | 2.31, 2.35 ms |
+
+- The transparent shim path is unchanged (it records nothing and runs no workspace discovery), and B1
+  and B2 are within run-to-run noise. **B1 remains NOT MET.** p95 was 7.0–7.2 ms in every run: the
+  machine was busier than in earlier sessions.
+- The run log (§3 Tier 3) adds a SQLite open and insert where it records. Paired wall time per spawn
+  from a Python driver (it includes the driver's own spawn cost, identical for both binaries), n = 300
+  per arm, two runs:
+
+  | Call | head p50 | new p50 | added |
+  |---|---|---|---|
+  | `hook PostToolUse`, small successful Bash output | 6.08–6.10 ms | 7.08–7.12 ms | ~1.0 ms |
+  | `hook PostToolUseFailure` (head: unregistered event, returns before reading stdin) | 5.50–5.51 ms | 6.85–6.88 ms | ~1.4 ms |
+  | shim agent path, `cargo test` printing one line | 17.96–17.99 ms | 19.19–19.28 ms | ~1.2–1.3 ms |
+
+  These costs sit on the agent paths, which have no budget of their own; the hook's share of the engine
+  budget (B4 + B5 + B2) was already a miss and is not re-measured here.
+
 Notes:
 
 - Routing (B3, 0.03 ms) is about 1% of B1. B1 is consistent with paying for two process images in
@@ -967,6 +1169,7 @@ Notes:
 | 3B | Diet Engine library: pipeline, compression, TOON, folding, `show`/ID/memory/state changes marked **[3B]** | done (B4 and B5 requirements still NOT MET, §7): storage prerequisites, the `diet.rs` pipeline, shell compression (`compress.rs`), the TOON subset (`toon.rs`) and signature folding (`folding.rs`, with a bounded parse) are implemented as a library, and the §7 numbers are measured. Nothing is wired to a real entry point until Slice 4 |
 | 4 | hooks **and** PPID shims, wiring the engine to real entry points, shim redesign question (B1) | in progress: hook router (`hook.rs`), agent-path shims and the per-session sidecars are implemented and tested; the shim agent path was checked live under Claude Code 2.1.302 (§3 Tier 1); the Control Center shows the last trimmed entry. The live Claude Code check passed under Claude Code 2.1.302 on 2026-10-17 (§3 Hook router, "Live check"): `updatedToolOutput` replacements of `Bash` and `Read` results reached the model, and a JSON `mcp__agentdiet__diet_inspect` result reached it unchanged. Open: B1 still NOT MET and worse than in Slice 3B (§7; the shim redesign is not done), Reads are not folded |
 | 5 | MCP tools (`diet_exec` etc.), scanner, `agentdiet top` | done: `diet_inspect`/`diet_search`/`diet_exec` in the stdio MCP server (§3b), the static scanner with the §3b rule table, the `agentdiet top` dashboard (also Control Center item 5) and the §2.3 telemetry counters, with end-to-end tests; B1 re-measured (§7, still NOT MET); `top` was driven in an 80x24 pseudo-terminal, directly and through Control Center item 5 (renders, keys work, the terminal is restored and the menu returns). Live checks (2026-10-17): a scripted JSON-RPC client ran `diet_exec` (`cargo test`, 400 tests: breadcrumb, Vault entry, memory.db row), `diet_search` (hit `#<id> command: cargo test`) and `diet_inspect` (lines 3..9 byte-identical to `agentdiet show --lines 3..9`, `cas_dereferences` +1); `@modelcontextprotocol/inspector --cli` listed the three tools and called `diet_inspect`; and Claude Code 2.1.302 connected the server and called `diet_inspect` (§3 Hook router, "Live check") |
+| 5.1 | dogfooding fixes (`@diet:full` directive, `diet_exec` head/tail fallback and `npm ls` rule, workspace root and run log, scanner credential filter) and `stats` / `reflect` / `diet_reflect` / `EXPERIENCE.md` pointer | done, with tests; the run log's latency is measured above (§7); live check under Claude Code 2.1.303 (§3 Tier 3, "Run log"). Open: Grep's result fields were not checked against a live payload; B1 still NOT MET |
 
 License: MIT (`LICENSE`); third-party notices in `THIRD_PARTY_NOTICES`.
 

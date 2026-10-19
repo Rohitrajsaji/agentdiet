@@ -129,7 +129,7 @@ fn mcp_server_completes_the_handshake() {
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
     assert_eq!(lines[0]["result"]["serverInfo"]["name"], "agentdiet");
-    assert_eq!(lines[1]["result"]["tools"].as_array().unwrap().len(), 3);
+    assert_eq!(lines[1]["result"]["tools"].as_array().unwrap().len(), 4);
 }
 
 #[test]

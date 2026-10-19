@@ -55,8 +55,11 @@ impl Key {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Sidecar {
-    /// The last prompt said `raw`, `full` or `unfiltered`: bypass until the next prompt.
+    /// The last prompt carried a full-output directive (`@diet:full`) that no tool call has taken
+    /// yet: the next PreToolUse binds it to its call (SPEC §2.4).
     pub raw_turn: bool,
+    /// sha256 of the `tool_use_id` the directive is bound to: that one call is bypassed.
+    pub raw_tool_use: Option<String>,
     /// Signature of the previous tool call seen by PreToolUse.
     pub last_hook_sig: Option<String>,
     /// sha256 of the `tool_use_id` PreToolUse marked as a retry.

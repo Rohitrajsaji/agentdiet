@@ -228,7 +228,7 @@ fn concurrent_first_opens_all_succeed_and_agree_on_the_schema() {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
     let indexes: i64 = conn
         .query_row(
             "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='entries_dedupe'",

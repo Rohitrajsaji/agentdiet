@@ -39,6 +39,7 @@ fn agentdiet(env: &Env) -> Command {
         .env_remove("CLAUDE_CODE_SESSION_ID")
         .env_remove("CURSOR_TRACE_ID")
         .env_remove("GEMINI_CLI")
+        .env_remove("AGENTDIET_WORKSPACE")
         .current_dir(&env.paths.project_root);
     cmd
 }
@@ -246,8 +247,53 @@ fn diet_pause_and_resume_in_chat_flip_state_json() {
     assert_eq!(state::load(&env.paths).status, Status::Active);
 }
 
+/// The sidecar of the test session, as the hooks left it.
+fn sidecar(env: &Env) -> agentdiet::session::Sidecar {
+    agentdiet::session::load(
+        &env.paths,
+        &agentdiet::session::Key::Session(SESSION.to_string()),
+    )
+}
+
+/// One Bash call as Claude Code delivers it: PreToolUse, then PostToolUse. `true` if trimmed.
+fn bash_call(env: &Env, command: &str, id: &str, output: &str) -> Option<Value> {
+    pre_bash(env, command, id);
+    updated(&post_bash(env, command, id, output))
+}
+
+fn is_trimmed(v: &Option<Value>) -> bool {
+    v.as_ref()
+        .is_some_and(|v| v["stdout"].as_str().unwrap().contains("🥗 Diet: "))
+}
+
 #[test]
-fn escape_words_bypass_the_next_turn_only_and_never_skip_scrubbing() {
+fn prose_containing_full_never_switches_trimming_off() {
+    let env = Env::empty();
+    let output = fixture("cargo_test_pass.txt");
+    for (i, text) in [
+        // The dogfooding prompt that left trimming disabled.
+        "add the full report link to the footer",
+        "Show me the RAW output please",
+        "(full) logs, unfiltered.",
+        "build the full-stack app and print the full path",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        prompt(&env, text);
+        assert!(!sidecar(&env).raw_turn, "{text}");
+        let id = format!("toolu_prose_{i}");
+        assert!(
+            is_trimmed(&bash_call(&env, "cargo test", &id, &output)),
+            "{text}"
+        );
+        // Not a retry: run something else in between.
+        bash_call(&env, "cargo build", &format!("{id}_b"), "ok\n");
+    }
+}
+
+#[test]
+fn the_full_directive_bypasses_exactly_one_tool_call_and_never_skips_scrubbing() {
     let env = Env::empty();
     let output = format!(
         "{}AWS key in use: {}\n",
@@ -255,8 +301,9 @@ fn escape_words_bypass_the_next_turn_only_and_never_skip_scrubbing() {
         aws_key()
     );
 
-    prompt(&env, "Show me the RAW output please");
-    let out = updated(&post_bash(&env, "cargo test", "toolu_a", &output)).expect("redacted");
+    prompt(&env, "rerun the tests @diet:full");
+    assert!(sidecar(&env).raw_turn, "armed by the prompt");
+    let out = bash_call(&env, "cargo test", "toolu_a", &output).expect("redacted");
     let text = out["stdout"].as_str().unwrap();
     assert!(!text.contains("🥗"), "bypassed: not trimmed");
     assert!(
@@ -264,31 +311,97 @@ fn escape_words_bypass_the_next_turn_only_and_never_skip_scrubbing() {
         "still scrubbed"
     );
     assert_eq!(text.lines().count(), output.lines().count());
-    // The whole turn is raw, not only its first tool call.
-    let again = updated(&post_bash(&env, "cargo test --lib", "toolu_b", &output)).unwrap();
-    assert!(!again["stdout"].as_str().unwrap().contains("🥗"));
+    let after = sidecar(&env);
+    assert!(
+        !after.raw_turn && after.raw_tool_use.is_none(),
+        "consumed by that one call: {after:?}"
+    );
 
-    for not_raw in [
-        "fully done? build the full-stack app",
-        "rawhide, unfilteredness",
-    ] {
-        prompt(&env, not_raw);
-        let out = updated(&post_bash(&env, "cargo test", "toolu_c", &output)).unwrap();
-        assert!(
-            out["stdout"].as_str().unwrap().contains("🥗 Diet: "),
-            "{not_raw}"
-        );
-    }
+    // The very next tool call in the same turn is trimmed again.
+    assert!(is_trimmed(&bash_call(
+        &env,
+        "cargo test --lib",
+        "toolu_b",
+        &output
+    )));
+}
 
-    for raw in ["(full) logs", "unfiltered."] {
-        prompt(&env, raw);
-        let out = updated(&post_bash(&env, "cargo test", "toolu_d", &output)).unwrap();
-        assert!(!out["stdout"].as_str().unwrap().contains("🥗"), "{raw}");
-    }
-    // A new session starts without the bypass.
+#[test]
+fn the_directive_binds_to_the_next_call_even_when_it_is_not_bash() {
+    let env = Env::empty();
+    let output = fixture("cargo_test_pass.txt");
+    prompt(&env, "--diet-full");
+    // The first tool call is an Edit: it takes (and spends) the bypass.
+    hook(
+        &env,
+        "PreToolUse",
+        json!({"tool_name": "Edit", "tool_input": {"file_path": "/x"}, "tool_use_id": "toolu_e"}),
+    );
+    assert!(sidecar(&env).raw_tool_use.is_some(), "bound to the Edit");
+    hook(
+        &env,
+        "PostToolUse",
+        json!({"tool_name": "Edit", "tool_input": {"file_path": "/x"}, "tool_response": {}, "tool_use_id": "toolu_e"}),
+    );
+    assert_eq!(sidecar(&env).raw_tool_use, None, "spent");
+    assert!(is_trimmed(&bash_call(
+        &env,
+        "cargo test",
+        "toolu_f",
+        &output
+    )));
+}
+
+#[test]
+fn a_failing_call_spends_the_directive_and_a_new_prompt_or_session_clears_it() {
+    let env = Env::empty();
+    let output = fixture("cargo_test_pass.txt");
+
+    prompt(&env, "@diet:full");
+    pre_bash(&env, "cargo test", "toolu_fail");
+    let out = hook(
+        &env,
+        "PostToolUseFailure",
+        json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "cargo test" },
+            "tool_use_id": "toolu_fail",
+            "error": "Exit code 101\nerror: test failed",
+            "is_interrupt": false,
+        }),
+    );
+    assert!(out.stdout.is_empty(), "record-only: nothing is added");
+    assert_eq!(sidecar(&env).raw_tool_use, None);
+    // A different argv: the same one right after would be a retry, which expands by design.
+    assert!(is_trimmed(&bash_call(
+        &env,
+        "cargo test --lib",
+        "toolu_g",
+        &output
+    )));
+
+    // Bound to an interrupted call that never reports back: the next prompt clears it.
+    prompt(&env, "@diet:full");
+    pre_bash(&env, "cargo build", "toolu_lost");
+    assert!(sidecar(&env).raw_tool_use.is_some());
+    prompt(&env, "never mind");
+    assert_eq!(
+        sidecar(&env),
+        agentdiet::session::Sidecar {
+            last_hook_sig: sidecar(&env).last_hook_sig,
+            ..Default::default()
+        }
+    );
+
+    // Armed, then a new session: cleared.
+    prompt(&env, "@diet:full");
     hook(&env, "SessionStart", json!({ "source": "startup" }));
-    let out = updated(&post_bash(&env, "cargo test", "toolu_e", &output)).unwrap();
-    assert!(out["stdout"].as_str().unwrap().contains("🥗 Diet: "));
+    assert!(is_trimmed(&bash_call(
+        &env,
+        "cargo test",
+        "toolu_h",
+        &output
+    )));
 }
 
 // ---- PreToolUse ------------------------------------------------------------------------------
@@ -581,6 +694,7 @@ fn bad_payloads_fail_open_silently() {
             "UserPromptSubmit",
             "PreToolUse",
             "PostToolUse",
+            "PostToolUseFailure",
             "PreCompact",
         ] {
             let out = hook_raw(&env, event, stdin);
@@ -611,4 +725,140 @@ fn a_payload_that_never_arrives_cannot_hold_the_agent() {
             && waited < agentdiet::hook::STDIN_TIMEOUT + Duration::from_secs(5),
         "{waited:?}"
     );
+}
+
+// ---- run log ----------------------------------------------------------------------------------
+
+fn runs(env: &Env) -> Vec<agentdiet::memory::RunRow> {
+    agentdiet::memory::MemoryDb::open(&env.paths.memory_db())
+        .unwrap()
+        .runs(100)
+        .unwrap()
+}
+
+#[test]
+fn hooks_log_successes_failures_big_reads_and_search_misses() {
+    let env = Env::empty();
+    let big = big_plain();
+
+    // A failing command, then the fix: both logged with their outcome.
+    hook(
+        &env,
+        "PostToolUseFailure",
+        json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "cd web && npm run biuld" },
+            "tool_use_id": "toolu_f1",
+            "error": "Exit code 1\nnpm error Missing script: \"biuld\"",
+            "is_interrupt": false,
+        }),
+    );
+    post_bash(&env, "cd web && npm run build", "toolu_ok1", "built\n");
+    // A large Read is logged; a small one is not worth a row.
+    hook(
+        &env,
+        "PostToolUse",
+        json!({
+            "tool_name": "Read",
+            "tool_input": {"file_path": "/p/big.log"},
+            "tool_response": {"type": "text", "file": {"filePath": "/p/big.log", "content": big}},
+            "tool_use_id": "toolu_r1",
+        }),
+    );
+    hook(
+        &env,
+        "PostToolUse",
+        json!({
+            "tool_name": "Read",
+            "tool_input": {"file_path": "/p/small.txt"},
+            "tool_response": {"type": "text", "file": {"filePath": "/p/small.txt", "content": "hi\n"}},
+            "tool_use_id": "toolu_r2",
+        }),
+    );
+    // A Glob that found nothing, then one that did; a Read of a missing file.
+    hook(
+        &env,
+        "PostToolUse",
+        json!({
+            "tool_name": "Glob",
+            "tool_input": {"pattern": "src/**/*.tsx"},
+            "tool_response": {"filenames": [], "numFiles": 0, "durationMs": 3, "truncated": false},
+            "tool_use_id": "toolu_g1",
+        }),
+    );
+    hook(
+        &env,
+        "PostToolUse",
+        json!({
+            "tool_name": "Glob",
+            "tool_input": {"pattern": "app/**/*.tsx"},
+            "tool_response": {"filenames": ["/p/app/page.tsx"], "numFiles": 1},
+            "tool_use_id": "toolu_g2",
+        }),
+    );
+    hook(
+        &env,
+        "PostToolUseFailure",
+        json!({
+            "tool_name": "Read",
+            "tool_input": {"file_path": "/p/src/missing.ts"},
+            "tool_use_id": "toolu_r3",
+            "error": "File does not exist.",
+        }),
+    );
+    // A user interrupt is not evidence of anything.
+    hook(
+        &env,
+        "PostToolUseFailure",
+        json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "sleep 100"},
+            "tool_use_id": "toolu_i1",
+            "error": "Interrupted",
+            "is_interrupt": true,
+        }),
+    );
+
+    let got: Vec<(String, String, String, String, Option<i64>)> = runs(&env)
+        .into_iter()
+        .map(|r| (r.kind, r.family, r.title, r.outcome, r.exit_code))
+        .collect();
+    let row = |k: &str, f: &str, t: &str, o: &str, e: Option<i64>| {
+        (
+            k.to_string(),
+            f.to_string(),
+            t.to_string(),
+            o.to_string(),
+            e,
+        )
+    };
+    assert_eq!(
+        got,
+        vec![
+            row("shell", "npm", "cd web && npm run biuld", "fail", Some(1)),
+            row("shell", "npm", "cd web && npm run build", "ok", Some(0)),
+            row("read", "Read", "/p/big.log", "ok", None),
+            row("search", "Glob", "src/**/*.tsx", "miss", None),
+            row("search", "Glob", "app/**/*.tsx", "ok", None),
+            row("read", "Read", "/p/src/missing.ts", "miss", None),
+        ]
+    );
+    let all = runs(&env);
+    assert!(
+        all.iter()
+            .all(|r| r.origin == "hook" && r.session.as_deref() == Some(SESSION))
+    );
+    assert!(all[2].raw_tokens > 1000);
+}
+
+#[test]
+fn a_bash_result_a_shim_already_dieted_is_not_logged_twice() {
+    let env = Env::empty();
+    post_bash(
+        &env,
+        "cargo test",
+        "toolu_s",
+        "ok\n🥗 Diet: kept 2/9 lines Run: agentdiet show '#4f9a1b2c'\n",
+    );
+    assert!(!env.paths.memory_db().exists() || runs(&env).is_empty());
 }

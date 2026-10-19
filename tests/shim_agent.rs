@@ -71,6 +71,7 @@ impl Shim {
             .env_remove("GEMINI_CLI")
             .env_remove("AGENTDIET_SHIM_ACTIVE")
             .env_remove("AGENTDIET_FORCE_HUMAN")
+            .env_remove("AGENTDIET_WORKSPACE")
             .current_dir(&self.env.paths.project_root)
             .stdin(Stdio::null());
         cmd
@@ -168,18 +169,18 @@ fn the_same_command_twice_in_a_row_is_raw_but_still_scrubbed() {
     assert!(crumb_id(&String::from_utf8(shim.agent(&["test", "--lib"]).stdout).unwrap()).is_some());
 }
 
-#[test]
-fn a_raw_prompt_reaches_shims_through_the_claude_code_session() {
-    let shim = failing_cargo_test();
-    let session = "0b8f6a2e-raw-turn-session";
-    let payload = json!({
+/// Run one hook event for `session` in the shim's isolated home.
+fn hook(shim: &Shim, event: &str, session: &str, extra: serde_json::Value) {
+    let mut payload = json!({
         "session_id": session,
         "cwd": shim.env.paths.project_root,
-        "hook_event_name": "UserPromptSubmit",
-        "prompt": "rerun it and show me the full output",
+        "hook_event_name": event,
     });
-    let mut hook = Command::new(BIN)
-        .args(["hook", "UserPromptSubmit"])
+    for (k, v) in extra.as_object().unwrap() {
+        payload[k] = v.clone();
+    }
+    let mut child = Command::new(BIN)
+        .args(["hook", event])
         .env("HOME", &shim.env.paths.home)
         .current_dir(&shim.env.paths.project_root)
         .stdin(Stdio::piped())
@@ -187,29 +188,61 @@ fn a_raw_prompt_reaches_shims_through_the_claude_code_session() {
         .spawn()
         .unwrap();
     std::io::Write::write_all(
-        &mut hook.stdin.take().unwrap(),
+        &mut child.stdin.take().unwrap(),
         payload.to_string().as_bytes(),
     )
     .unwrap();
-    assert!(hook.wait().unwrap().success());
+    assert!(child.wait().unwrap().success());
+}
 
+#[test]
+fn a_full_directive_reaches_shims_inside_the_bound_tool_call_only() {
+    let shim = failing_cargo_test();
+    let session = "0b8f6a2e-raw-turn-session";
+    let run = |session: &str| {
+        shim.command(&["test"])
+            .env("AGENTDIET_FORCE_AGENT", "1")
+            .env("CLAUDE_CODE_SESSION_ID", session)
+            .output()
+            .unwrap()
+    };
+    let bash = |id: &str| json!({"tool_name": "Bash", "tool_input": {"command": "cargo test"}, "tool_use_id": id});
+
+    // Prose that merely says "full" does not reach the shim as a bypass.
+    hook(
+        &shim,
+        "UserPromptSubmit",
+        session,
+        json!({"prompt": "rerun it and show me the full output"}),
+    );
+    hook(&shim, "PreToolUse", session, bash("toolu_1"));
+    assert!(crumb_id(&String::from_utf8(run(session).stdout).unwrap()).is_some());
+    hook(&shim, "PostToolUseFailure", session, bash("toolu_1"));
+
+    hook(
+        &shim,
+        "UserPromptSubmit",
+        session,
+        json!({"prompt": "rerun it @diet:full"}),
+    );
+    hook(&shim, "PreToolUse", session, bash("toolu_2"));
     let original = fs::read(fixture_path("cargo_test_pass.txt")).unwrap();
-    let out = shim
-        .command(&["test"])
+    let out = run(session);
+    assert_eq!(out.stdout, original, "raw inside the bound call");
+    assert_eq!(out.status.code(), Some(101));
+    // Another session is not affected.
+    assert!(crumb_id(&String::from_utf8(run("another-session").stdout).unwrap()).is_some());
+    // The shim never spends the binding; the call's own PostToolUseFailure does. After it, the
+    // next call is trimmed again (a different argv, so this is not a retry).
+    hook(&shim, "PostToolUseFailure", session, bash("toolu_2"));
+    hook(&shim, "PreToolUse", session, bash("toolu_3"));
+    let next = shim
+        .command(&["test", "--lib"])
         .env("AGENTDIET_FORCE_AGENT", "1")
         .env("CLAUDE_CODE_SESSION_ID", session)
         .output()
         .unwrap();
-    assert_eq!(out.stdout, original, "raw for the whole turn");
-    assert_eq!(out.status.code(), Some(101));
-    // Another session is not affected.
-    let other = shim
-        .command(&["test"])
-        .env("AGENTDIET_FORCE_AGENT", "1")
-        .env("CLAUDE_CODE_SESSION_ID", "another-session")
-        .output()
-        .unwrap();
-    assert!(crumb_id(&String::from_utf8(other.stdout).unwrap()).is_some());
+    assert!(crumb_id(&String::from_utf8(next.stdout).unwrap()).is_some());
 }
 
 #[test]
@@ -309,4 +342,78 @@ fn a_paused_agent_path_passes_raw_and_counts() {
     assert!(!text.contains("🥗"));
     assert!(agentdiet::state::load(&shim.env.paths).raw_tokens_passed_while_paused > 0);
     assert_eq!(shim.vault_entries(), 0);
+}
+
+/// Dogfooding regression: shims under an agent recorded nothing anyone could count, and a shim run
+/// from a subdirectory would have used a memory.db of its own. The run lands in the workspace root's
+/// memory.db (found by walking up to `.git`), with its exit status and the tokens it saved.
+#[test]
+fn a_shim_in_a_nested_directory_records_into_the_workspace_memory_db() {
+    let shim = failing_cargo_test();
+    let root = shim.env.paths.project_root.clone();
+    fs::create_dir_all(root.join(".git")).unwrap();
+    let nested = root.join("packages/web/src");
+    fs::create_dir_all(&nested).unwrap();
+
+    let out = shim
+        .command(&["test"])
+        .env("AGENTDIET_FORCE_AGENT", "1")
+        .current_dir(&nested)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(101));
+    let id = crumb_id(&String::from_utf8(out.stdout).unwrap()).expect("trimmed");
+
+    assert!(!nested.join(".agentdiet").exists() && !root.join("packages/web/.agentdiet").exists());
+    let db = agentdiet::memory::MemoryDb::open(&root.join(".agentdiet/memory.db")).unwrap();
+    let runs = db.runs(10).unwrap();
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    let run = &runs[0];
+    assert_eq!(
+        (
+            run.origin.as_str(),
+            run.kind.as_str(),
+            run.family.as_str(),
+            run.title.as_str()
+        ),
+        ("shim", "shell", "cargo", "cargo test")
+    );
+    assert_eq!((run.outcome.as_str(), run.exit_code), ("fail", Some(101)));
+    assert!(run.emitted_tokens < run.raw_tokens, "{run:?}");
+    assert!(
+        run.cas_sha
+            .as_deref()
+            .is_some_and(|sha| sha.starts_with(&id))
+    );
+
+    let state = agentdiet::state::load(&shim.env.paths);
+    assert_eq!(state.trimmed_outputs, 1);
+    assert!(state.tokens_saved > 0);
+
+    // A small, untrimmed run is recorded too: every agent-path call counts.
+    let small = Shim::new("echo ok");
+    let out = small.agent(&["test"]);
+    assert_eq!(out.stdout, b"ok\n");
+    let db = agentdiet::memory::MemoryDb::open(&small.env.paths.memory_db()).unwrap();
+    let runs = db.runs(10).unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        (runs[0].outcome.as_str(), runs[0].cas_sha.as_deref()),
+        ("ok", None)
+    );
+}
+
+/// `AGENTDIET_WORKSPACE` names the workspace outright.
+#[test]
+fn the_workspace_env_var_overrides_discovery() {
+    let shim = Shim::new("echo ok");
+    let elsewhere = shim.env.dir.path().join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    shim.command(&["test"])
+        .env("AGENTDIET_FORCE_AGENT", "1")
+        .env("AGENTDIET_WORKSPACE", &elsewhere)
+        .output()
+        .unwrap();
+    assert!(elsewhere.join(".agentdiet/memory.db").is_file());
+    assert!(!shim.env.paths.memory_db().exists());
 }

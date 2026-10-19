@@ -103,27 +103,36 @@ agentdiet show '#f5f26875'             # full stored output for a breadcrumb ID
 agentdiet show '#f5f26875' --lines 10..40
 agentdiet top                          # live dashboard: tokens saved, Vault, CAS dereference rate
 agentdiet scan                         # static scan of .claude/, .cursor/, .mcp.json, SKILL.md, CLAUDE.md, AGENTS.md
+agentdiet stats                        # counters plus this workspace's run log (shim / MCP / hook runs); --json
+agentdiet reflect                      # write EXPERIENCE.md: recipes and pitfalls learned from the run log (no LLM)
 agentdiet eject                        # restore original configs, remove hooks and shims (--purge also deletes the Vault)
 ```
 
 - Always quote an ID: an unquoted `#…` starts a shell comment.
 - `scan` flags hidden Unicode, secrets, prompt-injection phrases and dangerous shell commands. It
   exits 0 when clean, 1 on findings, and 2 when a path can't be read.
-- Need everything for one turn? In Claude Code, put `raw`, `full` or `unfiltered` in your prompt,
-  and the next turn's output is passed through (still scrubbed). Chat commands and escape words come
-  from Claude Code's prompt hook; they don't work in other assistants.
+- Need one output in full? In Claude Code, put `@diet:full` (or `--diet-full`) in your prompt, and
+  the next tool call's output is passed through (still scrubbed); the call after it is trimmed again.
+  Plain words never do this: "the full report" or "raw data" is prose. Chat commands and the directive
+  come from Claude Code's prompt hook; they don't work in other assistants.
+- Memory lives in the workspace root: the nearest directory with `.agentdiet/memory.db` or `.git`
+  (or `AGENTDIET_WORKSPACE`), so commands run in a subdirectory land in the same place.
+- `agentdiet reflect` keeps `EXPERIENCE.md` at most 2 KB, cites a Vault ID or time for every lesson,
+  and keeps anything you write outside its marker block. `init` adds a one-line pointer to it in
+  `.claude/rules/agentdiet.md`.
 - Running the exact same command twice in a row expands it on the retry.
 
 ### MCP tools
 
 `agentdiet mcp` is a stdio JSON-RPC 2.0 server, which `init` registers for every assistant. It
-offers three tools:
+offers four tools:
 
 | Tool | Arguments | Does |
 |---|---|---|
-| `diet_exec` | `command` (argv array or one simple command), `cwd?` | Runs the command without a shell, through the Diet Engine; returns the trimmed output, a breadcrumb and the exit status |
+| `diet_exec` | `command` (argv array or one simple command), `cwd?` | Runs the command without a shell, through the Diet Engine; returns the trimmed output (long output of any command is cut to head, tail and problem lines), a breadcrumb and the exit status |
 | `diet_search` | `query`, `limit?` | BM25 search over the project's memory; each hit carries its `#id` |
 | `diet_inspect` | `id`, `start_line?`, `end_line?` | Returns the stored (scrubbed) output, or a slice of it |
+| `diet_reflect` | `dry_run?` | Runs `agentdiet reflect` and returns `EXPERIENCE.md` |
 
 ### Diet Modes
 

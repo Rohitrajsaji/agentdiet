@@ -383,6 +383,125 @@ fn is_unsafe_to_print(c: char) -> bool {
     c.is_control() || c == '\u{FEFF}' || hidden_char(c, None, None).is_some()
 }
 
+// ---- secret-assignment filter ------------------------------------------------------------------
+
+/// Credential prefixes that make a literal a secret whatever its entropy.
+const CREDENTIAL_PREFIXES: [&str; 6] = [
+    "sk-ant-",
+    "sk-proj-",
+    "ghp_",
+    "github_pat_",
+    "AKIA",
+    "xoxb-",
+];
+/// A literal without a known prefix is a secret only if it is at least this long ...
+const MIN_ENTROPIC_LEN: usize = 20;
+/// ... and carries at least this much Shannon entropy per character.
+const MIN_ENTROPY_BITS: f64 = 4.2;
+/// Hex tops out at 4 bits per character, so hex secrets get their own, longer gate.
+const MIN_HEX_LEN: usize = 32;
+const MIN_HEX_ENTROPY_BITS: f64 = 3.0;
+
+/// Shannon entropy of `text` in bits per character.
+fn shannon_entropy(text: &str) -> f64 {
+    let mut counts: std::collections::HashMap<char, usize> = std::collections::HashMap::new();
+    let mut total = 0usize;
+    for c in text.chars() {
+        *counts.entry(c).or_default() += 1;
+        total += 1;
+    }
+    if total == 0 {
+        return 0.0;
+    }
+    counts
+        .values()
+        .map(|&n| {
+            let p = n as f64 / total as f64;
+            -p * p.log2()
+        })
+        .sum()
+}
+
+/// The single literal a value is, or `None` when it is an expression: a call (`re.compile(…)`), a
+/// collection (`{"a", "b"}`, `[…]`), an attribute (`settings.KEY`), a concatenation. A quoted string
+/// may carry a one-letter prefix (`r"…"`, `b'…'`) and be followed by `;`, `,` or a comment. The
+/// `bool` is `true` for a raw-string literal (`r"…"`), which in practice holds a regex.
+fn single_literal(value: &str) -> Option<(&str, bool)> {
+    let value = value.trim();
+    let (raw, rest) = match value.as_bytes() {
+        [p, q, ..] if p.is_ascii_alphabetic() && matches!(q, b'"' | b'\'' | b'`') => {
+            (p.eq_ignore_ascii_case(&b'r'), &value[1..])
+        }
+        _ => (false, value),
+    };
+    if let Some(quote) = rest
+        .chars()
+        .next()
+        .filter(|c| matches!(c, '"' | '\'' | '`'))
+    {
+        let body = &rest[1..];
+        let close = body.find(quote)?;
+        let after = body[close + 1..].trim();
+        let tail_ok = after.is_empty()
+            || after == ";"
+            || after == ","
+            || after.starts_with('#')
+            || after.starts_with("//");
+        return tail_ok.then_some((&body[..close], raw));
+    }
+    // A bare `.env` value: one token, no expression syntax.
+    let bare = value.trim_end_matches(';');
+    let expression = |c: char| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ',' | '"' | '\''
+            )
+    };
+    (!bare.is_empty() && !bare.contains(expression) && !is_attribute_path(bare))
+        .then_some((bare, false))
+}
+
+/// `settings.SECRET_KEY`, `os.environ`: identifiers joined by dots, an expression, not a value.
+fn is_attribute_path(text: &str) -> bool {
+    text.contains('.')
+        && text.split('.').all(|part| {
+            part.chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+}
+
+/// Characters that make a literal a pattern rather than a credential.
+fn looks_like_regex(literal: &str) -> bool {
+    literal.contains(['\\', '^', '$', '|', '(', ')', '[', ']', '{', '}', '*', '?'])
+}
+
+/// Whether the value of a secret-named assignment (the scrubber's `dotenv-secret` span) holds a
+/// credential: a single literal that starts with a known credential prefix, or is long and
+/// high-entropy enough to be a generated secret. Regex patterns, collections of prefixes, calls,
+/// attribute lookups and short or low-entropy placeholders are not (SPEC §3b "Static scanner").
+pub fn is_credential_assignment(value: &str) -> bool {
+    let Some((literal, raw)) = single_literal(value) else {
+        return false;
+    };
+    // Known-prefix tokens are `[A-Za-z0-9_-]`, so a pattern *for* them (`r"ghp_[A-Za-z0-9]{36}"`)
+    // is never one of them.
+    if raw || looks_like_regex(literal) || literal.contains(char::is_whitespace) {
+        return false;
+    }
+    if CREDENTIAL_PREFIXES.iter().any(|p| literal.starts_with(p)) && literal.len() >= 16 {
+        return true;
+    }
+    let len = literal.chars().count();
+    let entropy = shannon_entropy(literal);
+    if literal.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return len >= MIN_HEX_LEN && entropy >= MIN_HEX_ENTROPY_BITS;
+    }
+    len >= MIN_ENTROPIC_LEN && entropy >= MIN_ENTROPY_BITS
+}
+
 /// The line as an excerpt: scrubbed, unsafe characters as `U+XXXX`, at most [`EXCERPT_CHARS`].
 fn excerpt(line: &str) -> String {
     let scrubbed = scrub(line.as_bytes()).to_lossy_string();
@@ -480,6 +599,13 @@ fn scan_text(shown: &str, path: &Path, bytes: &[u8]) -> Vec<Finding> {
         )
         .collect();
     for secret in find_secrets(bytes) {
+        // The runtime scrubber redacts every secret-named assignment (a false redaction is cheap);
+        // the scanner reports only those that hold a credential (a false finding fails a build).
+        if secret.rule == "dotenv-secret"
+            && !is_credential_assignment(&String::from_utf8_lossy(&bytes[secret.start..secret.end]))
+        {
+            continue;
+        }
         let line = line_starts.partition_point(|s| *s <= secret.start);
         let start = line_starts[line - 1];
         let col = String::from_utf8_lossy(&bytes[start..secret.start])
@@ -654,6 +780,78 @@ fn server_command(server: &Value) -> Option<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_assignments_need_a_credential_literal() {
+        let github = ["gh", "p_"].concat() + &"aZ3k9QxW7mPq".repeat(3);
+        let anthropic = ["sk-", "ant-"].concat() + &"Ab1_-".repeat(6);
+        for yes in [
+            format!("\"{github}\""),
+            format!("'{anthropic}'  # prod"),
+            format!("{github};"),
+            "q8Zr2LxV9mN4tB7wK1pY3cH6dF0s".to_string(),
+            "\"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08\"".to_string(),
+        ] {
+            assert!(is_credential_assignment(&yes), "{yes}");
+        }
+        for no in [
+            r#"{"constraint", "style"}"#,
+            r#"re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")"#,
+            r#"["sk-", "ghp_", "xoxb-"]"#,
+            r#"("ghp_", "github_pat_")"#,
+            "'^[A-Za-z0-9_-]{20,}$'",
+            r#"r"ghp_[A-Za-z0-9]{36}""#,
+            "4096",
+            "os.environ.get(\"TOKEN\")",
+            "settings.SECRET_KEY",
+            "\"your-token-goes-here\"",
+            "\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
+            "\"0123456789abcdef\"",
+            "\"two words that are long enough to pass\"",
+            "\"abc\" + suffix",
+            "",
+        ] {
+            assert!(!is_credential_assignment(no), "{no}");
+        }
+    }
+
+    mod prop {
+        use proptest::prelude::*;
+
+        use super::super::is_credential_assignment;
+
+        proptest! {
+            /// A collection of short prefixes or words is never a credential.
+            #[test]
+            fn collections_of_strings_are_not_credentials(
+                items in prop::collection::vec("[a-z_-]{1,12}", 1..8),
+                open in prop::sample::select(&["{", "[", "("][..]),
+            ) {
+                let close = match open { "{" => "}", "[" => "]", _ => ")" };
+                let body = items.iter().map(|i| format!("\"{i}\"")).collect::<Vec<_>>().join(", ");
+                let value = format!("{open}{body}{close}");
+                prop_assert!(!is_credential_assignment(&value), "{value}");
+            }
+
+            /// A compiled regex, however long, is never a credential.
+            #[test]
+            fn compiled_regexes_are_not_credentials(pattern in "[a-zA-Z0-9^$.*+?()\\[\\]{}|-]{0,60}") {
+                let value = format!("re.compile(r\"{pattern}\")");
+                prop_assert!(!is_credential_assignment(&value), "{value}");
+            }
+
+            /// A known credential prefix followed by a token is always one.
+            #[test]
+            fn prefixed_tokens_are_credentials(
+                prefix in prop::sample::select(&["sk-ant-", "sk-proj-", "ghp_", "github_pat_", "AKIA", "xoxb-"][..]),
+                tail in "[A-Za-z0-9_-]{16,40}",
+                quote in prop::sample::select(&["\"", "'", ""][..]),
+            ) {
+                let value = format!("{quote}{prefix}{tail}{quote}");
+                prop_assert!(is_credential_assignment(&value), "{value}");
+            }
+        }
+    }
 
     fn rules(name: &str, text: &str) -> Vec<String> {
         scan_text(name, Path::new(name), text.as_bytes())

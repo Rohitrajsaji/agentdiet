@@ -99,7 +99,7 @@ pub struct Input<'a> {
 pub enum Bypass {
     #[default]
     None,
-    /// A prompt said `raw`, `full` or `unfiltered`.
+    /// A full-output directive (`@diet:full`) is bound to this tool call (SPEC §2.4).
     RawNextTurn,
     /// The same command ran twice in a row.
     RepeatedCommand,
@@ -110,6 +110,10 @@ pub struct Settings {
     pub mode: Mode,
     pub paused: bool,
     pub bypass: Bypass,
+    /// Long shell output that no tool rule shrinks enough may be cut to its head, tail and problem
+    /// lines. Only `diet_exec` sets it: the agent asked for a dieted run, and hooks and shims see
+    /// output (a `cat`, a `git diff`) that must not be cut (SPEC §3 Tier 2, "Head/tail fallback").
+    pub head_tail: bool,
 }
 
 impl Settings {
@@ -118,6 +122,7 @@ impl Settings {
             mode,
             paused: false,
             bypass: Bypass::None,
+            head_tail: false,
         }
     }
 }
@@ -286,13 +291,15 @@ pub struct Selection<'a> {
     pub scrubbed: &'a [u8],
     pub params: ModeParams,
     pub mode: Mode,
+    /// [`Settings::head_tail`].
+    pub head_tail: bool,
 }
 
 /// Production candidate selection: dispatch on the source.
 fn select_candidate(sel: &Selection<'_>) -> Option<Candidate> {
     match sel.input.source {
         Source::Shell { argv, exit } => {
-            crate::compress::compress(argv, *exit, sel.scrubbed, sel.mode)
+            crate::compress::compress(argv, *exit, sel.scrubbed, sel.mode, sel.head_tail)
         }
         Source::ModelJson => crate::toon::encode(sel.scrubbed),
         Source::Read { path, extent } => {
@@ -567,6 +574,7 @@ fn plan_scrubbed(
         scrubbed: scrubbed.as_bytes(),
         params,
         mode: settings.mode,
+        head_tail: settings.head_tail,
     };
     let Some(candidate) = select(&selection) else {
         return emit_scrubbed(scrubbed, Disposition::Unchanged);
@@ -1349,6 +1357,7 @@ mod tests {
                 scrubbed: &bytes,
                 params: ModeParams::for_mode(Mode::UltraLean),
                 mode: Mode::UltraLean,
+                head_tail: false,
             })
             .unwrap();
             let summary = summarize(&cand, &src, 0);
