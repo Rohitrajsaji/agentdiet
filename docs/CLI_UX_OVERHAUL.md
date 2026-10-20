@@ -1,6 +1,6 @@
 # AgentDiet CLI/UX overhaul
 
-Status: **P0 and P1 implemented** (`a827255`, `0b58e02`); P2 planned (below), P3 designed; neither started. `SPEC.md` stays the source of truth for
+Status: **P0, P1 and P2 implemented** (`a827255`, `0b58e02`, then the P2 commit); P3 designed, not started. `SPEC.md` stays the source of truth for
 behaviour (§2.2 `init` output, §2.5 terminal rules, §3b Status / Doctor / Mode / `show last`); this
 document holds the design reasoning, the mockups and the task list.
 
@@ -125,7 +125,7 @@ binary path is shortened to `~/.cargo/bin/agentdiet`). P1–P3 mockups are desig
 AgentDiet is active · Balanced mode
 
   Assistants    Claude Code, Codex and Shims
-  Saved         ≈134,830 tokens in 4 trimmed outputs (all projects, estimated)
+  Savings       ≈134,830 tokens saved in 4 trimmed outputs (all projects, estimated)
   Re-opened     1 re-open for 4 trimmed outputs (25%) ⚠ high: agents re-read trimmed output; consider a lighter mode
   Last trimmed  #683db530 · agentdiet show last
   Health        ✗ 1 problem · agentdiet doctor
@@ -137,7 +137,7 @@ Fresh home (nothing connected, nothing trimmed):
 AgentDiet is active · Balanced mode
 
   Assistants    none connected · agentdiet init
-  Saved         nothing trimmed yet
+  Savings       nothing trimmed yet
   Health        ✗ 1 problem · agentdiet doctor
 ```
 
@@ -353,36 +353,50 @@ go back one view; a confirmation is cancelled by any key but `y`. A failed actio
 keys, never an exit. Colour is optional: with `NO_COLOR` the view uses bold and reverse video only, and
 with a non-UTF-8 locale it draws `+ ! x - * # o ~ -> ...`.
 
-### 6.6 `--help` (P2 design)
+### 6.6 `--help` (P2, implemented)
 
-clap 4 has one heading for all subcommands (`subcommand_help_heading`) and no per-group headings, so
-grouping uses a `help_template` with a hand-written command section (kept in sync by a test that
-compares it with the `Command` variants).
+clap 4 has one heading for all subcommands, so the groups are a hand-written command map
+(`cli::COMMAND_MAP`) printed through a `help_template`. Tests keep it in step with the real commands
+(every visible command exactly once) and parse every example in every help page. Real output:
 
 ```
-AgentDiet trims what AI coding agents see from tool output; the full output stays recoverable.
+AgentDiet trims the tool output your AI coding assistant reads, so it stays focused and spends fewer tokens. Everything trimmed stays recoverable.
+
+Usage: agentdiet [COMMAND]
 
 Everyday:
-  status            Is AgentDiet on, connected and saving anything?
-  pause | resume    Stop or restart trimming
-  mode [MODE]       Show or set the Diet Mode (light, balanced, ultra-lean)
-  show <ID|last>    Print a trimmed output in full
-  doctor            Find and explain setup problems
+  status          Is AgentDiet on, connected and saving anything?
+  pause, resume   Stop or restart trimming (output is still scrubbed of secrets)
+  mode [MODE]     Show or set the Diet Mode: light, balanced or ultra-lean
+  show <ID|last>  Print a trimmed output in full
+  doctor          Find setup problems and how to fix them
 
 Setup:
-  init              Connect AgentDiet to your assistants
-  eject             Disconnect and restore your original configs (alias: uninstall)
+  init            Connect AgentDiet to your AI assistants
+  disconnect      Remove AgentDiet from some assistants only
+  eject           Remove AgentDiet everywhere and restore your configs (alias: uninstall)
 
-Insight & tools:
-  top  stats  scan  reflect
+Advanced:
+  top             Live dashboard of savings and recent activity
+  stats           Savings and this workspace's activity (--json for scripts)
+  scan            Check skills, rules and MCP configs for risky content
+  reflect         Turn this workspace's past runs into tips in EXPERIENCE.md
 
 Examples:
   agentdiet init --only claude,shims
   agentdiet show last --lines 1..40
   agentdiet mode light
 
-Run `agentdiet` with no arguments for the interactive Control Center.
+Run `agentdiet` with no arguments for the Control Center, or `agentdiet help <command>` for details.
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
 ```
+
+Each command's `--help` ends with examples, and with its exit statuses where they matter (`doctor`,
+`scan`, `status`). `--only` and `disconnect` explain the assistant names once instead of repeating
+clap's `[possible values]` list (a typo still gets that list and a "did you mean").
 
 ## 7. Exact P0 behaviour
 
@@ -561,7 +575,7 @@ Acceptance criteria (all covered by tests):
   - one moved or deleted binary behind several rows gets one fix naming every target;
   - "TUI" is gone from `--help`.
 
-### P2 — help, vocabulary, broken pipes, README (planned, not started)
+### P2 — help, vocabulary, broken pipes, README (done)
 
 Inventory taken after the P1 commit (`0b58e02`), from the isolated-HOME walkthrough and a probe that
 runs every command with a stdout pipe whose reader has already closed.
@@ -686,6 +700,20 @@ Order:
 
 Test: every `agentdiet …` line in the README's code blocks parses with `Cli::try_parse_from`, so the README
 cannot document a command that does not exist.
+
+**As built** (where it differs from or adds to the plan above)
+
+- P2.1: the shared phrases live in `src/words.rs` (`status_word`, `tokens_saved`, `trimmed_outputs`,
+  `reopens`, `passed_while_paused` and a short form for the Control Center's half-width column, `vault`,
+  `mode_line`, `mode_blurb`). The status row is now "Savings" ("Saved … tokens saved" said it twice).
+- P2.3: `ui::write_out` (data, unchanged bytes), `ui::emit` (people text, ASCII when asked) and
+  `ui::warn` (stderr that never panics). Hooks and the MCP server are untouched.
+- P2.5: the explanations live in `main.rs` (`explain`); `CasError` and `diet_inspect`'s text are
+  unchanged (the MCP tests prove it).
+- Tests added: closed stdout for every command, a reader that leaves halfway through a 600 KB `show`,
+  `scan` keeping 0/1/2, data never transliterated, the `stats --json` golden bytes, the `stats` text,
+  the banned-words sweep over every people-facing output (CLI, help pages, Control Center views, `top`),
+  the command map, every help example, every README command, and old spellings and aliases.
 
 **Order and acceptance**
 

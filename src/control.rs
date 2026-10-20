@@ -47,31 +47,6 @@ pub fn set_mode(paths: &Paths, mode: Mode) -> anyhow::Result<String> {
     )
 }
 
-/// What a mode does, from its §3 Tier 2 parameters: shared by `agentdiet mode` and the Control Center.
-pub fn mode_line(mode: Mode) -> String {
-    use crate::diet::ModeParams;
-    use crate::ui::{plural, thousands};
-
-    let params = ModeParams::for_mode(mode);
-    format!(
-        "outputs over {} est. tokens · must save {}% · {}",
-        thousands(params.min_tokens as u64),
-        params.saving_pct,
-        plural(params.context_lines, "context line", "context lines"),
-    )
-}
-
-/// One plain sentence on when to pick a mode.
-pub fn mode_blurb(mode: Mode) -> &'static str {
-    match mode {
-        Mode::Light => "Gentlest: only very large outputs are trimmed; the agent sees the most.",
-        Mode::Balanced => "The default: trims long, repetitive output and keeps every error.",
-        Mode::UltraLean => {
-            "Most aggressive: smallest context, but agents may re-open outputs more."
-        }
-    }
-}
-
 /// `agentdiet mode`: the current mode and what each one does.
 pub fn mode_overview(state: &State, p: crate::ui::Painter) -> String {
     use crate::ui::Level;
@@ -83,7 +58,10 @@ pub fn mode_overview(state: &State, p: crate::ui::Painter) -> String {
         } else {
             ("○", format!("{:<11}", mode.slug()))
         };
-        out.push_str(&format!("  {mark} {name} {}\n", mode_line(mode)));
+        out.push_str(&format!(
+            "  {mark} {name} {}\n",
+            crate::words::mode_line(mode)
+        ));
     }
     out.push_str(&format!(
         "\nChange it: {}\n",

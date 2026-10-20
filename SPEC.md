@@ -271,8 +271,13 @@ and exit codes, hook stdout and the MCP server.
   shown (at least 12 characters), a status column, then free text. Fixed-text lines (`mode`) fit in 80
   columns; details that hold paths are allowed to wrap. Nothing depends on the terminal's width.
 - **Paths** under the home directory are shown as `~/…`, diff headers included.
-- **Pipes.** A reader that closes the pipe early (`agentdiet doctor | head`) ends the output quietly;
-  it is never a panic.
+- **Pipes.** A reader that closes the pipe early (`agentdiet doctor | head`, `agentdiet show last | head`)
+  ends the output quietly, for every command: never a panic, never a "Broken pipe" message. What the
+  command does is not affected: a state change (`pause`, `resume`, `mode <m>`, `disconnect`, …) is made
+  before anything is printed and stays made; `show` writes the same bytes up to the point the reader
+  left and exits 0; `scan` keeps the exit status its findings decide (0, 1 or 2); `stats --json` exits
+  0. A closed stderr is ignored the same way. Output that is data (`show`, `stats --json`, `scan`,
+  `reflect --dry-run`'s file text) is never transliterated to ASCII; only people-facing text is.
 - **Numbers** carry their scope and their nature: counters from `state.json` are "all projects",
   run log totals are "this workspace", and token counts are "estimated" (§3 Tier 2).
 - **Full-screen views** (the Control Center and `top`) follow the same glyph and colour rules (`top`'s
@@ -289,9 +294,30 @@ and exit codes, hook stdout and the MCP server.
     atomically); after SIGHUP the terminal
     may already be gone, and the restore's writes then fail silently; raw mode turns Ctrl-Z into a
     plain key, which is ignored; on platforms without Unix signals there is no handler.
-- **Words.** The user-facing names are *Vault* (never "CAS"), *trimmed output*, *re-opened* (an agent
-  read a trimmed output back from the Vault; `cas_dereferences` in JSON), *assistant*, *shims* and
-  *Diet Mode*. JSON keys and `state.json` fields keep their names.
+- **Errors** a person sees say what failed, why, and what to do next, on at most three lines, with
+  `~/…` paths, and never quote stored output. For `show`:
+
+  | Case | Message (after `agentdiet: `) |
+  |---|---|
+  | unknown ID | `no trimmed output #<id> in the Vault.` · where IDs come from (the `🥗 Diet` line), `agentdiet show last`, and the 7-day lifetime |
+  | expired ID | `#<id> has expired: Vault entries are kept 7 days after their last use.` · run the command again to see its full output |
+  | invalid ID | `"<input>" is not a Vault ID: IDs are 4 or more hex characters, like '#4f9a1b2c'.` · copy it from the `🥗 Diet` line and quote it (an unquoted `#` starts a shell comment), or use `show last` |
+  | ambiguous | the candidates, then "type more characters of the ID" |
+  | damaged entry | `#<id> is damaged in the Vault (its bytes no longer match its ID), so nothing is shown.` · run the command again |
+  | bad `--lines` | `"<input>" is not a line range: use START..END, 1-based and inclusive, like 10..40.` |
+  | nothing trimmed | `nothing has been trimmed yet, so there is no last output to show.` · `agentdiet status` shows whether an assistant is connected |
+
+  These are the CLI's words only: `CasError`'s own text, which the MCP tool `diet_inspect` returns to
+  agents, does not change. The `state.json` warning shows `~/…` paths.
+- **Words.** The user-facing names are *Vault* (never "CAS"), *trimmed output*, *re-opened by agents*
+  (an agent read a trimmed output back from the Vault; `cas_dereferences` in JSON), *assistant*,
+  *shims*, *Diet Mode*, *this workspace's activity* (never "run log" or "origin"), *untrimmed (still
+  scrubbed)* (never "raw" for output that was scrubbed) and *estimated* tokens. A phrase that appears in
+  more than one view (the status word, savings, re-opens, what passed while paused, the Vault, the mode
+  line) is produced by one function, so `status`, `doctor`, `stats`, the Control Center and `top` cannot
+  drift apart. People-facing output never says "CAS", "dereference", "run log", "origin", "TUI" or "LLM";
+  paths such as `~/.agentdiet/state.json` are allowed. JSON keys, `state.json` fields and agent-facing
+  text keep their names.
 
 ## 3. Architecture — 3 Tiers
 
@@ -983,11 +1009,33 @@ label (the agent's session id, `pid:<n>` or `agent:unknown`). It never holds out
 
 #### Stats
 
-`agentdiet stats` prints the §2.3 counters (all projects, from `state.json`) and, per origin (`shim`,
-`mcp`, `hook`), the workspace's run log totals: runs, failed runs, runs whose output was replaced,
-and estimated tokens before and after. `--json` prints one JSON object with the same numbers. It
-never creates memory.db; without one, the run log totals are zero and the text says nothing has been
-recorded.
+`agentdiet stats` prints the §2.3 counters (all projects, from `state.json`) and, for the workspace, the
+run log totals per entry point: runs, failed runs, runs whose output was replaced, and estimated tokens
+before and after. It never creates memory.db. The text uses the §2.5 words:
+
+```
+AgentDiet is active · Balanced mode
+
+All projects (estimated)
+  trimmed outputs      4
+  tokens saved         ≈134,830
+  re-opened by agents  1 re-open for 4 trimmed outputs (25%)
+  while paused         ≈0 tokens passed untrimmed (still scrubbed)
+  last trimmed         #683db530 · agentdiet show last
+
+This workspace (~/code/app)
+  via                 runs  failed  trimmed  est. tokens before → after
+  shims                  4       0        0  0 → 0
+  MCP (diet_exec)        1       0        1  8,000 → 120
+  Claude Code hooks     34       0        0  32,080 → 32,080
+```
+
+Without memory.db the workspace part says "Nothing recorded in this workspace yet."; with nothing
+trimmed, "re-opened by agents" and "last trimmed" say "none yet". `--json` is a **contract** and does not
+change: one JSON object with the keys `status`, `mode`, `trimmed_outputs`, `tokens_saved`,
+`cas_dereferences`, `raw_tokens_passed_while_paused`, `last_trimmed_id`, `workspace`, `memory_db` and
+`runs` (`shim`, `mcp`, `hook`, each `runs`, `failed`, `trimmed`, `raw_tokens`, `emitted_tokens`), with an
+absolute `workspace` path, whatever the locale.
 
 #### Status
 
@@ -998,7 +1046,7 @@ already exists. It always exits 0. Lines, in order (§2.5 rules apply):
 1. `AgentDiet is active · <Mode> mode`, or `AgentDiet is paused · <Mode> mode`.
 2. *Assistants*: the labels of the targets agentdiet is connected to (any scope), or
    `none connected` with `agentdiet init` as the next step.
-3. *Saved*: `≈<tokens_saved> tokens in <trimmed_outputs> trimmed outputs (all projects, estimated)`,
+3. *Savings*: `≈<tokens_saved> tokens saved in <trimmed_outputs> trimmed outputs (all projects, estimated)`,
    or `nothing trimmed yet` while `trimmed_outputs` is 0.
 4. *Re-opened*, only while `trimmed_outputs` is above 0: `<n> re-open(s) for <trimmed_outputs> trimmed output(s)
    (<rate>)`, with the same warning as `agentdiet top` when the rate is strictly above 20% (§2.3).
@@ -1190,13 +1238,15 @@ Every file gets families **a**, **b** and **d**; *instruction files* (`*.md`, `*
 
 - Needs a terminal: with stdin or stdout not a TTY it exits 1 with
   "`agentdiet top` needs an interactive terminal (stdin and stdout must be a TTY)." and draws nothing.
-- Shows: a header with Active/Paused, the Diet Mode and the connected assistants (`init` targets at user
-  scope); the metrics `tokens_saved`, `trimmed_outputs`, `raw_tokens_passed_while_paused`, the last
-  trimmed ID, the Vault (live entries, their size, expired IDs) and the CAS dereference rate (§2.3),
-  highlighted with a warning above 20%; a table of the most recent memory.db rows (`#id` when its Vault
-  entry is live, kind, command or path, summary); and a footer with the keys.
-- Keys: `q`/`Esc` quit, `p` pause/resume, `m` cycles Light → Balanced → Ultra-Lean, `r` refreshes. It also
-  refreshes every 2 s. A failed change (e.g. "state is busy") is shown in the dashboard; it does not exit.
+- Shows, in the §2.5 words and with the same phrases as `status` and the Control Center: a header with
+  `● Active` / `■ Paused`, the Diet Mode and the connected assistants (`init` targets at user scope);
+  *tokens saved* in *trimmed outputs* (all projects, estimated), *re-opened by agents* (§2.3, with the
+  warning above 20%), what *passed while paused* (untrimmed, still scrubbed), the last trimmed ID and the
+  Vault (entries, size, expired); *Recent activity (this workspace)*: the most recent memory.db rows
+  (`#id` when its Vault entry is live, kind, command or path, summary); and a footer with the keys.
+- Keys: `p` pause/resume, `m` next mode (Light → Balanced → Ultra-Lean), `r` reload, `q`/Esc quit (or
+  "back" when it was opened from the Control Center, which it then returns to), Ctrl-C quit. It also
+  reloads every 2 s. A failed change (e.g. "state is busy") is shown in the dashboard; it does not exit.
 - Loading runs the Vault GC (§3 Tier 3, item 3) and never creates `memory.db` or the Vault. The terminal is
   restored on every exit path, including a panic. Control Center item 5 opens it.
 - **`agentdiet eject` / `agentdiet uninstall`** — restore original configs from
@@ -1224,6 +1274,14 @@ Every file gets families **a**, **b** and **d**; *instruction files* (`*.md`, `*
   (`agentdiet reflect`)
 
 ## 5. Commands
+
+`agentdiet --help` lists the commands in three groups, **Everyday** (`status`, `pause`/`resume`, `mode`,
+`show`, `doctor`), **Setup** (`init`, `disconnect`, `eject`) and **Advanced** (`top`, `stats`, `scan`,
+`reflect`), each with a one-line plain-English purpose, then three examples and a pointer to the Control
+Center and to `agentdiet help <command>`. Every command's own `--help` ends with short examples (and its
+exit statuses where they mean something). Internal commands (`mcp`, `hook`) are not listed but work as
+before; so do all aliases (`uninstall`, `ultra`, `claude-code`, `gemini-cli`). Every example in the help
+parses as a real command line (tested).
 
 | Command | What it does |
 |---|---|
@@ -1382,6 +1440,20 @@ new, head, new:
   2.69 ms and B2 1.59, 1.62 ms; this change B1 2.69, 2.68 ms and B2 1.61, 1.61 ms. Within noise; only
   the paired comparison is meaningful across sessions. **B1 remains NOT MET.**
 
+**UX-P2 re-measurement** (2026-10-20, same machine and harness, n = 1000 per arm). Release binaries built
+with `cargo build --release --locked` from `0b58e02` (UX-P1, 10,104,672 bytes, sha256 `67484e53…`) and
+this change (10,104,704 bytes, sha256 `c7d8aacd…`), timed through `AGENTDIET_PERF_BIN`, alternating:
+
+| Binary | B1 p50 | B2 p50 | B3 p50 |
+|---|---|---|---|
+| UX-P1 (`0b58e02`) | 2.76, 2.78 ms | 1.63, 1.64 ms | 0.027 ms |
+| this change | 2.75, 2.79 ms | 1.62, 1.65 ms | 0.027, 0.026 ms |
+
+- P2 changes people-facing text and output handling only; shim and hook dispatch are untouched. Within
+  noise. The same scenario run by both binaries (an MCP session with `diet_exec` and `diet_inspect`, a
+  `PostToolUse` hook, `show '#id'`, `stats --json`, `scan`) produced byte-identical output. **B1 remains
+  NOT MET.**
+
 Notes:
 
 - Routing (B3, 0.03 ms) is about 1% of B1. B1 is consistent with paying for two process images in
@@ -1415,6 +1487,7 @@ Notes:
 
 | UX-P0 | CLI/UX overhaul, phase P0 (`docs/CLI_UX_OVERHAUL.md`): `status`, `doctor`, `mode`, `show last`, the §2.2 `init` output and non-terminal `--dry-run`, the §2.5 terminal rules | done, with tests. Later phases (Control Center redesign, `eject --only`, help layout, completions) are in that document and not started |
 | UX-P1 | CLI/UX overhaul, phase P1 (`docs/CLI_UX_OVERHAUL.md`): the ratatui Control Center (§2.1), `disconnect` and `eject --only`, post-`init` verification, `verified` / `not yet observed` wording, one-line binary warning, ASCII glyph fallback, `mcp` hidden from help | done, with tests. Help layout, wording of `stats`/`top`, completions, `--json` and bare-ID breadcrumbs are P2/P3 |
+| UX-P2 | CLI/UX overhaul, phase P2: broken pipes end quietly for every command (§2.5), one vocabulary from `src/words.rs` across `status`, `doctor`, `stats`, the Control Center and `top`, actionable `show` errors (`CasError` unchanged), grouped `--help` with tested examples (§5), README overhaul | done, with tests. P3 (completions, `--json` for `status`/`doctor`, bare-ID breadcrumbs, a re-open minimum sample) not started |
 
 License: MIT (`LICENSE`); third-party notices in `THIRD_PARTY_NOTICES`.
 

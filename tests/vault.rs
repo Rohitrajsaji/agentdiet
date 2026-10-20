@@ -805,7 +805,7 @@ fn the_show_command_reports_corruption_and_prints_nothing() {
     assert!(out.stdout.is_empty(), "no bytes on stdout");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        err.contains("corrupt") && !err.contains("tampered"),
+        err.contains("is damaged in the Vault") && !err.contains("tampered"),
         "{err}"
     );
 }

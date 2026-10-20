@@ -157,21 +157,33 @@ pub fn asciify(text: &str) -> String {
     out
 }
 
-/// Write `text` to stdout, in ASCII when the environment asks for it. A reader that went away
-/// (`agentdiet doctor | head`) ends the output quietly instead of panicking like `print!`; any other
-/// write error is returned.
-pub fn emit(text: &str) -> std::io::Result<()> {
+/// Write `bytes` to stdout unchanged (data: `show`, `stats --json`, `scan`). A reader that went away
+/// (`agentdiet show last | head`) ends the output quietly instead of panicking like `print!` or
+/// failing; any other write error is returned (SPEC §2.5 "Pipes").
+pub fn write_out(bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    let text = if ascii_from_env() {
-        asciify(text)
-    } else {
-        text.to_string()
-    };
     let mut out = std::io::stdout().lock();
-    match out.write_all(text.as_bytes()).and_then(|()| out.flush()) {
+    match out.write_all(bytes).and_then(|()| out.flush()) {
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
         other => other,
     }
+}
+
+/// [`write_out`] for people-facing text, in ASCII when the environment asks for it.
+pub fn emit(text: &str) -> std::io::Result<()> {
+    if ascii_from_env() {
+        write_out(asciify(text).as_bytes())
+    } else {
+        write_out(text.as_bytes())
+    }
+}
+
+/// One line on stderr. Never fails and never panics: a closed or broken stderr is ignored, because
+/// a warning must not turn a finished command into a crash (unlike `eprintln!`).
+pub fn warn(line: &str) {
+    use std::io::Write;
+    let mut err = std::io::stderr().lock();
+    let _ = writeln!(err, "{line}");
 }
 
 /// `path` with the home directory shown as `~`.

@@ -34,6 +34,7 @@ pub mod toon;
 pub mod top;
 pub mod tui;
 pub mod ui;
+pub mod words;
 
 /// Every filesystem location the library touches, injected by the caller.
 ///

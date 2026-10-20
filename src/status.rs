@@ -13,9 +13,9 @@ use crate::init::shims::{self, Link, PathStatus};
 use crate::init::targets::{self, FileSpec};
 use crate::init::{self, Target};
 use crate::memory::{MemoryDb, Origin};
-use crate::state::{DEREFERENCE_WARN_RATE, State, Status};
-use crate::ui::{Level, Painter, and_list, plural, thousands, tilde};
-use crate::{Paths, fsutil};
+use crate::state::{State, Status};
+use crate::ui::{Level, Painter, and_list, plural, tilde};
+use crate::{Paths, fsutil, words};
 
 /// What a doctor line is about, so a view can place rows without reading their label text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -505,17 +505,7 @@ fn memory_check(paths: &Paths) -> (Check, Activity) {
 fn vault_check(paths: &Paths) -> Check {
     let cas = Cas::new(paths.cas_dir()).lock_timeout(std::time::Duration::from_millis(500));
     match cas.stats() {
-        Ok(stats) if stats.live == 0 => Check::new("Vault", Level::Ok, "ok", "empty".into()),
-        Ok(stats) => Check::new(
-            "Vault",
-            Level::Ok,
-            "ok",
-            format!(
-                "{}, {:.1} KiB",
-                plural(stats.live, "entry", "entries"),
-                stats.bytes as f64 / 1024.0
-            ),
-        ),
+        Ok(stats) => Check::new("Vault", Level::Ok, "ok", crate::words::vault(&stats)),
         Err(CasError::Busy(_)) => Check::new(
             "Vault",
             Level::Info,
@@ -931,11 +921,6 @@ fn shim_checks(
 
 // ---- status ---------------------------------------------------------------------------------------
 
-/// `1,234 things`, for counters.
-pub(crate) fn plural_u64(n: u64, one: &str, many: &str) -> String {
-    format!("{} {}", thousands(n), if n == 1 { one } else { many })
-}
-
 /// `agentdiet status`: the §3b overview, from `state.json` and a doctor run.
 pub fn render_status(state: &State, report: &Report, p: Painter) -> String {
     let status = match state.status {
@@ -960,35 +945,22 @@ pub fn render_status(state: &State, report: &Report, p: Painter) -> String {
     row(&mut out, "Assistants", assistants);
 
     if state.trimmed_outputs == 0 {
-        row(&mut out, "Saved", "nothing trimmed yet".into());
+        row(&mut out, "Savings", "nothing trimmed yet".into());
     } else {
         row(
             &mut out,
-            "Saved",
+            "Savings",
             format!(
-                "≈{} tokens in {} (all projects, estimated)",
-                thousands(state.tokens_saved),
-                plural(
-                    usize::try_from(state.trimmed_outputs).unwrap_or(usize::MAX),
-                    "trimmed output",
-                    "trimmed outputs"
-                )
+                "{} in {} (all projects, estimated)",
+                words::tokens_saved(state),
+                words::trimmed_outputs(state)
             ),
         );
     }
-    if let Some(rate) = state.dereference_rate() {
-        let mut text = format!(
-            "{} for {} ({:.0}%)",
-            plural_u64(state.cas_dereferences, "re-open", "re-opens"),
-            plural_u64(state.trimmed_outputs, "trimmed output", "trimmed outputs"),
-            rate * 100.0
-        );
-        if rate > DEREFERENCE_WARN_RATE {
+    if let Some(mut text) = words::reopens(state) {
+        if words::reopens_high(state) {
             text.push(' ');
-            text.push_str(&p.level(
-                Level::Warning,
-                "⚠ high: agents re-read trimmed output; consider a lighter mode",
-            ));
+            text.push_str(&p.level(Level::Warning, words::REOPEN_WARNING));
         }
         row(&mut out, "Re-opened", text);
     }
@@ -997,8 +969,8 @@ pub fn render_status(state: &State, report: &Report, p: Painter) -> String {
             &mut out,
             "Paused",
             format!(
-                "≈{} tokens passed untrimmed (still scrubbed) {}",
-                thousands(state.raw_tokens_passed_while_paused),
+                "{} {}",
+                words::passed_while_paused(state),
                 hint("agentdiet resume")
             ),
         );
@@ -1183,7 +1155,7 @@ mod tests {
             "{text}"
         );
         for line in [
-            "  Saved         ≈134,830 tokens in 4 trimmed outputs (all projects, estimated)",
+            "  Savings       ≈134,830 tokens saved in 4 trimmed outputs (all projects, estimated)",
             "  Re-opened     1 re-open for 4 trimmed outputs (25%) ⚠ high: agents re-read trimmed output; consider a lighter mode",
             "  Paused        ≈2,500 tokens passed untrimmed (still scrubbed) · agentdiet resume",
             "  Last trimmed  #683db530 · agentdiet show last",
@@ -1193,7 +1165,7 @@ mod tests {
         }
 
         let quiet = render_status(&State::default(), &report, Painter::plain());
-        assert!(quiet.contains("  Saved         nothing trimmed yet\n"));
+        assert!(quiet.contains("  Savings       nothing trimmed yet\n"));
         assert!(
             !quiet.contains("Re-opened") && !quiet.contains("Paused") && !quiet.contains("Last")
         );

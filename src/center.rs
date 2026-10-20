@@ -22,12 +22,12 @@ use ratatui::widgets::Paragraph;
 
 use crate::cas::Cas;
 use crate::init::{self, InitOptions, Target, eject};
-use crate::state::{DEREFERENCE_WARN_RATE, Mode, State, Status};
+use crate::state::{Mode, State, Status};
 use crate::status::{self, Check, CheckKind, Observed, Report};
 use crate::top::{self, RecentItem};
 use crate::tui::{self, Ctx};
-use crate::ui::{self, Level, Painter, thousands};
-use crate::{Paths, control, fsutil};
+use crate::ui::{self, Level, Painter};
+use crate::{Paths, control, fsutil, words};
 
 /// State is reloaded this often without a key press (the checks are not: SPEC §2.1).
 pub const REFRESH: Duration = Duration::from_secs(2);
@@ -424,10 +424,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App, data: &Data, ctx: Ctx) {
 }
 
 fn status_text(data: &Data) -> (&'static str, Level) {
-    match data.state.status {
-        Status::Active => ("● Active", Level::Ok),
-        Status::Paused => ("■ Paused", Level::Warning),
-    }
+    words::status_word(data.state.status)
 }
 
 fn draw_tiny(frame: &mut Frame<'_>, area: Rect, data: &Data, ctx: Ctx) {
@@ -514,28 +511,14 @@ fn savings_lines(data: &Data, ctx: Ctx) -> Vec<Line<'static>> {
     if s.trimmed_outputs == 0 {
         lines.push(ctx.line(" Nothing trimmed yet.", Style::new()));
     } else {
-        lines.push(ctx.line(
-            &format!(" ≈{} tokens saved", thousands(s.tokens_saved)),
-            Style::new(),
-        ));
-        lines.push(ctx.line(
-            &format!(" {} trimmed outputs", thousands(s.trimmed_outputs)),
-            Style::new(),
-        ));
-        if let Some(rate) = s.dereference_rate() {
-            let warn = rate > DEREFERENCE_WARN_RATE;
-            lines.push(Line::from(vec![
-                ctx.span(
-                    &format!(
-                        " {} / {} ({:.0}%)",
-                        status::plural_u64(s.cas_dereferences, "re-open", "re-opens"),
-                        status::plural_u64(s.trimmed_outputs, "output", "outputs"),
-                        rate * 100.0
-                    ),
-                    Style::new(),
-                ),
-                ctx.span(if warn { " ⚠ high" } else { "" }, ctx.level(Level::Warning)),
-            ]));
+        lines.push(ctx.line(&format!(" {}", words::tokens_saved(s)), Style::new()));
+        lines.push(ctx.line(&format!(" {}", words::trimmed_outputs(s)), Style::new()));
+        if let Some(reopens) = words::reopens(s) {
+            lines.push(ctx.line(&format!(" {reopens}"), Style::new()));
+        }
+        if words::reopens_high(s) {
+            // The full warning does not fit a half-width column; `status` and `top` carry it.
+            lines.push(ctx.line(" ⚠ high: try a lighter mode", ctx.level(Level::Warning)));
         }
     }
     if let Some(id) = &s.last_trimmed_id {
@@ -543,10 +526,7 @@ fn savings_lines(data: &Data, ctx: Ctx) -> Vec<Line<'static>> {
     }
     if s.status == Status::Paused {
         lines.push(ctx.line(
-            &format!(
-                " ≈{} tokens passed untrimmed",
-                thousands(s.raw_tokens_passed_while_paused)
-            ),
+            &format!(" {}", words::passed_while_paused_short(s)),
             ctx.level(Level::Warning),
         ));
     }
@@ -656,7 +636,7 @@ fn draw_main(frame: &mut Frame<'_>, area: Rect, app: &App, data: &Data, ctx: Ctx
     .areas(area);
 
     frame.render_widget(Paragraph::new(header_line(data, area.width, ctx)), head);
-    let blurb = format!(" Trims {}", control::mode_line(data.state.mode));
+    let blurb = format!(" Trims {}", words::mode_line(data.state.mode));
     frame.render_widget(
         Paragraph::new(ctx.line(&fit(&blurb, usize::from(area.width)), ctx.dim())),
         desc,
@@ -739,11 +719,8 @@ fn draw_mode(frame: &mut Frame<'_>, area: Rect, data: &Data, ctx: Ctx, cursor: u
             ),
             style,
         ));
-        lines.push(ctx.line(
-            &format!("      {}", control::mode_blurb(mode)),
-            Style::new(),
-        ));
-        lines.push(ctx.line(&format!("      {}", control::mode_line(mode)), ctx.dim()));
+        lines.push(ctx.line(&format!("      {}", words::mode_blurb(mode)), Style::new()));
+        lines.push(ctx.line(&format!("      {}", words::mode_line(mode)), ctx.dim()));
     }
     frame.render_widget(
         Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false }),
@@ -903,7 +880,7 @@ pub fn run(paths: &Paths) -> anyhow::Result<()> {
                         match action {
                             Action::Quit => return Ok(()),
                             Action::OpenLive => {
-                                match top::run_in(&mut terminal, paths, ctx)? {
+                                match top::run_in(&mut terminal, paths, ctx, true)? {
                                     top::Ended::Quit => return Ok(()),
                                     top::Ended::Signal(sig) => tui::exit_for_signal(sig, restore),
                                     top::Ended::Back => {}
@@ -1287,7 +1264,8 @@ mod tests {
             "✓ Cursor",
             "configured",
             "≈134,830 tokens saved",
-            "1 re-open / 4 outputs (25%) ⚠ high",
+            "1 re-open for 4 trimmed outputs (25%)",
+            "⚠ high: try a lighter mode",
             "last #683db530 · l to view",
             "≈2,500 tokens passed untrimmed",
             "Needs attention",

@@ -141,7 +141,7 @@ fn assert_restored(out: &[u8]) {
 
 #[test]
 fn stop_signals_restore_the_terminal_then_end_the_process_by_that_signal() {
-    for (args, title) in [(&[][..], "Assistants"), (&["top"][..], "Metrics")] {
+    for (args, title) in [(&[][..], "Assistants"), (&["top"][..], "Mode:")] {
         for sig in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT] {
             let env = Env::empty();
             let session = spawn(&env, args);

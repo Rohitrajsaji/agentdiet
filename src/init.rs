@@ -349,7 +349,8 @@ pub fn cmd_init(
         bail!(no_terminal_message(paths, project));
     };
     if targets.is_empty() {
-        println!("Nothing selected; nothing to do.");
+        crate::ui::emit("Nothing selected; nothing to do.\n")
+            .context("could not write to stdout")?;
         return Ok(());
     }
 
@@ -591,10 +592,10 @@ pub fn cmd_eject(paths: &Paths, only: &[Target], purge: bool) -> anyhow::Result<
     });
     let report = eject::eject(paths, list.as_deref(), purge).context("eject failed")?;
     for warning in &report.warnings {
-        eprintln!("warning: {warning}");
+        crate::ui::warn(&format!("warning: {warning}"));
     }
     if report.is_empty() && list.is_none() {
-        println!("Nothing to eject.");
+        crate::ui::emit("Nothing to eject.\n").context("could not write to stdout")?;
         return Ok(());
     }
     let text = render_eject(

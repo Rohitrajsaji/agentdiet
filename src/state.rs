@@ -151,7 +151,7 @@ pub fn read(paths: &Paths) -> (State, Option<String>) {
                 State::default(),
                 Some(format!(
                     "ignoring corrupt {} ({e}); using defaults",
-                    path.display()
+                    crate::ui::tilde(&paths.home, &path)
                 )),
             ),
         },
@@ -159,7 +159,7 @@ pub fn read(paths: &Paths) -> (State, Option<String>) {
             State::default(),
             Some(format!(
                 "cannot read {} ({e}); using defaults",
-                path.display()
+                crate::ui::tilde(&paths.home, &path)
             )),
         ),
     }
@@ -172,7 +172,7 @@ pub fn load(paths: &Paths) -> State {
     if let Some(warning) = warning
         && !QUIET.load(Ordering::Relaxed)
     {
-        eprintln!("agentdiet: {warning}");
+        crate::ui::warn(&format!("agentdiet: {warning}"));
     }
     state
 }

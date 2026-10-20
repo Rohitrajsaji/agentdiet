@@ -1,152 +1,262 @@
 # AgentDiet
 
-**A context firewall for AI coding agents.** AgentDiet sits between your agent and the output of
-the tools it runs. It trims the noise (passing tests, build progress, download bars) and turns
-model-facing JSON into compact TOON. It also redacts secrets before anything reaches the model or
-the disk.
+**AgentDiet keeps your AI coding assistant's context clean.** When the assistant runs a tool (a test
+suite, a build, `npm install`, an MCP call), most of what comes back is noise: hundreds of passing
+tests, progress bars, repeated warnings. AgentDiet trims that noise before the assistant reads it,
+keeps every error and warning, and removes secrets before anything reaches the model or the disk.
 
-Nothing is lost. Each trimmed output is stored in a local Vault, and a one-line breadcrumb tells the
-agent how to get it back:
+Nothing useful is lost. The full output is stored in a local **Vault**, and the assistant gets one
+extra line saying how to get it back:
 
 ```
 test result: ok. 400 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
 🥗 Diet: kept 14/412 lines; cargo test: 398 passing test lines collapsed; exit 0 Run: agentdiet show '#f5f26875'
 ```
 
-The one exception is redacted secrets: they are never stored, so they can never be recovered.
+The one exception is secrets: they are removed before storing, so they can never be recovered.
 
-AgentDiet is one static Rust binary with zero runtime dependencies: no Node, no Python, no grammar
-files. `SPEC.md` is the authoritative description of its behaviour.
+AgentDiet is a single binary with no runtime dependencies (no Node, no Python). It works with Claude
+Code, Cursor, Windsurf, Gemini CLI, GitHub Copilot in VS Code and Codex.
 
-## How it works: three tiers
+## Quick start
 
-```
- agent ──tool call──▶ tool ──raw output──▶ ┌──────────────────────────────┐ ──dieted──▶ agent
-                                           │ 1. Hook router / PPID shims  │
-                                           │ 2. Diet Engine               │
-                                           │ 3. Vault + memory.db         │
-                                           └──────────────────────────────┘
+**1. Install** the binary somewhere stable (assistant configs point at its full path):
+
+```sh
+cargo install --path . --locked        # from a checkout; or copy target/release/agentdiet onto your PATH
 ```
 
-1. **Hook router and PPID shims.**
-   - *Hooks:* Claude Code's `PostToolUse` hook hands each successful tool result to AgentDiet, which
-     returns a replacement of exactly the same shape (`updatedToolOutput`). AgentDiet's own MCP tools
-     are never re-processed.
-   - *Shims:* `~/.agentdiet/shims/{git,cargo,pytest,npm,…}` catch commands that an agent runs,
-     including failing ones. They walk the parent process chain to tell an agent from a human, and
-     they only capture output that goes straight back to the agent. A human at a terminal, a pipe or
-     a redirect gets the real binary via `execv`.
-2. **Diet Engine.** It scrubs secrets, then builds a candidate:
-   - command-aware compression for cargo, pytest, go test, npm/pnpm/yarn, git, make, docker and ruff;
-   - TOON for JSON that MCP tools and WebFetch return to the model.
+**2. Connect your assistants.** In a terminal, `agentdiet init` shows a checklist of the assistants it
+finds; or name them:
 
-   A candidate is used only if it is strictly smaller in bytes and in estimated tokens (breadcrumb
-   included) and meets the Diet Mode's required saving; otherwise the scrubbed original passes. Error
-   and warning lines are always kept verbatim, with their context.
-3. **Vault and memory.**
-   - *Vault:* the full scrubbed original is written durably to a content-addressed store at
-     `~/.agentdiet/cas/` before any replacement is emitted. Entries expire 7 days after their last
-     write.
-   - *memory.db:* a summary is indexed in the project's `.agentdiet/memory.db` (SQLite FTS5 with BM25
-     ranking), so agents can search past outputs.
+```sh
+agentdiet init --only claude,shims
+```
+
+```
+  Claude Code   ✓ connected           hooks, MCP server, EXPERIENCE.md pointer
+  Shims         ✓ connected           11 commands linked in ~/.agentdiet/shims
+
+Backed up the originals to ~/.agentdiet/backups/1792513109815
+
+Verification
+  Claude Code   ✓ configured, not yet observed  restart it, then run any tool
+  Shims         ✓ configured, not yet observed  recorded once an agent runs git, cargo, …
+
+Next:
+  1. Add the shims to your PATH (AgentDiet never edits shell rc files):
+       export PATH="$HOME/.agentdiet/shims:$PATH"
+  2. Restart Claude Code so it loads the new config.
+  3. Check the setup: agentdiet doctor
+```
+
+Every file is backed up before it is changed, and running `init` again changes nothing. Use
+`agentdiet init --all --dry-run` to preview everything without writing anything.
+
+**3. Follow the "Next" steps**: add the `PATH` line to your shell's rc file (for the shims), restart the
+assistant, then check:
+
+```sh
+agentdiet doctor
+```
+
+`doctor` checks every connection and prints the exact fix for anything wrong. "Configured, not yet
+observed" is normal until the assistant has run a tool; after that it says "verified".
+
+**4. Use your assistant as usual.** Open the Control Center any time:
+
+```sh
+agentdiet
+```
+
+Here the `PATH` line from step 3 has not been added yet, so it shows under *Needs attention*:
+
+```
+ AgentDiet  ● Active · Balanced mode                                     ? help
+ Trims outputs over 600 est. tokens · must save 20% · 3 context lines
+ Assistants                              Savings (all projects, estimated)
+ ✓ Claude Code       not yet observed    ≈134,830 tokens saved
+ ✓ Cursor            configured          4 trimmed outputs
+ ✓ Shims             not yet observed    1 re-open for 4 trimmed outputs (25%)
+                                         ⚠ high: try a lighter mode
+                                         last #683db530 · l to view
+ Needs attention
+ ✗ PATH ~/.agentdiet/shims is not on PATH in this shell, so the shims are
+   never reached
+   → add to your shell rc: export PATH="$HOME/.agentdiet/shims:$PATH"
+ Recent activity (this workspace)
+ #683db530  cargo test  kept 14/412 lines; 398 passing lines collapsed
+
+ p pause  m mode  l last output  a assistants  d doctor  t live  ? help  q quit
+```
+
+Every key has a command-line equivalent, which `?` lists.
+
+## Everyday use
+
+| You want to… | Run | Or in Claude Code's chat |
+|---|---|---|
+| See whether it is on and saving anything | `agentdiet status` | |
+| Stop trimming for a while | `agentdiet pause` | `@diet pause` |
+| Start again | `agentdiet resume` | `@diet resume` |
+| Trim more or less | `agentdiet mode light` (or `balanced`, `ultra-lean`) | |
+| Read the last trimmed output in full | `agentdiet show last` | |
+| Read a specific one | `agentdiet show '#f5f26875'` (keep the quotes) | |
+| See one tool call untrimmed | | put `@diet:full` in your prompt |
+| Check the setup | `agentdiet doctor` | |
+| Stop using it with one assistant | `agentdiet disconnect cursor` | |
+
+```sh
+agentdiet status
+agentdiet show last --lines 1..40      # just a slice
+agentdiet mode                         # the current mode and what each one does
+```
+
+- **Pausing** keeps secret removal on: output passes through untrimmed but still scrubbed. It stays
+  paused until you resume, across restarts too.
+- **`@diet:full`** affects exactly the next tool call; the one after is trimmed again. Plain words such
+  as "the full report" never trigger it. Chat directives work in Claude Code only.
+- **Retrying** the exact same command twice in a row gives the full output on the retry.
+- **IDs** come from the `🥗 Diet` line. Always quote them in a shell: an unquoted `#` starts a comment.
+  Trimmed outputs are kept 7 days after their last use.
+
+## Diet Modes
+
+| | Light | Balanced (default) | Ultra-Lean |
+|---|---|---|---|
+| Trims outputs over (estimated tokens) | 1,500 | 600 | 250 |
+| Only if it saves at least | 40% | 20% | 10% |
+| Lines kept around each error or warning | 5 | 3 | 1 |
+| Last lines always kept | 20 | 10 | 5 |
+| Good for | the agent seeing the most | everyday work | the tightest context |
+
+If `status` warns that agents re-open trimmed output often, switch to a lighter mode.
+
+## Troubleshooting
+
+Start with `agentdiet doctor`: it names the problem and the fix. The common ones:
+
+| `doctor` says | What it means | Fix |
+|---|---|---|
+| `PATH ✗ broken … is not on PATH in this shell` | The shims are never reached | Add `export PATH="$HOME/.agentdiet/shims:$PATH"` to your shell rc and open a new terminal |
+| `PATH ⚠ … resolves to … before the shims` | Another directory comes first | Put the shims directory first on `PATH` |
+| `configured, not yet observed` | Connected, but no tool runs recorded in this workspace yet | Restart the assistant and run something; not a problem |
+| `configured binary … is missing` | AgentDiet was moved or deleted after `init` | Put it back, or run `agentdiet init --only <assistant>` from where it is now |
+| `Binary ⚠ … run …, a different build` | Your assistants use another copy of agentdiet than the one you ran | Nothing needed; run `init` from the copy you want them to use |
+| `… is not strict JSON (comments or trailing commas?)` | AgentDiet cannot safely edit that file | Fix the file, then `agentdiet init --only <assistant>` |
+| `skipped by init: … edited by hand` | Someone changed AgentDiet's block in that file | Fix or delete the block by hand |
+| `State ✗ broken … not valid state JSON` | `~/.agentdiet/state.json` is damaged | `rm ~/.agentdiet/state.json` (the counters start again) |
+
+Other hints:
+
+- If `show` says "no trimmed output … in the Vault", the ID is mistyped or older than 7 days.
+- Editors started from the macOS Dock may not see your shell's `PATH`; `doctor` checks the shell you run
+  it in.
+- If a terminal is ever left in a strange state (only possible after `kill -9`), run `reset`.
+
+## Assistants and what `init` changes
+
+| Assistant | What it gets | Files (user level; `--project` writes the repository's own) |
+|---|---|---|
+| Claude Code | hooks, the MCP server, an `EXPERIENCE.md` pointer | `~/.claude/settings.json`, `~/.claude.json`, `~/.claude/rules/agentdiet.md` |
+| Cursor | the MCP server | `~/.cursor/mcp.json` |
+| Windsurf | the MCP server | `~/.codeium/windsurf/mcp_config.json` (user level only) |
+| Gemini CLI | the MCP server | `~/.gemini/settings.json` |
+| Copilot (VS Code) | the MCP server | VS Code's user `mcp.json` |
+| Codex | the MCP server | `~/.codex/config.toml` |
+| Shims | wrappers for `git`, `cargo`, `pytest`, `npm`, `pnpm`, `yarn`, `go`, `make`, `ruff`, `docker`, `gh` | `~/.agentdiet/shims/` |
+
+- Only Claude Code has hooks today, so it gets the most trimming; the others use the MCP tools and the
+  shims.
+- The shims only trim commands an agent runs. Your own commands in a terminal, a pipe or a redirect run
+  the real program untouched.
+- Originals are backed up under `~/.agentdiet/backups/`, and shell rc files are never edited.
+
+```sh
+agentdiet disconnect cursor            # one assistant; its original config is restored
+agentdiet init --only cursor           # and back again
+agentdiet eject                        # everything; your original configs come back
+agentdiet eject --purge                # …and delete stored outputs, activity and counters
+```
+
+## Advanced
+
+```sh
+agentdiet top                          # live dashboard (refreshes every 2 s)
+agentdiet stats                        # savings and this workspace's activity
+agentdiet stats --json                 # the same numbers, stable keys, for scripts
+agentdiet scan                         # check .claude/, .cursor/, .mcp.json, SKILL.md, CLAUDE.md, AGENTS.md
+agentdiet reflect --dry-run            # tips learned from this workspace's past runs, for EXPERIENCE.md
+```
+
+- **`scan`** looks for hidden Unicode, secrets, prompt-injection phrases and dangerous shell commands. It
+  exits 0 when clean, 1 on findings and 2 when a path cannot be read. A clean result is not a proof of
+  safety.
+- **`reflect`** writes `EXPERIENCE.md` (at most 2 KB) from past runs, offline and without any AI model.
+  Every tip cites where it came from, and anything you write outside its marked block is kept.
+- **Workspace:** activity is recorded in the nearest directory with `.agentdiet/memory.db` or `.git`
+  (or `AGENTDIET_WORKSPACE`), so commands run in a subdirectory count for the whole project.
+- **Internal commands**, which assistants run and `--help` does not list: `agentdiet mcp` (the MCP
+  server `init` registers) and `agentdiet hook <event>` (Claude Code's hooks).
+
+### MCP tools
+
+`agentdiet mcp` is a stdio JSON-RPC 2.0 server with four tools:
+
+| Tool | Arguments | Does |
+|---|---|---|
+| `diet_exec` | `command` (argv array or one simple command), `cwd?` | Runs the command without a shell, through the same trimming; returns the trimmed output (long output of any command is cut to head, tail and problem lines), the `🥗 Diet` line and the exit status |
+| `diet_search` | `query`, `limit?` | Searches past outputs of this project; each hit carries its `#id` |
+| `diet_inspect` | `id`, `start_line?`, `end_line?` | Returns a stored output (secrets removed), or a slice of it |
+| `diet_reflect` | `dry_run?` | Runs `agentdiet reflect` and returns `EXPERIENCE.md` |
 
 ## Before / After
 
-These figures come from real runs on an Apple M1 (macOS), in Balanced mode, on 2026-10-17, at commit
-`1e72a5d`, through `diet_exec`, which uses the same engine as the hooks and shims:
+Real runs on an Apple M1 (macOS), Balanced mode, 2026-10-17, commit `1e72a5d`, through `diet_exec`
+(the same engine as the hooks and shims). *Bytes* compare the stored original (secrets removed) with
+what the agent received. *Tokens* are AgentDiet's own deterministic estimate (`SPEC.md` §3), not any
+provider's tokenizer.
 
-- *Bytes* compare the stored scrubbed original with what the agent received, stdout and stderr together.
-- *Tokens* are AgentDiet's own deterministic estimate (`SPEC.md` §3, "Estimated tokens"), not any
-  provider's tokenizer. Each row's saving equals the engine's own `tokens_saved` counter.
-
-| Output | Bytes raw → dieted | Est. tokens raw → dieted | Saved |
+| Output | Bytes before → after | Est. tokens before → after | Saved |
 |---|---|---|---|
 | `cargo test`, 400 passing tests | 11,872 → 843 | 5,047 → 309 | 94% |
 | `cargo build` from clean (AgentDiet's own dependency tree) | 4,058 → 508 | 1,579 → 194 | 88% |
 | `go test -v ./...`, 300 passing tests | 15,420 → 390 | 6,615 → 154 | 98% |
 | MCP tool result: JSON array of 200 uniform objects → TOON | 17,582 → 4,478 | 8,202 → 2,038 | 75% |
 
-Small or already-terse outputs are not trimmed (in Balanced mode, nothing under 600 estimated tokens),
-but they are still scrubbed.
+Small or already-terse outputs are left as they are (in Balanced mode, nothing under 600 estimated
+tokens), but secrets are still removed.
 
-## Quickstart
+## How it works
 
-AgentDiet's configs point at the binary by absolute path, so put it somewhere stable first:
-
-```sh
-cargo install --path . --locked        # or copy target/release/agentdiet onto your PATH
+```
+ agent ──tool call──▶ tool ──output──▶ ┌──────────────────────────────┐ ──trimmed──▶ agent
+                                       │ 1. Hooks and shims           │
+                                       │ 2. Diet Engine               │
+                                       │ 3. Vault + project memory    │
+                                       └──────────────────────────────┘
 ```
 
-Connect your assistants:
+1. **Hooks and shims** catch tool output.
+   - *Hooks:* Claude Code's `PostToolUse` hook hands each successful tool result to AgentDiet, which
+     returns a replacement of exactly the same shape. AgentDiet's own MCP tools are never re-processed.
+   - *Shims:* `~/.agentdiet/shims/{git,cargo,pytest,npm,…}` catch commands an agent runs, including
+     failing ones. They walk the parent process chain to tell an agent from a person, and only capture
+     output that goes straight back to the agent; a person gets the real program.
+2. **Diet Engine.** It removes secrets, then builds a shorter version:
+   - command-aware compression for cargo, pytest, go test, npm/pnpm/yarn, git, make, docker and ruff;
+   - TOON, a compact form of JSON, for what MCP tools and WebFetch return.
 
-```sh
-agentdiet init                         # interactive checklist of detected assistants
-agentdiet init --only claude,shims     # or pick targets: claude, cursor, windsurf, gemini, copilot, codex, shims
-agentdiet init --project --dry-run     # project-level configs; print the diff, write nothing
-```
+   The shorter version is used only if it is strictly smaller in bytes and in estimated tokens (the
+   `🥗 Diet` line included) and saves what the Diet Mode requires; otherwise the original (secrets
+   removed) passes. Error and warning lines are always kept verbatim, with their context.
+3. **Vault and project memory.**
+   - *Vault:* the full original (secrets removed) is written durably to `~/.agentdiet/cas/` before any
+     shorter version is sent. Entries expire 7 days after their last use.
+   - *Project memory:* a summary goes into the project's `.agentdiet/memory.db` (SQLite full-text
+     search), so agents can search past outputs.
 
-- `init` backs up every file before changing it (`~/.agentdiet/backups/`).
-- It is idempotent: running it again changes nothing.
-- It never edits your shell rc files. For the shims, add the line it prints:
-
-  ```sh
-  export PATH="$HOME/.agentdiet/shims:$PATH"
-  ```
-
-Day to day:
-
-```sh
-agentdiet                              # Control Center: status at a glance, one-key pause, mode, last output, assistants, checks, live dashboard
-agentdiet status                       # on or paused, Diet Mode, connected assistants, tokens saved, health
-agentdiet doctor                       # checks configs, binary paths, shims and PATH; prints the fix for each problem
-agentdiet pause                        # stays paused until resumed (Claude Code: or type "@diet pause" in chat)
-agentdiet resume                       # (Claude Code: or type "@diet resume" in chat)
-agentdiet mode                         # show the Diet Mode; `agentdiet mode light|balanced|ultra-lean` sets it
-agentdiet show last                    # the last trimmed output in full
-agentdiet show '#f5f26875'             # full stored output for a breadcrumb ID
-agentdiet show '#f5f26875' --lines 10..40
-agentdiet top                          # live dashboard: tokens saved, Vault, CAS dereference rate
-agentdiet scan                         # static scan of .claude/, .cursor/, .mcp.json, SKILL.md, CLAUDE.md, AGENTS.md
-agentdiet stats                        # counters plus this workspace's run log (shim / MCP / hook runs); --json
-agentdiet reflect                      # write EXPERIENCE.md: recipes and pitfalls learned from the run log (no LLM)
-agentdiet disconnect cursor            # remove AgentDiet from some assistants only (same as `eject --only cursor`)
-agentdiet eject                        # restore original configs, remove hooks and shims (--purge also deletes the Vault)
-```
-
-- Always quote an ID: an unquoted `#…` starts a shell comment.
-- `scan` flags hidden Unicode, secrets, prompt-injection phrases and dangerous shell commands. It
-  exits 0 when clean, 1 on findings, and 2 when a path can't be read.
-- Need one output in full? In Claude Code, put `@diet:full` (or `--diet-full`) in your prompt, and
-  the next tool call's output is passed through (still scrubbed); the call after it is trimmed again.
-  Plain words never do this: "the full report" or "raw data" is prose. Chat commands and the directive
-  come from Claude Code's prompt hook; they don't work in other assistants.
-- Memory lives in the workspace root: the nearest directory with `.agentdiet/memory.db` or `.git`
-  (or `AGENTDIET_WORKSPACE`), so commands run in a subdirectory land in the same place.
-- `agentdiet reflect` keeps `EXPERIENCE.md` at most 2 KB, cites a Vault ID or time for every lesson,
-  and keeps anything you write outside its marker block. `init` adds a one-line pointer to it in
-  `.claude/rules/agentdiet.md`.
-- Running the exact same command twice in a row expands it on the retry.
-
-### MCP tools
-
-`agentdiet mcp` is a stdio JSON-RPC 2.0 server, which `init` registers for every assistant (assistants run it; it is hidden from `--help`, as is `agentdiet hook <event>`, which the hooks call). It
-offers four tools:
-
-| Tool | Arguments | Does |
-|---|---|---|
-| `diet_exec` | `command` (argv array or one simple command), `cwd?` | Runs the command without a shell, through the Diet Engine; returns the trimmed output (long output of any command is cut to head, tail and problem lines), a breadcrumb and the exit status |
-| `diet_search` | `query`, `limit?` | BM25 search over the project's memory; each hit carries its `#id` |
-| `diet_inspect` | `id`, `start_line?`, `end_line?` | Returns the stored (scrubbed) output, or a slice of it |
-| `diet_reflect` | `dry_run?` | Runs `agentdiet reflect` and returns `EXPERIENCE.md` |
-
-### Diet Modes
-
-| | Light | Balanced (default) | Ultra-Lean |
-|---|---|---|---|
-| Minimum size before trimming (est. tokens) | 1500 | 600 | 250 |
-| Required saving | ≥ 40% | ≥ 20% | ≥ 10% |
-| Context lines kept around each error/warning | 5 | 3 | 1 |
-| Last lines always kept | 20 | 10 | 5 |
+`SPEC.md` is the authoritative description of the behaviour.
 
 ## Build from source
 
@@ -184,24 +294,23 @@ The benchmarks are opt-in: `cargo test --release --test perf -- --ignored --noca
 This is v0.1.0, and some things are not done yet. `SPEC.md` §7–§8 has the details and the measurements.
 
 - **Performance budgets are not met yet.** All three were measured on an Apple M1:
-  - Shim passthrough adds about 3.7 ms against a < 0.2 ms budget; this needs a shim redesign.
+  - The shims add about 2.7–3.9 ms per command (it varies by session) against a < 0.2 ms budget; this
+    needs a shim redesign.
   - The engine's pure transform is up to about 29 ms on 256 KiB inputs, against < 10 ms.
   - A full engine run on 64 KiB, including the durable Vault write, takes about 22–26 ms. Most of
     that is macOS `F_FULLFSYNC`, and durability is never traded for speed.
-- **Live checks so far: Claude Code 2.1.302 only.** That covers the hooks, the MCP tools, and a
-  shimmed `cargo test`. The other assistants (Cursor, Windsurf, Gemini CLI, Copilot, Codex) get the
-  MCP server but no hooks.
-  - The shims diet only commands that an agent runs without a terminal.
-  - A command run in an integrated terminal takes the transparent path.
-  - None of this has been checked live outside Claude Code.
-- **Failing commands** are trimmed only through the shims. Claude Code's hook can't replace the
-  result of a failed Bash call.
+- **Live checks so far: Claude Code only.** That covers the hooks, the MCP tools, and a shimmed
+  `cargo test`. The other assistants get the MCP server but no hooks, and have not been checked live.
+  - The shims trim only commands that an agent runs without a terminal; a command run in an
+    integrated terminal runs untouched.
+- **Failing commands** are trimmed only through the shims: Claude Code's hook cannot replace the result
+  of a failed Bash call.
 - **File reads are scrubbed, never folded.** Signature folding exists in the engine but no entry
-  point uses it, until it is settled how an agent edits a folded file.
-- **TOON** applies only to JSON from MCP tools and WebFetch, never to shell stdout, and only for a
+  point uses it yet.
+- **TOON** applies only to JSON from MCP tools and WebFetch, never to shell output, and only for a
   subset of the format. Unsupported shapes are left unchanged.
 - **Secret detection is best effort.** It is pattern based, and a clean result is not a guarantee.
-  Output that takes the shim's transparent (human) path, and binary output, are not scrubbed.
+  Output that takes the shims' untouched (person) path, and binary output, are not scrubbed.
 
 ## License
 

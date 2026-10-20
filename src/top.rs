@@ -10,17 +10,17 @@ use anyhow::Context;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
-use ratatui::style::Modifier;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
-use crate::Paths;
 use crate::cas::{Cas, CasStats};
 use crate::init;
 use crate::memory::MemoryDb;
-use crate::state::{self, DEREFERENCE_WARN_RATE, Mode, State, Status};
+use crate::state::{self, Mode, State, Status};
 use crate::tui::{self, Ctx};
 use crate::ui::Level;
+use crate::{Paths, words};
 
 /// The dashboard reloads this often without a key press.
 pub const REFRESH: Duration = Duration::from_secs(2);
@@ -29,8 +29,6 @@ const RECENT_ROWS: usize = 20;
 /// Printed (as an error) when there is no terminal to draw on.
 pub const NO_TTY: &str =
     "`agentdiet top` needs an interactive terminal (stdin and stdout must be a TTY).";
-const KEYS: &str = "q/Esc quit · p pause/resume · m cycle mode · r refresh";
-const WARNING: &str = "⚠ high: agents re-read trimmed output; consider a lighter mode";
 
 /// One row of the recent table.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +54,8 @@ pub struct Snapshot {
     /// Why `state.json` could not be used (corrupt or unreadable), shown in the footer instead of
     /// being printed over the screen.
     pub state_warning: Option<String>,
+    /// Opened from the Control Center: `q` goes back there rather than quitting.
+    pub from_center: bool,
 }
 
 impl Snapshot {
@@ -69,6 +69,7 @@ impl Snapshot {
         Self {
             state,
             state_warning,
+            from_center: false,
             vault: cas.stats().unwrap_or_default(),
             assistants: init::installed(paths)
                 .into_iter()
@@ -104,23 +105,6 @@ fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// `12345` → `12,345`.
-fn thousands(n: u64) -> String {
-    let digits = n.to_string();
-    let mut out = String::new();
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
-}
-
-fn kib(bytes: u64) -> String {
-    format!("{:.1} KiB", bytes as f64 / 1024.0)
-}
-
 /// The next mode `m` switches to.
 pub fn next_mode(mode: Mode) -> Mode {
     match mode {
@@ -147,10 +131,7 @@ pub fn draw(frame: &mut Frame<'_>, snap: &Snapshot, ctx: Ctx) {
     };
 
     let s = &snap.state;
-    let (status, level) = match s.status {
-        Status::Active => ("● ACTIVE", Level::Ok),
-        Status::Paused => ("■ PAUSED", Level::Warning),
-    };
+    let (status, level) = words::status_word(s.status);
     let assistants = if snap.assistants.is_empty() {
         "none".to_string()
     } else {
@@ -168,48 +149,41 @@ pub fn draw(frame: &mut Frame<'_>, snap: &Snapshot, ctx: Ctx) {
         header,
     );
 
-    let last = s
-        .last_trimmed_id
-        .as_deref()
-        .map_or_else(|| "none".to_string(), |id| format!("#{id}"));
-    let mut lines = vec![
-        Line::from(format!(
-            "Tokens saved: {}   Trimmed outputs: {}",
-            thousands(s.tokens_saved),
-            thousands(s.trimmed_outputs)
-        )),
-        Line::from(format!(
-            "Raw tokens passed while paused: {}   Last trimmed: {last}",
-            thousands(s.raw_tokens_passed_while_paused)
-        )),
-        Line::from(format!(
-            "Vault: {} live ({}), {} expired",
-            thousands(snap.vault.live as u64),
-            kib(snap.vault.bytes),
-            thousands(snap.vault.expired as u64)
-        )),
-    ];
-    match s.dereference_rate() {
-        None => lines.push(Line::from(
-            "CAS dereference rate: n/a (nothing trimmed yet)",
-        )),
-        Some(rate) => {
-            let text = format!(
-                "CAS dereference rate: {:.1}% ({}/{})",
-                rate * 100.0,
-                thousands(s.cas_dereferences),
-                thousands(s.trimmed_outputs)
-            );
-            if rate > DEREFERENCE_WARN_RATE {
-                let warn = ctx.level(Level::Broken).add_modifier(Modifier::BOLD);
-                lines.push(Line::styled(text, warn));
-                lines.push(ctx.line(WARNING, ctx.level(Level::Warning)));
-            } else {
-                lines.push(Line::from(text));
-            }
-        }
+    let none_yet = || "none yet".to_string();
+    let mut lines = vec![if s.trimmed_outputs == 0 {
+        Line::from("Savings: nothing trimmed yet")
+    } else {
+        ctx.line(
+            &format!(
+                "Savings: {} in {}",
+                words::tokens_saved(s),
+                words::trimmed_outputs(s)
+            ),
+            Style::new(),
+        )
+    }];
+    lines.push(Line::from(format!(
+        "Re-opened by agents: {}",
+        words::reopens(s).unwrap_or_else(none_yet)
+    )));
+    if words::reopens_high(s) {
+        lines.push(ctx.line(words::REOPEN_WARNING, ctx.level(Level::Warning)));
     }
-    frame.render_widget(Paragraph::new(lines).block(block(" Metrics ")), metrics);
+    lines.push(ctx.line(
+        &format!("Passed while paused: {}", words::passed_while_paused(s)),
+        Style::new(),
+    ));
+    lines.push(Line::from(format!(
+        "Last trimmed: {}   Vault: {}",
+        s.last_trimmed_id
+            .as_deref()
+            .map_or_else(none_yet, |id| format!("#{id}")),
+        words::vault(&snap.vault)
+    )));
+    frame.render_widget(
+        Paragraph::new(lines).block(block(" All projects (estimated) ")),
+        metrics,
+    );
 
     let head = Row::new(["#id", "kind", "command / path", "summary"]).style(ctx.bold());
     let rows = snap.recent.iter().map(|r| {
@@ -230,9 +204,9 @@ pub fn draw(frame: &mut Frame<'_>, snap: &Snapshot, ctx: Ctx) {
         Constraint::Fill(1),
     ];
     let title = if snap.recent.is_empty() {
-        " Recent trimmed outputs & memory (none yet) "
+        " Recent activity (this workspace): none yet "
     } else {
-        " Recent trimmed outputs & memory "
+        " Recent activity (this workspace) "
     };
     frame.render_widget(
         Table::new(rows, widths).header(head).block(block(title)),
@@ -247,8 +221,16 @@ pub fn draw(frame: &mut Frame<'_>, snap: &Snapshot, ctx: Ctx) {
         ),
         (None, None) => Line::default(),
     };
+    let keys = format!(
+        "p {}  m next mode  r reload  q {}",
+        match s.status {
+            Status::Active => "pause",
+            Status::Paused => "resume",
+        },
+        if snap.from_center { "back" } else { "quit" }
+    );
     frame.render_widget(
-        Paragraph::new(vec![note, ctx.line(KEYS, ctx.dim())]),
+        Paragraph::new(vec![note, ctx.line(&keys, ctx.dim())]),
         footer,
     );
 }
@@ -270,7 +252,7 @@ pub fn run(paths: &Paths) -> anyhow::Result<()> {
         anyhow::bail!(NO_TTY);
     }
     let (mut terminal, restore) = tui::enter()?;
-    match run_in(&mut terminal, paths, Ctx::from_env())? {
+    match run_in(&mut terminal, paths, Ctx::from_env(), false)? {
         Ended::Signal(sig) => tui::exit_for_signal(sig, restore),
         Ended::Back | Ended::Quit => Ok(()),
     }
@@ -282,8 +264,13 @@ pub fn run_in(
     terminal: &mut ratatui::DefaultTerminal,
     paths: &Paths,
     ctx: Ctx,
+    from_center: bool,
 ) -> anyhow::Result<Ended> {
-    let mut snap = Snapshot::load(paths, SystemTime::now());
+    let load = || Snapshot {
+        from_center,
+        ..Snapshot::load(paths, SystemTime::now())
+    };
+    let mut snap = load();
     let mut loaded = Instant::now();
     loop {
         if let Some(sig) = tui::pending_signal() {
@@ -325,7 +312,7 @@ pub fn run_in(
                         reload = true;
                     }
                     KeyCode::Char('r') => {
-                        snap.message = Some("Refreshed.".to_string());
+                        snap.message = Some("Reloaded.".to_string());
                         reload = true;
                     }
                     _ => {}
@@ -336,7 +323,7 @@ pub fn run_in(
         // every tick.
         if reload || loaded.elapsed() >= REFRESH {
             let message = snap.message.take();
-            snap = Snapshot::load(paths, SystemTime::now());
+            snap = load();
             snap.message = message;
             loaded = Instant::now();
         }
@@ -410,6 +397,7 @@ mod tests {
             ],
             message: None,
             state_warning: None,
+            from_center: false,
         }
     }
 
@@ -442,11 +430,12 @@ mod tests {
         // Only our own text is checked: tool output in the table could hold anything.
         assert!(text.is_ascii(), "{text}");
         assert!(
-            text.contains("+ AgentDiet ---") && text.contains("# PAUSED"),
+            text.contains("+ AgentDiet ---") && text.contains("# Paused"),
             "{text}"
         );
         assert!(text.contains("! high: agents re-read"), "{text}");
-        assert!(text.contains("q/Esc quit - p pause/resume"), "{text}");
+        assert!(text.contains("p resume  m next mode"), "{text}");
+        assert!(text.contains("~123,456 tokens saved"), "{text}");
     }
 
     #[test]
@@ -501,21 +490,19 @@ mod tests {
     fn renders_status_metrics_and_recent_ids_in_80x24() {
         let text = screen(&sample(5, 20));
         for expected in [
-            "PAUSED",
+            "■ Paused",
             "Mode: Ultra-Lean",
             "Claude Code, Cursor",
-            "Tokens saved: 123,456",
-            "Trimmed outputs: 20",
-            "Raw tokens passed while paused: 4,321",
-            "Last trimmed: #4f9a1b2c",
-            "Vault: 12 live (2.0 KiB), 3 expired",
-            "CAS dereference rate: 25.0% (5/20)",
-            "⚠ high",
+            "All projects (estimated)",
+            "Savings: ≈123,456 tokens saved in 20 trimmed outputs",
+            "Re-opened by agents: 5 re-opens for 20 trimmed outputs (25%)",
+            "⚠ high: agents re-read trimmed output; consider a lighter mode",
+            "Passed while paused: ≈4,321 tokens passed untrimmed (still scrubbed)",
+            "Last trimmed: #4f9a1b2c   Vault: 12 entries, 2.0 KiB (3 expired)",
+            "Recent activity (this workspace)",
             "#4f9a1b2c  command  cargo test",
-            "cargo test",
             "src/main.rs",
-            "q/Esc quit",
-            "m cycle mode",
+            "p resume  m next mode  r reload  q quit",
         ] {
             assert!(text.contains(expected), "missing {expected:?} in\n{text}");
         }
@@ -525,14 +512,21 @@ mod tests {
     fn the_warning_needs_a_rate_strictly_above_20_percent() {
         let text = screen(&sample(3, 20));
         assert!(
-            text.contains("CAS dereference rate: 15.0% (3/20)"),
+            text.contains("Re-opened by agents: 3 re-opens for 20 trimmed outputs (15%)"),
             "{text}"
         );
         assert!(!text.contains("⚠"), "{text}");
         let text = screen(&sample(4, 20));
-        assert!(text.contains("20.0%") && !text.contains("⚠"), "{text}");
+        assert!(text.contains("(20%)") && !text.contains("⚠"), "{text}");
         let text = screen(&sample(0, 0));
-        assert!(text.contains("CAS dereference rate: n/a"), "{text}");
+        assert!(text.contains("Re-opened by agents: none yet"), "{text}");
+        assert!(text.contains("Savings: nothing trimmed yet"), "{text}");
+        // Opened from the Control Center, `q` goes back.
+        let back = screen(&Snapshot {
+            from_center: true,
+            ..sample(0, 0)
+        });
+        assert!(back.contains("q back"), "{back}");
     }
 
     #[test]
@@ -543,11 +537,11 @@ mod tests {
         };
         let text = screen(&snap);
         assert!(
-            text.contains("ACTIVE") && text.contains("Assistants: none"),
+            text.contains("● Active") && text.contains("Assistants: none"),
             "{text}"
         );
         assert!(
-            text.contains("(none yet)") && text.contains("state is busy"),
+            text.contains("this workspace): none yet") && text.contains("state is busy"),
             "{text}"
         );
     }
@@ -557,8 +551,6 @@ mod tests {
         assert_eq!(next_mode(Mode::Light), Mode::Balanced);
         assert_eq!(next_mode(Mode::Balanced), Mode::UltraLean);
         assert_eq!(next_mode(Mode::UltraLean), Mode::Light);
-        assert_eq!(thousands(0), "0");
-        assert_eq!(thousands(1_234_567), "1,234,567");
     }
 
     #[test]
@@ -600,6 +592,9 @@ mod tests {
         assert_eq!(snap.recent[0].id.as_deref(), Some(put.short_id.as_str()));
         let text = screen(&snap);
         assert!(text.contains(&format!("#{}", put.short_id)), "{text}");
-        assert!(text.contains("25.0% (1/4)") && text.contains("⚠"), "{text}");
+        assert!(
+            text.contains("1 re-open for 4 trimmed outputs (25%)") && text.contains("⚠ high"),
+            "{text}"
+        );
     }
 }
