@@ -15,7 +15,13 @@ const BIN: &str = env!("CARGO_BIN_EXE_agentdiet");
 
 fn agentdiet(env: &Env) -> Command {
     let mut cmd = Command::new(BIN);
-    cmd.env("HOME", &env.paths.home)
+    // Glyph assertions need a UTF-8 locale whatever the developer's shell says.
+    cmd.env_remove("LC_ALL")
+        .env_remove("LC_CTYPE")
+        .env_remove("NO_COLOR")
+        .env("LANG", "en_US.UTF-8")
+        .env("TERM", "xterm-256color")
+        .env("HOME", &env.paths.home)
         .env("XDG_CONFIG_HOME", &env.paths.config_dir)
         .env("USERPROFILE", &env.paths.home)
         .current_dir(&env.paths.project_root)
@@ -235,7 +241,7 @@ fn init_without_flags_and_without_a_terminal_explains_itself() {
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("--all") && err.contains("--dry-run"), "{err}");
-    assert!(err.contains("detected here: shims"), "{err}");
+    assert!(err.contains("agentdiet init --only shims"), "{err}");
     assert!(!env.paths.agentdiet_home.exists());
 }
 
@@ -493,7 +499,7 @@ fn status_and_doctor_never_write_to_an_existing_vault_or_memory_db() {
     run_status(&env);
     assert_eq!(env.snapshot(), before, "no byte, WAL or lock file changed");
     let text = stdout(&report);
-    assert!(row(&text, "Claude Code").contains("✓ working"), "{text}");
+    assert!(row(&text, "Claude Code").contains("✓ verified"), "{text}");
     assert!(
         row(&text, "Claude Code").contains("1 hook run recorded in this workspace, the last "),
         "{text}"
@@ -684,8 +690,8 @@ fn show_last_prints_the_last_trimmed_output_byte_for_byte() {
     assert!(bare.stdout.is_empty());
     assert_eq!(
         state(&env)["cas_dereferences"],
-        4,
-        "every successful show counts"
+        1,
+        "only the agent's `show '#id'` counts as a re-open; a person's `show last` does not"
     );
 }
 
@@ -709,4 +715,292 @@ fn people_facing_output_has_no_escape_codes_when_piped() {
         assert!(!out.stdout.contains(&0x1b), "{}", stdout(&out));
         assert!(!out.stderr.contains(&0x1b));
     }
+}
+
+#[test]
+fn a_non_utf8_locale_gets_ascii_symbols_and_the_same_words() {
+    let env = Env::with_existing_configs();
+    let ascii = |args: &[&str]| {
+        agentdiet(&env)
+            .env("LANG", "C")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let out = ascii(&["init", "--all", "--dry-run"]);
+    let text = stdout(&out);
+    assert!(text.contains("+ would connect"), "{text}");
+    assert!(
+        text.is_ascii() || text.chars().filter(|c| !c.is_ascii()).all(|c| c == 'é'),
+        "{text}"
+    );
+    init_everything(&env);
+    let doctor = stdout(&ascii(&["doctor"]));
+    assert!(!doctor.contains(['✓', '⚠', '✗', '→', '·']), "{doctor}");
+    assert!(doctor.contains("+ ok"), "{doctor}");
+    let mode = stdout(&ascii(&["mode"]));
+    assert!(
+        mode.contains("* balanced") && mode.contains("o light"),
+        "{mode}"
+    );
+}
+
+// ---- P1: disconnect, eject --only, verification, help ---------------------------------------------
+
+fn files_except(env: &Env, name: &str) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    env.snapshot()
+        .into_iter()
+        .filter(|(p, _)| !p.starts_with("home/.agentdiet") && !p.ends_with(name))
+        .collect()
+}
+
+#[test]
+fn disconnect_removes_only_the_chosen_assistants() {
+    let env = Env::with_existing_configs();
+    init_everything(&env);
+    let cursor = env.paths.home.join(".cursor/mcp.json");
+    let others_before = files_except(&env, "mcp.json");
+
+    let out = run(&env, &["disconnect", "cursor"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = stdout(&out);
+    assert!(row(&text, "Cursor").contains("✓ disconnected"), "{text}");
+    assert!(
+        row(&text, "Cursor").contains("restored ~/.cursor/mcp.json"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Restart Cursor so it stops loading AgentDiet."),
+        "{text}"
+    );
+    assert!(text.contains("Other assistants are unchanged."), "{text}");
+    assert_eq!(
+        env.read(&cursor),
+        common::CURSOR_MCP,
+        "original restored byte for byte"
+    );
+    // Everything else is untouched (the other mcp.json files belong to other assistants).
+    for (path, bytes) in others_before {
+        assert_eq!(
+            env.snapshot().get(&path),
+            Some(&bytes),
+            "{}",
+            path.display()
+        );
+    }
+    let doctor = stdout(&doctor(&env));
+    assert!(row(&doctor, "Cursor").contains("not connected"), "{doctor}");
+    assert!(
+        row(&doctor, "Claude Code").contains("✓ configured"),
+        "{doctor}"
+    );
+
+    // Again: nothing left to remove, and still a success.
+    let again = run(&env, &["disconnect", "cursor"]);
+    assert!(again.status.success());
+    assert!(row(&stdout(&again), "Cursor").contains("nothing to remove"));
+}
+
+#[test]
+fn disconnect_takes_several_targets_and_the_shims() {
+    let env = Env::with_existing_configs();
+    init_everything(&env);
+    let out = run(&env, &["disconnect", "codex,gemini", "shims"]);
+    assert!(out.status.success());
+    let text = stdout(&out);
+    for label in ["Codex", "Gemini CLI", "Shims"] {
+        assert!(row(&text, label).contains("✓ disconnected"), "{text}");
+    }
+    assert!(row(&text, "Shims").contains("removed 11 shims"), "{text}");
+    assert_eq!(
+        env.read(&env.paths.home.join(".codex/config.toml")),
+        common::CODEX_CONFIG
+    );
+    assert!(!env.paths.shims_dir().exists());
+    // Claude Code and Cursor are still connected.
+    let claude = env.read(&env.paths.home.join(".claude/settings.json"));
+    assert!(claude.contains("agentdiet"));
+}
+
+#[test]
+fn disconnect_then_reinit_then_full_eject_restores_the_pristine_files() {
+    let env = Env::with_existing_configs();
+    let pristine = env.snapshot();
+    init_everything(&env);
+    assert!(
+        run(&env, &["disconnect", "cursor", "claude"])
+            .status
+            .success()
+    );
+    init_everything(&env);
+    assert!(run(&env, &["eject"]).status.success());
+    let mut restored = env.snapshot();
+    restored.retain(|p, _| !p.starts_with("home/.agentdiet"));
+    let mut expected = pristine;
+    expected.retain(|p, _| !p.starts_with("home/.agentdiet"));
+    assert_eq!(restored, expected);
+}
+
+#[test]
+fn eject_only_is_disconnect_and_refuses_purge() {
+    let env = Env::with_existing_configs();
+    init_everything(&env);
+    let out = run(&env, &["uninstall", "--only", "gemini"]);
+    assert!(out.status.success());
+    assert!(row(&stdout(&out), "Gemini CLI").contains("✓ disconnected"));
+    assert_eq!(
+        env.read(&env.paths.home.join(".gemini/settings.json")),
+        common::GEMINI_SETTINGS
+    );
+    assert!(
+        env.read(&env.paths.home.join(".cursor/mcp.json"))
+            .contains("agentdiet")
+    );
+
+    let before = env.snapshot();
+    let refused = run(&env, &["eject", "--only", "cursor", "--purge"]);
+    assert_eq!(refused.status.code(), Some(2));
+    assert_eq!(env.snapshot(), before, "a refused command changes nothing");
+    assert_eq!(
+        run(&env, &["disconnect"]).status.code(),
+        Some(2),
+        "needs a target"
+    );
+    assert_eq!(run(&env, &["disconnect", "nope"]).status.code(), Some(2));
+}
+
+#[test]
+fn a_full_eject_names_each_target_it_touched() {
+    let env = Env::with_existing_configs();
+    init_everything(&env);
+    let text = stdout(&run(&env, &["eject"]));
+    for label in [
+        "Claude Code",
+        "Cursor",
+        "Windsurf",
+        "Gemini CLI",
+        "Codex",
+        "Shims",
+    ] {
+        assert!(row(&text, label).contains("✓ disconnected"), "{text}");
+    }
+    assert!(!text.contains("Other assistants are unchanged."), "{text}");
+    assert!(
+        text.contains("Backups are kept in ~/.agentdiet/backups"),
+        "{text}"
+    );
+    assert!(stdout(&run(&env, &["eject"])).contains("Nothing to eject"));
+}
+
+#[test]
+fn help_hides_the_internal_commands_but_they_still_work() {
+    let env = Env::empty();
+    let help = stdout(&run(&env, &["--help"]));
+    for shown in [
+        "status",
+        "doctor",
+        "mode",
+        "show",
+        "init",
+        "disconnect",
+        "eject",
+        "top",
+        "scan",
+    ] {
+        assert!(
+            help.contains(&format!("\n  {shown} ")),
+            "{shown} missing:\n{help}"
+        );
+    }
+    assert!(!help.contains("\n  mcp "), "{help}");
+    assert!(!help.contains("\n  hook "), "{help}");
+    // The README documents them; the server still answers.
+    assert!(run(&env, &["mcp", "--help"]).status.success());
+}
+
+#[test]
+fn init_verifies_what_it_connected_without_calling_config_proof() {
+    let env = Env::with_existing_configs();
+    let out = stdout(&run(&env, &["init", "--only", "claude,cursor,shims"]));
+    let (targets, after) = out.split_once("Verification\n").expect(&out);
+    assert!(targets.contains("✓ connected"));
+    let block = after.split("\nNext:").next().unwrap();
+    assert!(
+        row(block, "Claude Code").contains("✓ configured, not yet observed"),
+        "{out}"
+    );
+    assert!(
+        row(block, "Cursor").contains("✓ configured") && !row(block, "Cursor").contains("not yet")
+    );
+    assert!(
+        row(block, "Shims").contains("✓ configured, not yet observed"),
+        "{out}"
+    );
+    assert!(
+        !out.contains("verified"),
+        "configuration alone is never verified:\n{out}"
+    );
+    // The PATH problem is in Next once, not in Verification as well.
+    assert_eq!(out.matches("export PATH=").count(), 1, "{out}");
+    assert!(!block.contains("PATH"), "{block}");
+}
+
+#[test]
+fn init_does_not_re_explain_a_skipped_target_in_the_verification() {
+    let env = Env::empty();
+    env.write(env.paths.home.join(".cursor/mcp.json"), "{ // jsonc\n}");
+    let out = stdout(&run(&env, &["init", "--only", "cursor,gemini"]));
+    assert!(row(&out, "Cursor").contains("⚠ skipped"), "{out}");
+    let block = out.split("Verification\n").nth(1).expect(&out);
+    assert!(row(block, "Gemini CLI").contains("✓ configured"));
+    assert!(!block.contains("Cursor"), "already explained above:\n{out}");
+    // A dry run changes nothing, so there is nothing to verify.
+    let dry = stdout(&run(&env, &["init", "--all", "--dry-run"]));
+    assert!(!dry.contains("Verification"), "{dry}");
+}
+
+#[test]
+fn bare_agentdiet_without_a_terminal_prints_the_full_status() {
+    let env = Env::empty();
+    let out = stdout(&run(&env, &[]));
+    assert!(
+        out.starts_with("AgentDiet is active · Balanced mode\n"),
+        "{out}"
+    );
+    assert!(row(&out, "Assistants").contains("none connected"), "{out}");
+    assert!(row(&out, "Health").contains("✗ 1 problem"), "{out}");
+    assert!(
+        out.contains("Next: `agentdiet init --dry-run` previews"),
+        "{out}"
+    );
+    assert!(
+        !out.contains("agentdiet status` for details"),
+        "the status is already shown"
+    );
+    assert!(
+        !env.paths.agentdiet_home.exists(),
+        "reading creates nothing"
+    );
+}
+
+#[test]
+fn a_corrupt_state_file_is_not_repaired_by_the_control_center_path() {
+    let env = Env::empty();
+    env.write(env.paths.state_file(), "{ not json");
+    let before = env.snapshot();
+    let out = run(&env, &[]);
+    assert!(out.status.success());
+    assert!(
+        stdout(&out).contains("AgentDiet is active"),
+        "defaults, fail open"
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("corrupt"),
+        "no stray warning where a screen would be"
+    );
+    assert_eq!(env.snapshot(), before);
 }

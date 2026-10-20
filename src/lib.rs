@@ -10,6 +10,7 @@
 use std::path::{Path, PathBuf};
 
 pub mod cas;
+pub mod center;
 pub mod cli;
 pub mod compress;
 pub mod control;
@@ -31,6 +32,7 @@ pub mod stats;
 pub mod status;
 pub mod toon;
 pub mod top;
+pub mod tui;
 pub mod ui;
 
 /// Every filesystem location the library touches, injected by the caller.

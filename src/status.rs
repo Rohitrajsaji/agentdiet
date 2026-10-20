@@ -17,9 +17,42 @@ use crate::state::{DEREFERENCE_WARN_RATE, State, Status};
 use crate::ui::{Level, Painter, and_list, plural, thousands, tilde};
 use crate::{Paths, fsutil};
 
+/// What a doctor line is about, so a view can place rows without reading their label text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckKind {
+    Binary,
+    State,
+    Assistant { target: Target, project: bool },
+    Others,
+    Shims,
+    Path,
+    Vault,
+    Memory,
+    Setup,
+}
+
+/// How much evidence a connected integration has (SPEC §3b "Doctor"): configuration alone is never
+/// "verified".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Observed {
+    /// Not an integration, or it has a problem that comes first.
+    #[default]
+    NotApplicable,
+    /// Runs of it were recorded in this workspace.
+    Verified,
+    /// Configured, and AgentDiet could observe it, but has not yet.
+    NotYet,
+    /// Configured; AgentDiet cannot attribute runs to this assistant (MCP only).
+    NotObservable,
+}
+
 /// One doctor line: `<label>  <symbol> <word>  <detail>`, then `→ <fix>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Check {
+    pub kind: CheckKind,
+    /// The missing agentdiet binary this row is broken by, so rows with one cause can share one fix.
+    pub(crate) cause: Option<PathBuf>,
+    pub observed: Observed,
     pub label: String,
     pub level: Level,
     pub word: &'static str,
@@ -30,12 +63,25 @@ pub struct Check {
 impl Check {
     fn new(label: impl Into<String>, level: Level, word: &'static str, detail: String) -> Self {
         Self {
+            kind: CheckKind::Setup,
+            cause: None,
+            observed: Observed::NotApplicable,
             label: label.into(),
             level,
             word,
             detail,
             fix: None,
         }
+    }
+
+    fn kind(mut self, kind: CheckKind) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    fn observed(mut self, observed: Observed) -> Self {
+        self.observed = observed;
+        self
     }
 
     fn fix(mut self, fix: impl Into<String>) -> Self {
@@ -163,80 +209,197 @@ fn runs_seen(n: u64, one: &str, many: &str, last: Option<Duration>) -> String {
 
 /// Run every doctor check. `path_var` is the `PATH` to check the shims against.
 pub fn doctor(paths: &Paths, path_var: &OsStr) -> Report {
-    let mut checks = vec![Check::new(
-        "Binary",
-        Level::Ok,
-        "ok",
-        format!(
-            "{} ({})",
-            tilde(&paths.home, &paths.exe),
-            env!("CARGO_PKG_VERSION")
-        ),
-    )];
-    checks.push(state_check(paths));
+    run(paths, path_var, None)
+}
 
+/// The checks for just `targets` (at project scope when `project`), plus `PATH` when the shims are
+/// among them: what `init` verifies right after connecting (SPEC §2.2). Cheap: it reads only those
+/// targets' files and memory.db.
+pub fn doctor_for(paths: &Paths, path_var: &OsStr, targets: &[Target], project: bool) -> Report {
+    run(paths, path_var, Some((targets, project)))
+}
+
+fn run(paths: &Paths, path_var: &OsStr, only: Option<(&[Target], bool)>) -> Report {
     let (memory_check, activity) = memory_check(paths);
-    let mut connected = Vec::new();
-    let mut not_installed = Vec::new();
-
-    let project_scope = paths.project_root != paths.home;
     let detected = targets::detect(paths, false);
+    let project_scope = paths.project_root != paths.home;
+
+    // Pass 1: classify every target.
+    let mut assessed: Vec<(Target, bool, Assessment)> = Vec::new();
     for target in Target::ALL {
-        if target == Target::Shims {
+        if target == Target::Shims || only.is_some_and(|(list, _)| !list.contains(&target)) {
             continue;
         }
-        let user = assess(paths, target, false);
-        match user.verdict {
-            None if detected.contains(&target) => checks.push(not_connected(target, user.note)),
-            None => not_installed.push(target.label()),
-            Some(_) => {
-                connected.push(target.label());
-                checks.push(user.into_check(paths, target, target.label().into(), &activity));
+        match only {
+            Some((_, project)) => assessed.push((target, project, assess(paths, target, project))),
+            None => {
+                assessed.push((target, false, assess(paths, target, false)));
+                if project_scope {
+                    let project = assess(paths, target, true);
+                    if project.verdict.is_some() {
+                        assessed.push((target, true, project));
+                    }
+                }
             }
         }
-        if project_scope {
-            let project = assess(paths, target, true);
-            if project.verdict.is_some() {
+    }
+
+    // One "different build" warning on the Binary row when every such integration agrees.
+    let mut other_rows = assessed
+        .iter()
+        .filter(|(.., a)| matches!(a.verdict, Some(FileState::OtherExe(_))))
+        .count();
+    let mut others: Vec<PathBuf> = assessed
+        .iter()
+        .filter_map(|(.., a)| match &a.verdict {
+            Some(FileState::OtherExe(exe)) => Some(exe.clone()),
+            _ => None,
+        })
+        .collect();
+    if only.is_none() {
+        let shim_others: Vec<PathBuf> = shims::inspect(paths)
+            .into_iter()
+            .filter_map(|(_, l)| match l {
+                Link::Other(exe) => Some(exe),
+                _ => None,
+            })
+            .collect();
+        if !shim_others.is_empty() {
+            other_rows += 1;
+            others.extend(shim_others);
+        }
+    }
+    others.sort();
+    others.dedup();
+    let collapse =
+        (only.is_none() && others.len() == 1 && other_rows >= 2).then(|| others[0].clone());
+
+    // Pass 2: the lines.
+    let mut checks = Vec::new();
+    let mut connected = Vec::new();
+    let mut not_installed = Vec::new();
+    for (target, project, assessment) in assessed {
+        let kind = CheckKind::Assistant { target, project };
+        match assessment.verdict {
+            None if only.is_some() || detected.contains(&target) => {
+                checks.push(not_connected(target, assessment.note).kind(kind));
+            }
+            None => not_installed.push(target.label()),
+            Some(_) => {
                 if !connected.contains(&target.label()) {
                     connected.push(target.label());
                 }
-                let label = format!("{} (project)", target.label());
-                checks.push(project.into_check(paths, target, label, &activity));
+                let label = if project {
+                    format!("{} (project)", target.label())
+                } else {
+                    target.label().to_string()
+                };
+                checks.push(
+                    assessment
+                        .into_check(paths, target, label, &activity, collapse.as_deref())
+                        .kind(kind),
+                );
             }
         }
     }
-    if !not_installed.is_empty() {
-        checks.push(Check::new(
-            "Others",
-            Level::Info,
-            "not installed",
-            not_installed.join(", "),
-        ));
-    }
-
-    let shim_checks = shim_checks(paths, path_var, &activity);
-    if shim_checks
-        .first()
-        .is_some_and(|c| c.word != "not installed")
-    {
-        connected.push("Shims");
-    }
-    checks.extend(shim_checks);
-    checks.push(vault_check(paths));
-    checks.push(memory_check);
-
-    if connected.is_empty() {
+    if only.is_none() && !not_installed.is_empty() {
         checks.push(
             Check::new(
-                "Setup",
-                Level::Broken,
-                "broken",
-                "nothing is connected, so AgentDiet never sees any output".into(),
+                "Others",
+                Level::Info,
+                "not installed",
+                not_installed.join(", "),
             )
-            .fix("agentdiet init"),
+            .kind(CheckKind::Others),
         );
     }
+
+    if only.is_none_or(|(list, project)| list.contains(&Target::Shims) && !project) {
+        let mut shim = shim_checks(paths, path_var, &activity, collapse.as_deref());
+        if shim.first().is_some_and(|c| c.word != "not installed") {
+            connected.push("Shims");
+        }
+        for (i, c) in shim.iter_mut().enumerate() {
+            c.kind = if i == 0 {
+                CheckKind::Shims
+            } else {
+                CheckKind::Path
+            };
+        }
+        checks.extend(shim);
+    }
+
+    if only.is_none() {
+        checks.insert(0, state_check(paths).kind(CheckKind::State));
+        let this = tilde(&paths.home, &paths.exe);
+        let version = env!("CARGO_PKG_VERSION");
+        checks.insert(
+            0,
+            match &collapse {
+                Some(exe) => Check::new(
+                    "Binary",
+                    Level::Warning,
+                    "warning",
+                    format!(
+                        "{this} ({version}); {} run {}, a different build",
+                        plural(other_rows, "integration", "integrations"),
+                        tilde(&paths.home, exe)
+                    ),
+                ),
+                None => Check::new("Binary", Level::Ok, "ok", format!("{this} ({version})")),
+            }
+            .kind(CheckKind::Binary),
+        );
+        checks.push(vault_check(paths).kind(CheckKind::Vault));
+        checks.push(memory_check.kind(CheckKind::Memory));
+        if connected.is_empty() {
+            checks.push(
+                Check::new(
+                    "Setup",
+                    Level::Broken,
+                    "broken",
+                    "nothing is connected, so AgentDiet never sees any output".into(),
+                )
+                .fix("agentdiet init")
+                .kind(CheckKind::Setup),
+            );
+        }
+    }
+    share_missing_binary_fix(&mut checks, paths);
     Report { checks, connected }
+}
+
+/// Several rows broken by one missing binary (it was moved or deleted) get one fix, on the last of
+/// them, naming every target to reconnect; the others keep their line but not a copy of the fix.
+fn share_missing_binary_fix(checks: &mut [Check], paths: &Paths) {
+    let causes: Vec<PathBuf> = checks.iter().filter_map(|c| c.cause.clone()).collect();
+    for cause in causes.iter().collect::<std::collections::BTreeSet<_>>() {
+        let rows: Vec<usize> = (0..checks.len())
+            .filter(|&i| checks[i].cause.as_ref() == Some(cause))
+            .collect();
+        if rows.len() < 2 {
+            continue;
+        }
+        let slugs: Vec<&str> = rows
+            .iter()
+            .map(|&i| match checks[i].kind {
+                CheckKind::Assistant { target, .. } => target.slug(),
+                _ => "shims",
+            })
+            .collect();
+        for &i in &rows {
+            checks[i].fix = None;
+        }
+        if let Some(&last) = rows.last() {
+            checks[last].fix = Some(format!(
+                "same cause for all {}: put agentdiet back at {}, or run `agentdiet init --only {}` \
+                 from the agentdiet binary they should use",
+                rows.len(),
+                tilde(&paths.home, cause),
+                slugs.join(",")
+            ));
+        }
+    }
 }
 
 fn state_check(paths: &Paths) -> Check {
@@ -388,7 +551,12 @@ enum FileState {
     OtherExe(PathBuf),
     /// agentdiet's entry is absent here while present in another of the target's files, or it
     /// differs from what `init` would write.
-    Incomplete(String),
+    /// `exe` is the other build the config points at, when it is not this one: the fix must run
+    /// from that binary, never from this one.
+    Incomplete {
+        why: String,
+        exe: Option<PathBuf>,
+    },
     Ok,
     /// No agentdiet entry.
     Absent,
@@ -428,21 +596,31 @@ fn classify(paths: &Paths, file: &FileSpec) -> FileState {
     if !file.kind.is_present(text) {
         return FileState::Absent;
     }
-    let exe = match file.kind.configured_exe(text) {
-        None => paths.exe.clone(),
+    // Completeness is judged against the binary the config points at, so an incomplete config on
+    // another build is not mistaken for a complete one (and `init` from here is never suggested).
+    let (exe, other) = match file.kind.configured_exe(text) {
+        None => (paths.exe.clone(), false),
         Some(exe) if !exe.exists() => return FileState::MissingExe(exe),
-        Some(exe) if same_file(&exe, &paths.exe) => paths.exe.clone(),
-        Some(exe) => return FileState::OtherExe(exe),
+        Some(exe) if same_file(&exe, &paths.exe) => (paths.exe.clone(), false),
+        Some(exe) => (exe, true),
     };
     match file.kind.patch(Some(text), &exe) {
+        Ok(None) if other => FileState::OtherExe(exe),
         Ok(None) => FileState::Ok,
-        _ => FileState::Incomplete(format!("{shown} differs from what init writes")),
+        _ => FileState::Incomplete {
+            why: format!("{shown} differs from what init writes"),
+            exe: other.then_some(exe),
+        },
     }
 }
 
 /// A target at one scope: `verdict` is `None` when agentdiet is not connected there.
+#[derive(Clone)]
 struct Assessment {
     verdict: Option<FileState>,
+    /// Every file's state (an absent file counts as incomplete), so the "different build" collapse can
+    /// be applied per file before the worst is picked.
+    files: Vec<FileState>,
     /// For a target that is not connected: an invalid file `init` would skip.
     note: Option<String>,
 }
@@ -475,24 +653,50 @@ fn assess(paths: &Paths, target: Target, project: bool) -> Assessment {
         });
         return Assessment {
             verdict: None,
+            files: Vec::new(),
             note,
         };
     }
-    let worst = files
+    // A file with no entry belongs to a target whose other files may run another build; the fix
+    // for it has to run from that build too.
+    let sibling_exe = states.iter().find_map(|(s, _)| match s {
+        FileState::OtherExe(exe) => Some(exe.clone()),
+        FileState::Incomplete { exe: Some(exe), .. } => Some(exe.clone()),
+        _ => None,
+    });
+    let states: Vec<FileState> = files
         .iter()
         .zip(states)
         .map(|(f, (s, _))| match s {
-            FileState::Absent => FileState::Incomplete(format!(
-                "{} has no AgentDiet entry",
-                tilde(&paths.home, &f.path)
-            )),
+            FileState::Absent => FileState::Incomplete {
+                why: format!("{} has no AgentDiet entry", tilde(&paths.home, &f.path)),
+                exe: sibling_exe.clone(),
+            },
             other => other,
         })
-        .min()
-        .unwrap_or(FileState::Ok);
+        .collect();
     Assessment {
-        verdict: Some(worst),
+        verdict: Some(states.iter().min().cloned().unwrap_or(FileState::Ok)),
+        files: states,
         note: None,
+    }
+}
+
+impl Assessment {
+    /// The worst file state once a "different build" that the Binary row already reports counts as
+    /// this one. Applied per file, so the next-worst state (an incomplete file, say) still surfaces.
+    fn resolve(&self, collapse: Option<&Path>) -> Option<FileState> {
+        self.verdict.as_ref()?;
+        Some(
+            self.files
+                .iter()
+                .map(|f| match f {
+                    FileState::OtherExe(exe) if collapse == Some(exe.as_path()) => FileState::Ok,
+                    other => other.clone(),
+                })
+                .min()
+                .unwrap_or(FileState::Ok),
+        )
     }
 }
 
@@ -523,17 +727,26 @@ impl Assessment {
         target: Target,
         label: String,
         activity: &Activity,
+        collapse: Option<&Path>,
     ) -> Check {
         let init = format!("agentdiet init --only {}", target.slug());
         let this = tilde(&paths.home, &paths.exe);
-        match self.verdict.unwrap_or(FileState::Ok) {
-            FileState::MissingExe(exe) => Check::new(
-                label,
-                Level::Broken,
-                "broken",
-                format!("configured binary {} is missing", tilde(&paths.home, &exe)),
-            )
-            .fix(format!("run `{init}` from the agentdiet binary it should use")),
+        let verdict = self.resolve(collapse).unwrap_or(FileState::Ok);
+        match verdict {
+            FileState::MissingExe(exe) => {
+                let mut check = Check::new(
+                    label,
+                    Level::Broken,
+                    "broken",
+                    format!("configured binary {} is missing", tilde(&paths.home, &exe)),
+                )
+                .fix(format!(
+                    "put agentdiet back at {}, or run `{init}` from the agentdiet binary it should use",
+                    tilde(&paths.home, &exe)
+                ));
+                check.cause = Some(exe);
+                check
+            }
             FileState::Invalid(why) => Check::new(
                 label,
                 Level::Warning,
@@ -554,24 +767,31 @@ impl Assessment {
                     tilde(&paths.home, &exe)
                 ),
             ),
-            FileState::Incomplete(why) => {
-                Check::new(label, Level::Warning, "warning", format!("incomplete: {why}")).fix(init)
+            FileState::Incomplete { why, exe } => {
+                let fix = match exe {
+                    Some(exe) => format!("run `{init}` from {}", tilde(&paths.home, &exe)),
+                    None => init,
+                };
+                Check::new(label, Level::Warning, "warning", format!("incomplete: {why}")).fix(fix)
             }
             FileState::Ok | FileState::Absent => match target {
                 Target::Claude if activity.hook > 0 => Check::new(
                     label,
                     Level::Ok,
-                    "working",
+                    "verified",
                     runs_seen(activity.hook, "hook run", "hook runs", activity.hook_age),
-                ),
+                )
+                .observed(Observed::Verified),
                 Target::Claude => Check::new(
                     label,
                     Level::Ok,
                     "configured",
-                    "no activity recorded in this workspace yet; restart Claude Code if it was running"
+                    "not yet observed: no activity recorded in this workspace; restart Claude Code if it was running"
                         .into(),
-                ),
-                _ => Check::new(label, Level::Ok, "configured", "MCP server registered".into()),
+                )
+                .observed(Observed::NotYet),
+                _ => Check::new(label, Level::Ok, "configured", "MCP server registered".into())
+                    .observed(Observed::NotObservable),
             },
         }
     }
@@ -579,8 +799,20 @@ impl Assessment {
 
 // ---- shims --------------------------------------------------------------------------------------
 
-fn shim_checks(paths: &Paths, path_var: &OsStr, activity: &Activity) -> Vec<Check> {
-    let links = shims::inspect(paths);
+fn shim_checks(
+    paths: &Paths,
+    path_var: &OsStr,
+    activity: &Activity,
+    collapse: Option<&Path>,
+) -> Vec<Check> {
+    // A "different build" that the Binary row already reports counts as this one here.
+    let links: Vec<(&'static str, Link)> = shims::inspect(paths)
+        .into_iter()
+        .map(|(name, link)| match link {
+            Link::Other(exe) if collapse == Some(exe.as_path()) => (name, Link::Current),
+            other => (name, other),
+        })
+        .collect();
     let total = links.len();
     let current = links.iter().filter(|(_, l)| *l == Link::Current).count();
     let ours = links.iter().filter(|(_, l)| *l != Link::Missing).count();
@@ -605,7 +837,7 @@ fn shim_checks(paths: &Paths, path_var: &OsStr, activity: &Activity) -> Vec<Chec
             .iter()
             .filter(|(_, l)| matches!(l, Link::Dangling(_)))
             .count();
-        Check::new(
+        let mut check = Check::new(
             "Shims",
             Level::Broken,
             "broken",
@@ -615,7 +847,9 @@ fn shim_checks(paths: &Paths, path_var: &OsStr, activity: &Activity) -> Vec<Chec
                 tilde(&paths.home, exe)
             ),
         )
-        .fix(fix)
+        .fix(fix);
+        check.cause = Some(exe.clone());
+        check
     } else if let Some(exe) = first(|l| match l {
         Link::Other(p) => Some(p),
         _ => None,
@@ -650,16 +884,20 @@ fn shim_checks(paths: &Paths, path_var: &OsStr, activity: &Activity) -> Vec<Chec
         Check::new(
             "Shims",
             Level::Ok,
-            "working",
+            "verified",
             runs_seen(activity.shim, "shim run", "shim runs", activity.shim_age),
         )
+        .observed(Observed::Verified)
     } else {
         Check::new(
             "Shims",
             Level::Ok,
             "configured",
-            format!("{total} commands linked; no shim runs recorded in this workspace yet"),
+            format!(
+                "{total} commands linked; not yet observed: no shim runs recorded in this workspace"
+            ),
         )
+        .observed(Observed::NotYet)
     };
 
     let dir = tilde(&paths.home, &paths.shims_dir());
@@ -692,6 +930,11 @@ fn shim_checks(paths: &Paths, path_var: &OsStr, activity: &Activity) -> Vec<Chec
 }
 
 // ---- status ---------------------------------------------------------------------------------------
+
+/// `1,234 things`, for counters.
+pub(crate) fn plural_u64(n: u64, one: &str, many: &str) -> String {
+    format!("{} {}", thousands(n), if n == 1 { one } else { many })
+}
 
 /// `agentdiet status`: the §3b overview, from `state.json` and a doctor run.
 pub fn render_status(state: &State, report: &Report, p: Painter) -> String {
@@ -735,9 +978,9 @@ pub fn render_status(state: &State, report: &Report, p: Painter) -> String {
     }
     if let Some(rate) = state.dereference_rate() {
         let mut text = format!(
-            "{} of {} ({:.0}%)",
-            thousands(state.cas_dereferences),
-            thousands(state.trimmed_outputs),
+            "{} for {} ({:.0}%)",
+            plural_u64(state.cas_dereferences, "re-open", "re-opens"),
+            plural_u64(state.trimmed_outputs, "trimmed output", "trimmed outputs"),
             rate * 100.0
         );
         if rate > DEREFERENCE_WARN_RATE {
@@ -846,7 +1089,7 @@ mod tests {
         fs::remove_file(&rules).unwrap();
         assert!(matches!(
             verdict(&f.paths, Target::Claude, false),
-            Some(FileState::Incomplete(why)) if why.contains("agentdiet.md has no AgentDiet entry")
+            Some(FileState::Incomplete { why, .. }) if why.contains("agentdiet.md has no AgentDiet entry")
         ));
 
         let settings = f.paths.home.join(".claude/settings.json");
@@ -941,7 +1184,7 @@ mod tests {
         );
         for line in [
             "  Saved         ≈134,830 tokens in 4 trimmed outputs (all projects, estimated)",
-            "  Re-opened     1 of 4 (25%) ⚠ high: agents re-read trimmed output; consider a lighter mode",
+            "  Re-opened     1 re-open for 4 trimmed outputs (25%) ⚠ high: agents re-read trimmed output; consider a lighter mode",
             "  Paused        ≈2,500 tokens passed untrimmed (still scrubbed) · agentdiet resume",
             "  Last trimmed  #683db530 · agentdiet show last",
             "  Health        ✗ 1 problem · agentdiet doctor",
@@ -954,5 +1197,226 @@ mod tests {
         assert!(
             !quiet.contains("Re-opened") && !quiet.contains("Paused") && !quiet.contains("Last")
         );
+    }
+}
+
+#[cfg(test)]
+mod p1_tests {
+    use std::fs;
+
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::init::InitOptions;
+
+    fn setup(dir: &TempDir) -> Paths {
+        let exe = dir.path().join("bin/agentdiet");
+        fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        fs::write(&exe, "").unwrap();
+        Paths::new(
+            dir.path().join("home"),
+            dir.path().join("cfg"),
+            dir.path().join("proj"),
+            exe,
+        )
+    }
+
+    fn connect(paths: &Paths, targets: &[Target]) {
+        let opts = InitOptions {
+            targets: targets.to_vec(),
+            project: false,
+            dry_run: false,
+        };
+        crate::init::run(paths, &opts).unwrap();
+    }
+
+    fn row<'a>(report: &'a Report, label: &str) -> &'a Check {
+        report
+            .checks
+            .iter()
+            .find(|c| c.label == label)
+            .unwrap_or_else(|| panic!("no {label} row in {:?}", report.checks))
+    }
+
+    #[test]
+    fn configuration_alone_is_never_verified() {
+        let dir = TempDir::new().unwrap();
+        let paths = setup(&dir);
+        connect(&paths, &[Target::Claude, Target::Cursor, Target::Shims]);
+        let on_path = std::env::join_paths([paths.shims_dir()]).unwrap();
+        let report = doctor(&paths, &on_path);
+
+        let claude = row(&report, "Claude Code");
+        assert_eq!(
+            (claude.word, claude.observed),
+            ("configured", Observed::NotYet)
+        );
+        assert!(
+            claude.detail.starts_with("not yet observed"),
+            "{}",
+            claude.detail
+        );
+        let cursor = row(&report, "Cursor");
+        assert_eq!(
+            (cursor.word, cursor.observed),
+            ("configured", Observed::NotObservable)
+        );
+        let shims = row(&report, "Shims");
+        assert_eq!(
+            (shims.word, shims.observed),
+            ("configured", Observed::NotYet)
+        );
+        assert!(report.checks.iter().all(|c| c.word != "verified"));
+    }
+
+    #[test]
+    fn many_different_builds_are_reported_once_on_the_binary_row() {
+        let dir = TempDir::new().unwrap();
+        let paths = setup(&dir);
+        let old = dir.path().join("old/agentdiet");
+        fs::create_dir_all(old.parent().unwrap()).unwrap();
+        fs::write(&old, "").unwrap();
+        let mut older = paths.clone();
+        older.exe = old.clone();
+        connect(
+            &older,
+            &[
+                Target::Claude,
+                Target::Cursor,
+                Target::Gemini,
+                Target::Shims,
+            ],
+        );
+
+        let on_path = std::env::join_paths([paths.shims_dir()]).unwrap();
+        let report = doctor(&paths, &on_path);
+        assert_eq!(report.warnings(), 1, "{}", report.render(Painter::plain()));
+        assert_eq!(report.problems(), 0);
+        let binary = row(&report, "Binary");
+        assert_eq!(binary.level, Level::Warning);
+        assert!(
+            binary.detail.contains("4 integrations run"),
+            "{}",
+            binary.detail
+        );
+        assert!(binary.detail.contains("old/agentdiet"));
+        assert_eq!(row(&report, "Cursor").word, "configured");
+
+        // A single odd one out keeps its own, more specific, warning.
+        let single = TempDir::new().unwrap();
+        let paths = setup(&single);
+        let mut older = paths.clone();
+        older.exe = single.path().join("bin/other");
+        fs::write(&older.exe, "").unwrap();
+        connect(&older, &[Target::Cursor]);
+        connect(&paths, &[Target::Gemini]);
+        let report = doctor(&paths, OsStr::new(""));
+        assert_eq!(row(&report, "Binary").level, Level::Ok);
+        assert_eq!(row(&report, "Cursor").word, "warning");
+    }
+
+    #[test]
+    fn an_incomplete_config_on_another_build_is_never_hidden_by_the_collapse() {
+        let dir = TempDir::new().unwrap();
+        let paths = setup(&dir);
+        let old = dir.path().join("old/agentdiet");
+        fs::create_dir_all(old.parent().unwrap()).unwrap();
+        fs::write(&old, "").unwrap();
+        let mut older = paths.clone();
+        older.exe = old.clone();
+        connect(&older, &[Target::Claude, Target::Cursor, Target::Gemini]);
+        // Claude's EXPERIENCE.md pointer goes missing: that config is incomplete, on the old build.
+        fs::remove_file(paths.home.join(".claude/rules/agentdiet.md")).unwrap();
+
+        let report = doctor(&paths, OsStr::new(""));
+        let claude = row(&report, "Claude Code");
+        assert_eq!(
+            claude.level,
+            Level::Warning,
+            "{}",
+            report.render(Painter::plain())
+        );
+        assert!(
+            claude.detail.starts_with("incomplete:"),
+            "{}",
+            claude.detail
+        );
+        let fix = claude.fix.as_deref().unwrap();
+        assert!(
+            fix.contains("agentdiet init --only claude") && fix.contains("old/agentdiet"),
+            "{fix}"
+        );
+        assert!(
+            !fix.contains("bin/agentdiet"),
+            "never from this build: {fix}"
+        );
+        // All three run the old build, so the Binary row says so once; Claude Code's own problem
+        // stays on its own row.
+        assert_eq!(row(&report, "Binary").level, Level::Warning);
+        assert!(row(&report, "Binary").detail.contains("3 integrations run"));
+        assert_eq!(row(&report, "Cursor").word, "configured");
+
+        // The same file with only the other file of the target missing is found too.
+        let report = doctor(&older, OsStr::new(""));
+        assert_eq!(row(&report, "Claude Code").level, Level::Warning);
+        assert!(
+            !row(&report, "Claude Code")
+                .fix
+                .as_deref()
+                .unwrap()
+                .contains(" from ")
+        );
+    }
+
+    #[test]
+    fn one_missing_binary_behind_several_rows_gets_one_fix() {
+        let dir = TempDir::new().unwrap();
+        let paths = setup(&dir);
+        let gone = dir.path().join("moved/agentdiet");
+        fs::create_dir_all(gone.parent().unwrap()).unwrap();
+        fs::write(&gone, "").unwrap();
+        let mut moved = paths.clone();
+        moved.exe = gone.clone();
+        connect(&moved, &[Target::Claude, Target::Cursor, Target::Shims]);
+        fs::remove_file(&gone).unwrap();
+
+        let report = doctor(&paths, OsStr::new(""));
+        let broken: Vec<&Check> = report.checks.iter().filter(|c| c.cause.is_some()).collect();
+        assert_eq!(broken.len(), 3, "{}", report.render(Painter::plain()));
+        assert!(
+            broken.iter().all(|c| c.level == Level::Broken),
+            "still each reported"
+        );
+        let fixes: Vec<&str> = broken.iter().filter_map(|c| c.fix.as_deref()).collect();
+        assert_eq!(fixes.len(), 1, "one shared fix: {fixes:?}");
+        assert!(
+            fixes[0].contains("agentdiet init --only claude,cursor,shims"),
+            "{}",
+            fixes[0]
+        );
+        assert!(fixes[0].contains("put agentdiet back at"), "{}", fixes[0]);
+    }
+
+    #[test]
+    fn doctor_for_checks_only_the_selected_targets() {
+        let dir = TempDir::new().unwrap();
+        let paths = setup(&dir);
+        connect(&paths, &[Target::Claude, Target::Cursor, Target::Codex]);
+        let report = doctor_for(&paths, OsStr::new(""), &[Target::Cursor], false);
+        let kinds: Vec<_> = report.checks.iter().map(|c| c.kind).collect();
+        assert_eq!(
+            kinds,
+            [CheckKind::Assistant {
+                target: Target::Cursor,
+                project: false
+            }]
+        );
+
+        // The shims bring PATH along; nothing else does.
+        connect(&paths, &[Target::Shims]);
+        let report = doctor_for(&paths, OsStr::new("/usr/bin"), &[Target::Shims], false);
+        let kinds: Vec<_> = report.checks.iter().map(|c| c.kind).collect();
+        assert_eq!(kinds, [CheckKind::Shims, CheckKind::Path]);
+        assert_eq!(row(&report, "PATH").level, Level::Broken);
     }
 }

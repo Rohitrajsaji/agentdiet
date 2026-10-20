@@ -276,20 +276,27 @@ fn is_interactive() -> bool {
     std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
 }
 
-/// Why `init` without `--only`/`--all` cannot run here, and what to pass instead.
+/// Why `init` without `--only`/`--all` cannot run here, and the exact command to run instead.
 fn no_terminal_message(paths: &Paths, project: bool) -> String {
     let detected: Vec<&str> = targets::detect(paths, project)
         .into_iter()
         .map(Target::slug)
         .collect();
-    let found = if detected.is_empty() {
-        "nothing detected here".to_string()
+    let scope = if project { " --project" } else { "" };
+    let suggestion = if detected.is_empty() {
+        format!(
+            "No assistant was detected here. Name the ones to connect, e.g.\n  agentdiet init{scope} --only claude"
+        )
     } else {
-        format!("detected here: {}", detected.join(","))
+        format!(
+            "To connect what was detected here, run:\n  agentdiet init{scope} --only {}",
+            detected.join(",")
+        )
     };
     format!(
-        "init needs a terminal for the checklist. Pass --only <targets> or --all, or add --dry-run \
-         to preview ({found}; all targets: claude,cursor,windsurf,gemini,copilot,codex,shims)"
+        "init needs a terminal for its checklist.\n{suggestion}\n(--all connects every assistant; \
+         add --dry-run to preview first. Assistants: claude, cursor, windsurf, gemini, copilot, codex, \
+         shims)"
     )
 }
 
@@ -359,11 +366,21 @@ pub fn cmd_init(
     let mut text: String = report.diffs.iter().map(|d| format!("{d}\n")).collect();
     let path_var = std::env::var_os("PATH").unwrap_or_default();
     let on_path = shims::path_status(&path_var, &paths.shims_dir());
+    // Only for what was just connected; a dry run changed nothing to verify.
+    let connected: Vec<Target> = report
+        .targets
+        .iter()
+        .filter(|t| t.verdict() != Verdict::Skipped)
+        .map(|t| t.target)
+        .collect();
+    let verification = (!dry_run && !connected.is_empty())
+        .then(|| crate::status::doctor_for(paths, &path_var, &connected, project));
     text.push_str(&render(
         &report,
         paths,
         dry_run,
         &on_path,
+        verification.as_ref(),
         crate::ui::Painter::stdout(),
     ));
     crate::ui::emit(&text).context("could not write to stdout")?;
@@ -386,14 +403,12 @@ pub fn render(
     paths: &Paths,
     dry_run: bool,
     on_path: &shims::PathStatus,
+    verification: Option<&crate::status::Report>,
     p: crate::ui::Painter,
 ) -> String {
     use crate::ui::{Level, and_list, plural, tilde};
 
-    let label = |t: Target| match t {
-        Target::Shims => "Shims",
-        _ => t.label(),
-    };
+    let label = label_of;
     let width = report
         .targets
         .iter()
@@ -423,8 +438,14 @@ pub fn render(
                 plural(total, "command", "commands"),
                 tilde(&paths.home, &paths.shims_dir())
             ),
+            // Never list what was skipped as if it had been written.
+            (_, Verdict::PartlyConnected) => format!(
+                "{} of {} files written or up to date",
+                total,
+                total + tr.skipped.len()
+            ),
             (_, Verdict::Updated) => format!(
-                "{} of {} updated",
+                "{} of {} rewritten",
                 tr.changed,
                 plural(total, "file", "files")
             ),
@@ -451,6 +472,10 @@ pub fn render(
             "Backed up the originals to {}\n\n",
             tilde(&paths.home, dir)
         ));
+    }
+
+    if let Some(checked) = verification {
+        out.push_str(&render_verification(report, checked, p));
     }
 
     let mut next = Vec::new();
@@ -497,29 +522,180 @@ pub fn render(
     out
 }
 
-/// `agentdiet eject` / `uninstall`.
-pub fn cmd_eject(paths: &Paths, purge: bool) -> anyhow::Result<()> {
-    let report = eject::eject(paths, None, purge).context("eject failed")?;
+/// The **Verification** block (SPEC §2.2): what `doctor` makes of each target `init` just connected.
+/// Configuration alone is never "verified". Targets `init` already explained (a skip) and the `PATH`
+/// check (named in **Next**) are left out, so nothing is said twice.
+fn render_verification(
+    report: &InitReport,
+    checked: &crate::status::Report,
+    p: crate::ui::Painter,
+) -> String {
+    use crate::status::{CheckKind, Observed};
+    use crate::ui::Level;
+
+    let explained = |t: Target| {
+        report
+            .targets
+            .iter()
+            .any(|r| r.target == t && !r.skipped.is_empty())
+    };
+    let mut lines = Vec::new();
+    for c in &checked.checks {
+        let target = match c.kind {
+            CheckKind::Assistant { target, .. } => target,
+            CheckKind::Shims => Target::Shims,
+            _ => continue,
+        };
+        if explained(target) {
+            continue;
+        }
+        let name = format!("{:<14}", label_of(target));
+        let (level, word, detail) = match (c.level, c.observed) {
+            (Level::Ok, Observed::Verified) => (Level::Ok, "verified", c.detail.clone()),
+            (Level::Ok, Observed::NotYet) if target == Target::Shims => (
+                Level::Ok,
+                "configured, not yet observed",
+                "recorded once an agent runs git, cargo, …".to_string(),
+            ),
+            (Level::Ok, Observed::NotYet) => (
+                Level::Ok,
+                "configured, not yet observed",
+                "restart it, then run any tool".to_string(),
+            ),
+            (Level::Ok, _) => (
+                Level::Ok,
+                "configured",
+                "MCP server; runs can't be attributed to it".to_string(),
+            ),
+            (level, _) => (level, c.word, c.detail.clone()),
+        };
+        let mut line = format!("  {name}{}{detail}\n", p.badge(level, word, 32));
+        if let Some(fix) = &c.fix {
+            line.push_str(&format!("  {:14}  → {fix}\n", ""));
+        }
+        lines.push(line);
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    format!("{}\n{}\n", p.bold("Verification"), lines.concat())
+}
+
+/// `agentdiet eject [--only <targets>]` / `uninstall` / `disconnect <targets>`.
+pub fn cmd_eject(paths: &Paths, only: &[Target], purge: bool) -> anyhow::Result<()> {
+    let list = (!only.is_empty()).then(|| {
+        let mut list = only.to_vec();
+        list.sort();
+        list.dedup();
+        list
+    });
+    let report = eject::eject(paths, list.as_deref(), purge).context("eject failed")?;
     for warning in &report.warnings {
         eprintln!("warning: {warning}");
     }
-    if report.is_empty() {
+    if report.is_empty() && list.is_none() {
         println!("Nothing to eject.");
         return Ok(());
     }
-    for (label, files) in [
-        ("restored", &report.restored),
-        ("deleted", &report.deleted),
-        ("cleaned", &report.cleaned),
-        ("removed shim", &report.shims_removed),
-        ("purged", &report.purged),
-    ] {
-        for file in files {
-            println!("{label}: {}", file.display());
+    let text = render_eject(
+        &report,
+        list.as_deref(),
+        paths,
+        crate::ui::Painter::stdout(),
+    );
+    crate::ui::emit(&text).context("could not write to stdout")
+}
+
+/// One line per target: what eject did to it (SPEC §2.2 "`--only`"). With `only`, every requested
+/// target gets a line, `nothing to remove` included; without it, only the targets that were touched.
+pub fn render_eject(
+    report: &eject::EjectReport,
+    only: Option<&[Target]>,
+    paths: &Paths,
+    p: crate::ui::Painter,
+) -> String {
+    use crate::ui::{Level, and_list, plural, tilde};
+
+    let shown: Vec<Target> = Target::ALL
+        .into_iter()
+        .filter(|t| match only {
+            Some(list) => list.contains(t),
+            None => !report.for_target(*t).is_empty(),
+        })
+        .collect();
+    let width = shown
+        .iter()
+        .map(|t| label_of(*t).len())
+        .max()
+        .unwrap_or(0)
+        .max(12)
+        + 2;
+    let mut out = String::new();
+    let mut restart = Vec::new();
+    for target in shown {
+        let actions = report.for_target(target);
+        let name = format!("{:<width$}", label_of(target));
+        if actions.is_empty() {
+            out.push_str(&format!(
+                "  {name}{}\n",
+                p.badge(Level::Info, "nothing to remove", 0)
+            ));
+            continue;
         }
+        if target != Target::Shims {
+            restart.push(target.label());
+        }
+        let detail: Vec<String> = actions
+            .iter()
+            .map(|(action, path)| match action {
+                eject::Action::Restored => format!("restored {}", tilde(&paths.home, path)),
+                eject::Action::Deleted => format!("deleted {}", tilde(&paths.home, path)),
+                eject::Action::Cleaned => {
+                    format!("removed its entries from {}", tilde(&paths.home, path))
+                }
+                eject::Action::ShimsRemoved => format!(
+                    "removed {} from {}",
+                    plural(report.shims_removed.len(), "shim", "shims"),
+                    tilde(&paths.home, path)
+                ),
+            })
+            .collect();
+        out.push_str(&format!(
+            "  {name}{}{}\n",
+            p.badge(Level::Ok, "disconnected", 18),
+            detail.join("; ")
+        ));
     }
-    println!("Backups are kept in {}", paths.backups_dir().display());
-    Ok(())
+    for purged in &report.purged {
+        out.push_str(&format!("  purged {}\n", tilde(&paths.home, purged)));
+    }
+    out.push('\n');
+    if !restart.is_empty() {
+        let they = if restart.len() == 1 {
+            "it stops"
+        } else {
+            "they stop"
+        };
+        out.push_str(&format!(
+            "Restart {} so {they} loading AgentDiet.\n",
+            and_list(&restart)
+        ));
+    }
+    if only.is_some() {
+        out.push_str("Other assistants are unchanged.\n");
+    }
+    out.push_str(&format!(
+        "Backups are kept in {}\n",
+        tilde(&paths.home, &paths.backups_dir())
+    ));
+    out
+}
+
+fn label_of(t: Target) -> &'static str {
+    match t {
+        Target::Shims => "Shims",
+        _ => t.label(),
+    }
 }
 
 #[cfg(test)]
@@ -563,6 +739,7 @@ mod tests {
             &paths,
             true,
             &shims::PathStatus::Missing,
+            None,
             crate::ui::Painter::plain(),
         );
         let expected = [

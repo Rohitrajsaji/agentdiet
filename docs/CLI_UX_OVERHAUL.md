@@ -1,6 +1,6 @@
 # AgentDiet CLI/UX overhaul
 
-Status: **P0 implemented**; P1–P3 designed, not started. `SPEC.md` stays the source of truth for
+Status: **P0 and P1 implemented**; P2–P3 designed, not started. `SPEC.md` stays the source of truth for
 behaviour (§2.2 `init` output, §2.5 terminal rules, §3b Status / Doctor / Mode / `show last`); this
 document holds the design reasoning, the mockups and the task list.
 
@@ -126,7 +126,7 @@ AgentDiet is active · Balanced mode
 
   Assistants    Claude Code, Codex and Shims
   Saved         ≈134,830 tokens in 4 trimmed outputs (all projects, estimated)
-  Re-opened     1 of 4 (25%) ⚠ high: agents re-read trimmed output; consider a lighter mode
+  Re-opened     1 re-open for 4 trimmed outputs (25%) ⚠ high: agents re-read trimmed output; consider a lighter mode
   Last trimmed  #683db530 · agentdiet show last
   Health        ✗ 1 problem · agentdiet doctor
 ```
@@ -172,6 +172,8 @@ corrupt `state.json` reads `✗ broken` with `→ rm ~/.agentdiet/state.json`. P
 their own row, e.g. `Cursor (project)`.
 
 ### 6.3 `agentdiet init`
+
+(P1 adds the **Verification** block and the `disconnect` output shown after the first-run example.)
 
 First run:
 
@@ -237,39 +239,119 @@ Change it: agentdiet mode <light|balanced|ultra-lean>
 `agentdiet mode ligth` → clap's `invalid value 'ligth'`, the possible values and
 `tip: a similar value exists: 'light'` (exit 2).
 
-### 6.5 Control Center (P1 design)
+### 6.5 Control Center (P1, implemented)
 
-`inquire::Select` stays (no new dependency). The status block is printed above the prompt, and each
-item shows the command that does the same thing, so the menu teaches the CLI.
+Bare `agentdiet` opens a full-screen ratatui view (`src/center.rs`) that replaces the `inquire` menu. The
+screens below are rendered by the real code into a test backend (colour off). Fresh install, 80x24:
 
 ```
-AgentDiet is active · Balanced mode
-  Assistants    Claude Code, Shims        Health  ✓ no problems found
-  Saved         ≈134,830 tokens in 4 trimmed outputs (all projects, estimated)
+ AgentDiet  ● Active · Balanced mode                                     ? help
+ Trims outputs over 600 est. tokens · must save 20% · 3 context lines
+ Assistants                              Savings (all projects, estimated)
+ No assistants connected yet.            Nothing trimmed yet.
+ Press a to connect one,
+ or run `agentdiet init`.
+ Recent activity (this workspace)
+ No activity in this workspace yet.
 
-? What do you want to do?
-> Pause AgentDiet                 agentdiet pause
-  Show the last trimmed output    agentdiet show last
-  Change Diet Mode (Balanced)     agentdiet mode
-  Connect or disconnect assistants  agentdiet init / eject --only
-  Check the setup                 agentdiet doctor
-  Open the live dashboard         agentdiet top
-  Quit
-[↑↓ / j k move · type to filter · enter select · esc quit]
+ p pause  m mode  l last output  a assistants  d doctor  t live  ? help  q quit
 ```
 
-Navigation rules:
+A set-up install, 80x24 (the blank rows between the panels and the footer are omitted here):
 
-- `↑`/`↓` and `j`/`k` (inquire `vim_mode`) move; typing filters (`pau` + enter pauses); `enter`
-  selects; `esc` or `ctrl-c` quits, from the menu and from every sub-prompt (a cancelled sub-prompt
-  returns to the menu).
-- After an action the menu redraws with the refreshed status block; the result line ("⏸ AgentDiet
-  paused.") stays above it.
-- Item order: the SPEC §2.1 five keep their order; *Check the setup* and *Quit* are appended.
-  Changing §2.1 is part of P1.
+```
+ AgentDiet  ● Active · Balanced mode                                     ? help
+ Trims outputs over 600 est. tokens · must save 20% · 3 context lines
+ Assistants                              Savings (all projects, estimated)
+ ✓ Claude Code       not yet observed    ≈134,830 tokens saved
+ ✓ Cursor            configured          4 trimmed outputs
+ ✓ Shims             not yet observed    1 re-open / 4 outputs (25%) ⚠ high
+                                         last #683db530 · l to view
+ Needs attention
+ ✗ PATH ~/.agentdiet/shims is not on PATH in this shell, so the shims are
+   never reached
+   → add to your shell rc: export PATH="$HOME/.agentdiet/shims:$PATH"
+ Recent activity (this workspace)
+ #683db530  cargo test  kept 14/412 lines; 398 passing lines collapsed
 
-`agentdiet top` keys stay `q`/`Esc`, `p`, `m`, `r`; P2 renames its "CAS dereference rate" to
-"Re-opened" and the footer to the same vocabulary.
+ p pause  m mode  l last output  a assistants  d doctor  t live  ? help  q quit
+```
+
+Below 70 columns it is one column and the Recent panel is hidden (60x20):
+
+```
+ AgentDiet  ● Active · Balanced mode                 ? help
+ Trims outputs over 600 est. tokens · must save 20% · 3 con…
+ Assistants
+ ✓ Claude Code       not yet observed
+ ✓ Cursor            configured
+ ✓ Shims             not yet observed
+ Savings (all projects, estimated)
+ ≈134,830 tokens saved
+ 4 trimmed outputs
+ 1 re-open / 4 outputs (25%) ⚠ high
+ last #683db530 · l to view
+ Needs attention
+ ✗ PATH ~/.agentdiet/shims is not on PATH in this shell,
+   so the shims are never reached
+   → add to your shell rc: export
+     PATH="$HOME/.agentdiet/shims:$PATH"
+
+ p m l a d t ? q
+```
+
+Below 40x12 (39x11): `● Active · Balanced mode` and `Enlarge the terminal, or press q`.
+
+The mode picker (`m`) and the assistants list (`a`, with its confirmation) are full-screen panes, so they
+also work in a small terminal:
+
+```
+ Diet Mode
+   1  light
+      Gentlest: only very large outputs are trimmed; the agent sees the most.
+      outputs over 1,500 est. tokens · must save 40% · 5 context lines
+ > 2  balanced  (current)
+      The default: trims long, repetitive output and keeps every error.
+      outputs over 600 est. tokens · must save 20% · 3 context lines
+   3  ultra-lean
+      Most aggressive: smallest context, but agents may re-open outputs more.
+      outputs over 250 est. tokens · must save 10% · 1 context line
+
+ ↑↓ move · enter or 1-3 choose · esc back
+```
+
+```
+ Assistants
+   ✓ Claude Code                 connected
+ > ✓ Cursor                      connected
+   · Windsurf                    not connected
+   · Gemini CLI                  not connected
+   · Copilot (VS Code)           not connected
+   · Codex                       not connected
+   ✓ Shims (~/.agentdiet/shims)  connected
+
+ Disconnect Cursor? Your original config is restored.  [y/N]
+
+ y confirms · any other key cancels
+```
+
+Keys (every one has a CLI equivalent, shown in the `?` pane):
+
+| Key | Does | CLI |
+|---|---|---|
+| `p` | pause / resume, at once | `pause`, `resume` |
+| `m` | mode picker (`1` `2` `3`, or ↑↓ and enter) | `mode <mode>` |
+| `l` | scrollable last trimmed output | `show last` |
+| `a` | assistants; enter, then `y`, connects or disconnects | `init --only`, `disconnect` |
+| `d` | every check with its fix | `doctor` |
+| `t` | the live dashboard on the same terminal; `q` returns | `top` |
+| `r` / `?` | reload / help | |
+| `q`, Esc, Ctrl-C | back out of a view; quit from the main view (Ctrl-C always quits) | |
+
+Navigation rules: ↑↓ and `j`/`k` move and scroll; PgUp, PgDn, Home and End scroll long panes; Esc and `q`
+go back one view; a confirmation is cancelled by any key but `y`. A failed action is a message above the
+keys, never an exit. Colour is optional: with `NO_COLOR` the view uses bold and reverse video only, and
+with a non-UTF-8 locale it draws `+ ! x - * # o ~ -> ...`.
 
 ### 6.6 `--help` (P2 design)
 
@@ -376,19 +458,108 @@ Acceptance criteria:
 - Regression: the whole existing suite passes; `stats --json`, `scan`, `show '#id'`, hooks, MCP and
   shim tests are unchanged.
 
-### P1 — Control Center and selective disconnect
+### P1 — Control Center, selective disconnect, honest verification (done)
 
-- Control Center per §6.5 (status block, command hints, *Check the setup*, *Quit*, `vim_mode`);
-  SPEC §2.1 updated. Files: `src/control.rs`.
-- `agentdiet eject --only <targets>` (reuses `eject::eject(only)`); `--purge` stays full-eject only and
-  errors when combined with `--only`. Eject output in the init format (one line per target:
-  `disconnected`, `restored`, `nothing to remove`). Files: `src/cli.rs`, `src/init.rs`.
-- First run: bare `agentdiet` with nothing connected offers `init`; `init` ends with the doctor verdict.
-- Doctor: collapse repeated "uses a different agentdiet" warnings into one line on the Binary row
-  ("assistants run ~/.local/bin/agentdiet; this is a different build"). Seen live on a developer
-  machine running the debug build: five identical warnings for one cause.
-- Acceptance: menu-order test updated to the new §2.1; `eject --only cursor` leaves Claude Code
-  byte-identical; `eject --only x --purge` is a usage error; eject of nothing prints one line.
+Files: `src/center.rs` (new), `src/control.rs` (menu removed; `mode_line`, `mode_blurb`), `src/top.rs`
+(`run_in`, shared `Restore`), `src/status.rs` (`CheckKind`, `Observed`, `doctor_for`, one-line binary
+warning), `src/init.rs` (`render_eject`, Verification block), `src/init/eject.rs` (per-target `actions`),
+`src/ui.rs` (`asciify`, `ascii_wanted`), `src/cli.rs` (`disconnect`, `eject --only`, `mcp` hidden),
+`src/main.rs`, `SPEC.md`, `README.md`, `tests/cli.rs`.
+
+What changed for people:
+
+- **Control Center.** One screen: Active/Paused and the mode with what it does, each assistant's state
+  (`verified`, `not yet observed`, `configured`, `not connected`, a warning or a problem), savings with
+  their scope, what needs attention with its fix, recent activity, and the keys. Pause, mode, last output,
+  connect/disconnect, checks and the live dashboard are one key each.
+- **`agentdiet disconnect <targets>`** and **`eject --only <targets>`** (same thing): one line per target
+  (`disconnected` with what was restored, deleted or cleaned, or `nothing to remove`), then "Restart X so
+  it stops loading AgentDiet." and "Other assistants are unchanged." `--purge` with `--only` is a usage
+  error. `eject` and `uninstall` keep working for everything.
+- **`init` verifies what it connected.** Claude Code and the shims read `configured, not yet observed`
+  until runs are recorded; MCP-only assistants read `configured` (runs cannot be attributed to them);
+  nothing reads `verified` from configuration alone. Targets `init` already explained, and the `PATH`
+  line, are not repeated.
+- **`doctor`** says `verified` only with recorded runs (with how long ago), and reports "assistants run
+  `~/.local/bin/agentdiet`, a different build" once on the Binary row instead of once per assistant.
+- **`mcp`** is hidden from `--help` like `hook` (both still work and are documented in the README).
+
+Mockups captured from the real build:
+
+```
+$ agentdiet disconnect cursor
+  Cursor        ✓ disconnected    restored ~/.cursor/mcp.json
+
+Restart Cursor so it stops loading AgentDiet.
+Other assistants are unchanged.
+Backups are kept in ~/.agentdiet/backups
+```
+
+```
+$ agentdiet init --only claude,cursor,codex,gemini,shims     # Cursor has a JSONC config, Codex a hand-written block
+  Claude Code   ✓ connected           hooks, MCP server, EXPERIENCE.md pointer
+  Cursor        ⚠ skipped
+                  ~/.cursor/mcp.json: not valid JSON (key must be a string at line 1 column 3); it may use comments or trailing commas; left untouched
+  Gemini CLI    ✓ connected           MCP server
+  Codex         ⚠ skipped
+                  ~/.codex/config.toml: `mcp_servers.agentdiet` is already defined by hand; left untouched
+  Shims         ✓ connected           11 commands linked in ~/.agentdiet/shims
+
+Backed up the originals to ~/.agentdiet/backups/1792508595176
+
+Verification
+  Claude Code   ✓ configured, not yet observed  restart it, then run any tool
+  Gemini CLI    ✓ configured                    MCP server; runs can't be attributed to it
+  Shims         ✓ configured, not yet observed  recorded once an agent runs git, cargo, …
+
+Next:
+  1. Add the shims to your PATH (AgentDiet never edits shell rc files):
+       export PATH="$HOME/.agentdiet/shims:$PATH"
+  2. Restart Claude Code and Gemini CLI so they load the new config.
+  3. Check the setup: agentdiet doctor
+```
+
+Acceptance criteria (all covered by tests):
+
+- Key sequences become actions without I/O (`p`, `m 3`, `m esc`, `a ↓ enter n` cancels, `a ↓ enter y`
+  disconnects, `q` backs out of a view and quits only from the main view); `apply` reaches `state.json`
+  and the configs, restores a config byte for byte, and turns a failure (an invalid config, an
+  unwritable state directory) into a message.
+- The screen fits every row at 80x24, 100x40, 70x14, 60x20, 45x12, 39x11, 20x5 and 200x60, shows the
+  empty states on a fresh home, switches to the narrow and tiny layouts, uses ASCII glyphs for a non-UTF-8
+  locale and no colour at all without it.
+- `disconnect cursor` restores Cursor's original bytes and leaves every other assistant's files
+  identical; several targets, the shims and a repeat all work; `disconnect` → `init` → `eject` restores
+  the pristine originals; `eject --only x --purge` exits 2 and changes nothing.
+- `doctor` reports one Binary warning for N configs on the same other build, and keeps a single odd one
+  out on its own row; `doctor_for` checks only the selected targets.
+- `--help` lists `disconnect` and neither `mcp` nor `hook`; `agentdiet mcp` still serves.
+- Driven in a pseudo-terminal at 80x24 and narrower: the view renders; `p`, `m 1`, `m ↓↓ enter`, `a enter y`
+  (disconnect, then connect again) change `state.json` and the configs; `?`, `d`, `l`, a resize and `t`
+  then `q` return to the Control Center; `q` and Ctrl-C leave the alternate screen and show the cursor.
+
+### P1 hardening (done, before the P1 commit)
+
+- **Nothing prints over a full-screen view.** `state::read` returns the corrupt/unreadable `state.json`
+  reason instead of printing it; the CLI still prints it, the Control Center and `top` silence it for
+  their process and show it themselves (*Needs attention*, `top`'s footer).
+- **Stop signals restore the terminal.** `src/tui.rs` installs SIGTERM/SIGHUP/SIGINT handlers that only
+  store the signal number; the event loops wait at most 100 ms, restore the terminal from ordinary code
+  (raw mode, main screen, cursor, the last of which `ratatui::restore` alone did not do) and re-raise the
+  signal. SIGKILL/SIGSTOP and a vanished terminal remain unfixable (SPEC §2.5). `tests/tui_pty.rs`
+  drives both views in a real pseudo-terminal.
+- **`top`** uses the Control Center's glyph, border and colour rules.
+- **From the new-user walkthrough** (isolated HOME, release binary copied in, every step from install to
+  recovery):
+  - a person's `show last` no longer counts as an agent re-opening an output: three looks at one's own
+    output had produced "Re-opened 3 of 1 (300%) ⚠ high: agents re-read trimmed output";
+  - the ratio reads "1 re-open for 4 trimmed outputs (25%)" (it can exceed 100%);
+  - `pause` says "untrimmed (still scrubbed)", not "raw"; the Control Center has its own short message;
+  - `init` without a terminal prints the exact command for what was detected;
+  - bare `agentdiet` without a terminal points at the next step, not at `status` it just printed;
+  - "partly connected" says how many files were written, never naming a skipped part as done;
+  - one moved or deleted binary behind several rows gets one fix naming every target;
+  - "TUI" is gone from `--help`.
 
 ### P2 — help, vocabulary, errors
 
@@ -413,10 +584,10 @@ Acceptance criteria:
   but changes model-facing text: needs SPEC §3 Tier 3 item 6, the P5 never-inflate tests and a live
   check that agents still follow it.
 
-## 11. Open decisions (not blocking P0)
+## 11. Open decisions (not blocking)
 
-1. Hide `mcp` from `--help` (P2)? Recommended: yes; it stays callable.
-2. Primary name `eject` or `uninstall`? Recommended: keep `eject` primary, `uninstall` alias (no churn).
+1. ~~Hide `mcp` from `--help`~~: done in P1; `hook` was already hidden.
+2. ~~`eject` or `uninstall`~~: `eject` stays primary, `uninstall` is an alias, `disconnect` is the everyday verb.
 3. Add `clap_complete` (P3)?
 4. Bare-hex breadcrumbs (P3)?
 

@@ -17,13 +17,41 @@ mark later slices (§8). Nothing tagged here may be described as shipped.
 
 ### 2.1 Control Center
 
-Running bare `agentdiet` opens an interactive Control Center menu (`inquire`), in this order:
+Running bare `agentdiet` in a terminal opens the Control Center, a full-screen ratatui view (no scrollback is
+written). Without a terminal it prints the `agentdiet status` output (§3b) and exits 0.
 
-1. **Pause / Resume** — a toggle; the label reflects the current status.
-2. **Inspect last trimmed output** — shows the most recent ID (e.g. `#4f9a1b2c`) and its content.
-3. **Switch Diet Mode** — Light / Balanced / Ultra-Lean.
-4. **Manage Connected Assistants** — add or remove the integrations that `init` manages.
-5. **Open `agentdiet top`** — the ratatui TUI.
+**Panels.** A header (`● Active` or `■ Paused`, the Diet Mode and its one-line description from §3 Tier 2);
+*Assistants* (one row per connected assistant: its `doctor` state, §3b); *Savings* (the §2.3 counters, "all
+projects, estimated", the re-opened ratio and the last ID); *Needs attention* (the `doctor` problems and
+warnings with their fixes; absent when there are none); *Recent activity* (this workspace's newest memory.db
+rows); and a footer with the keys. Empty states are explicit: no assistants ("press a to connect one, or run
+`agentdiet init`"), nothing trimmed yet, no activity in this workspace yet.
+
+**Keys**, each with a CLI equivalent that the `?` overlay lists:
+
+| Key | Does | CLI |
+|---|---|---|
+| `p` | pause / resume | `pause`, `resume` |
+| `m` | mode picker with each mode's description (`1`/`2`/`3`, or ↑↓ and enter) | `mode <mode>` |
+| `l` | scrollable view of the last trimmed output (↑↓, PgUp, PgDn) | `show last` |
+| `a` | assistants list; enter connects or disconnects the selected one after a `y/N` confirmation | `init --only`, `disconnect` |
+| `d` | every `doctor` check with its fix | `doctor` |
+| `t` | the live dashboard (`top`, §3b) in the same terminal; `q` returns | `top` |
+| `r` | reload everything, including the checks | |
+| `?` | help overlay | |
+| `q`, Ctrl-C | quit; Esc and `q` close an open view first | |
+
+**Writes.** The Control Center changes something only through an explicit key: `p`, a picked mode, or a
+confirmed connect or disconnect. A failure (a busy lock, an unreadable config) is shown as a message and the
+view stays open. Its periodic reload never runs the Vault GC and never writes `state.json`. `l` reads the
+entry through the Vault like `show` does (so it shares `show`'s own GC point, §3 Tier 3) but is not an
+agent-facing read and is not counted as a re-open (§2.3). State is reloaded every 2 s; the `doctor` checks
+run at start, on `r` and after an action. `t` runs the `top` dashboard on the same terminal, including its
+Vault GC (§3b).
+
+**Layout.** Below 70 columns the view is one column (the Recent panel is hidden and the footer shows bare
+keys); below 40 columns or 12 rows it shows the status line and "Enlarge the terminal, or press q". A resize
+redraws. The terminal is restored on every exit path, including a panic and Ctrl-C.
 
 ### 2.2 `agentdiet init`
 
@@ -84,7 +112,13 @@ Running bare `agentdiet` opens an interactive Control Center menu (`inquire`), i
   linked`), never listed one per line. After the targets come the backup directory, when anything
   was backed up, and a numbered **Next** list: the `PATH` line (as above, only when the shims were
   selected), "restart <the assistants just connected or updated> so they load the new config" when
-  anything was written, and `agentdiet doctor`. A dry run ends with
+  anything was written, and `agentdiet doctor`. Between the targets and **Next** a **Verification** block
+  gives each connected target the state `doctor` would (§3b): `verified` (runs of it were observed in
+  this workspace), `configured, not yet observed` (Claude Code's hooks and the shims, which AgentDiet can
+  observe, but has not yet), `configured` (an MCP-only assistant, which AgentDiet cannot attribute runs to),
+  or its problem with the fix. Only the selected targets are checked, and a problem already named in
+  **Next** (the `PATH` line) is not repeated. Configuration alone is never called working. A dry run
+  skips verification and ends with
   `Dry run: nothing was written. Run the same command without --dry-run to apply.`
   This output is for people and is not a stable format; the library's `InitReport` is.
 - Slice 1 writes, per target (user scope / `--project` scope):
@@ -135,7 +169,7 @@ Global state lives in `~/.agentdiet/state.json`:
 | `last_trimmed_id` | ID without the `#` (e.g. `"4f9a1b2c"`) of the most recently trimmed output, or `null` (default). Read by the Control Center's "Inspect last trimmed output". Any value of at least 4 hex is accepted on read. |
 | `trimmed_outputs` | non-negative integer: replacements the engine emitted (`Replaced`, §3 Tier 2) |
 | `tokens_saved` | non-negative integer: the sum, over those replacements, of the scrubbed original's estimated tokens minus the emitted text's (§3 Tier 2, "Estimated tokens") |
-| `cas_dereferences` | non-negative integer: successful Vault reads by an agent-facing path, i.e. `agentdiet show` (with an ID or with `last`) and the MCP tool `diet_inspect` (every breadcrumb and fold marker points at `show`). The Control Center's "Inspect last trimmed output" and `agentdiet top` are not counted. |
+| `cas_dereferences` | non-negative integer: successful Vault reads by an agent-facing path, i.e. `agentdiet show '#id'` and the MCP tool `diet_inspect` (every breadcrumb and fold marker points at `show`). `agentdiet show last`, the Control Center's last-output view (`l`) and `agentdiet top` are not counted: they are a person reading. |
 
 - A missing, unreadable or corrupt `state.json` loads as defaults (fail open); unknown fields are ignored,
   and a missing counter loads as 0.
@@ -226,6 +260,10 @@ and exit codes, hook stdout and the MCP server.
 - **Colour** is used only when the stream it is written to is a terminal, `NO_COLOR` is unset or
   empty, and `TERM` is not `dumb`. stdout and stderr are checked separately. Piped or redirected output
   never contains an escape sequence.
+- **Glyphs.** `✓ ⚠ ✗ · ● ■ ○ ≈ → …` need a UTF-8 terminal. When the locale (`LC_ALL`, else `LC_CTYPE`, else
+  `LANG`, the first one set) names a non-UTF-8 charset (`C`, `POSIX`, `ISO8859-1`) or `TERM` is `dumb`,
+  people-facing output and the Control Center use `+ ! x - * # o ~ -> ...` instead (`■` is `#`). An unset locale counts as
+  UTF-8. With `NO_COLOR`, the Control Center uses bold and reverse video, never colour.
 - **Symbols are never the only signal.** Every `✓`, `⚠`, `✗` or `·` is followed by a word
   (`working`, `configured`, `warning`, `broken`, `not connected`, …), so the text reads correctly
   without colour, in a screen reader, or pasted into an issue.
@@ -237,6 +275,20 @@ and exit codes, hook stdout and the MCP server.
   it is never a panic.
 - **Numbers** carry their scope and their nature: counters from `state.json` are "all projects",
   run log totals are "this workspace", and token counts are "estimated" (§3 Tier 2).
+- **Full-screen views** (the Control Center and `top`) follow the same glyph and colour rules (`top`'s
+  boxes become `+ - |` on an ASCII terminal). While one is open:
+  - nothing is printed to stderr over it: a corrupt or unreadable `state.json` is shown inside the view
+    (the Control Center's *Needs attention*, `top`'s footer), and the state warning that the CLI prints
+    is suppressed for that process;
+  - SIGTERM, SIGHUP and SIGINT restore the terminal (raw mode off, main screen, cursor shown) and the
+    process then ends by that same signal, so a parent sees the real cause. The handler only records
+    the signal (an atomic store); the restore runs in ordinary code, within 100 ms, from the event
+    loop. Known limits: SIGKILL and SIGSTOP cannot be caught, so they leave the terminal as it was
+    (`reset` fixes it); a signal that arrives while a confirmed connect or disconnect is being written
+    takes effect once that action has finished (it is never cut short half-way; each file is written
+    atomically); after SIGHUP the terminal
+    may already be gone, and the restore's writes then fail silently; raw mode turns Ctrl-Z into a
+    plain key, which is ignored; on platforms without Unix signals there is no handler.
 - **Words.** The user-facing names are *Vault* (never "CAS"), *trimmed output*, *re-opened* (an agent
   read a trimmed output back from the Vault; `cas_dereferences` in JSON), *assistant*, *shims* and
   *Diet Mode*. JSON keys and `state.json` fields keep their names.
@@ -948,7 +1000,7 @@ already exists. It always exits 0. Lines, in order (§2.5 rules apply):
    `none connected` with `agentdiet init` as the next step.
 3. *Saved*: `≈<tokens_saved> tokens in <trimmed_outputs> trimmed outputs (all projects, estimated)`,
    or `nothing trimmed yet` while `trimmed_outputs` is 0.
-4. *Re-opened*, only while `trimmed_outputs` is above 0: `<cas_dereferences> of <trimmed_outputs>
+4. *Re-opened*, only while `trimmed_outputs` is above 0: `<n> re-open(s) for <trimmed_outputs> trimmed output(s)
    (<rate>)`, with the same warning as `agentdiet top` when the rate is strictly above 20% (§2.3).
    Raw counts are shown so a rate from a small sample is visibly one.
 5. *Paused*, only while paused: the estimated tokens passed untrimmed (still scrubbed) and
@@ -962,8 +1014,9 @@ already exists. It always exits 0. Lines, in order (§2.5 rules apply):
 `agentdiet doctor` checks that AgentDiet is wired up and working. It shares `status`'s read-only rule
 (it opens memory.db only when the file exists, and reads, never repairs, every file). Each check prints one line,
 `<label>  <symbol> <word>  <detail>`, and, when there is something to do, an indented `→ <fix>`
-line with an exact command. The words are `working`, `ok`, `configured`, `warning`, `broken`,
-`not connected` and `not installed`. Checks, in order:
+line with an exact command. The words are `verified`, `ok`, `configured`, `warning`, `broken`,
+`not connected` and `not installed`; a configured target AgentDiet can observe but has not yet reads
+`configured, not yet observed`. `verified` means runs were recorded, never that a config exists. Checks, in order:
 
 1. **This binary**: the running executable's path and version (information only).
 2. **State**: `~/.agentdiet/state.json`. Missing is `ok` (defaults). A file that cannot be read or is
@@ -986,16 +1039,19 @@ line with an exact command. The words are `working`, `ok`, `configured`, `warnin
      `init --only <target>` from the agentdiet binary the assistant should use.
    - `warning`, different binary: the file points at another agentdiet executable that exists. Both
      paths are shown. This is not a failure (a development build is a common cause), and doctor
-     never suggests re-running `init` from a binary the configs do not use.
+     never suggests re-running `init` from a binary the configs do not use. When every such target
+     (and the shims) points at the same other binary, doctor reports it once, on the **Binary** row
+     (`assistants run ~/.local/bin/agentdiet; this is a different build`), and those targets show
+     their own state instead of repeating the warning.
    - `warning`, skipped: `init` deliberately leaves the file alone (a conflict, e.g. a hand-written
      `mcp_servers.agentdiet` in Codex's `config.toml`).
    - `warning`, incomplete: some of the target's files hold agentdiet's entry and others lack it,
      or an entry differs from what `init` would write for the binary it points at (a missing hook
      event, a missing `EXPERIENCE.md` pointer). Fix: `agentdiet init --only <target>`.
-   - Otherwise the target is `configured`. A configured Claude Code target is `working` when this
+   - Otherwise the target is `configured`. A configured Claude Code target is `verified` when this
      workspace's run log has hook runs; the detail gives their count and how long ago the newest was
-     recorded, so old evidence reads as old. Otherwise it says "no activity recorded in this workspace yet;
-     restart Claude Code if it was running". MCP-only assistants stay `configured`: an MCP run cannot be
+     recorded, so old evidence reads as old. Otherwise it says `configured, not yet observed` ("no
+     activity recorded in this workspace yet; restart Claude Code if it was running"). MCP-only assistants stay `configured`: an MCP run cannot be
      attributed to one assistant. Missing activity is never a failure.
 4. **Shims**: not installed is `not installed` (optional). Otherwise each shim symlink must point at
    an agentdiet executable that exists (`broken` if it dangles; `warning` if it is another
@@ -1003,8 +1059,9 @@ line with an exact command. The words are `working`, `ok`, `configured`, `warnin
    `PATH` is `broken` (the shims are never reached), with the `export PATH=…` line as the fix; a
    `PATH` directory before it that holds one of the shimmed commands is a `warning` naming the command
    it shadows. The check reads doctor's own `PATH`, which can differ from an assistant's (an editor
-   started from the macOS Dock does not inherit the shell's `PATH`). The shims are `working` when
-   this workspace's run log has shim runs (count and age of the newest, as above).
+   started from the macOS Dock does not inherit the shell's `PATH`). The shims are `verified` when
+   this workspace's run log has shim runs (count and age of the newest, as above), and otherwise
+   `configured, not yet observed`.
 5. **Vault**: `~/.agentdiet/cas/`. Missing is `ok` (empty); otherwise its live entries and size, or
    `broken` when it cannot be listed.
 6. **Workspace memory**: the workspace's memory.db. Missing is `ok` ("nothing recorded here yet");
@@ -1025,7 +1082,9 @@ mode is a usage error (exit 2) that lists the valid ones. The change applies to 
 #### `show last`
 
 `agentdiet show last` (`last` in any case) shows the entry named by `last_trimmed_id`, exactly as
-`show '#<id>'` would: raw bytes on stdout, `--lines` allowed, counted as a dereference (§2.3). When
+`show '#<id>'` would: raw bytes on stdout, `--lines` allowed. It is **not** counted as a dereference
+(§2.3): breadcrumbs always give agents the `#id` form, and `last` is how a person looks at their own
+output, which must not raise the "agents re-read trimmed output" warning. When
 nothing has been trimmed yet, or that entry has expired or is missing, it prints the reason on stderr
 and exits 1; stdout stays empty. The ID stays **required**: `last` is never a default, because an
 unquoted `agentdiet show #4f9a` reaches agentdiet as a bare `show` (the shell drops the comment), and
@@ -1148,7 +1207,14 @@ Every file gets families **a**, **b** and **d**; *instruction files* (`*.md`, `*
   - Eject restores the **earliest** backup of each path byte-for-byte (or deletes a file init
     created) when the file still matches what init last wrote. If the user edited it since, eject
     removes only the agentdiet entries and keeps the user's edits.
-  - Processed manifests are renamed `manifest.ejected.json`; backups are kept.
+  - Processed manifests are renamed `manifest.ejected.json`; backups are kept. A manifest is renamed only
+    once all of its entries are ejected, so a partial eject leaves the rest restorable.
+  - **`--only <targets>`, and its everyday name `agentdiet disconnect <targets>`**, eject just those targets
+    (comma-separated or repeated), at user scope and in the current project, and leave every other target's
+    files byte-identical. The shims target removes the shim links. `--purge` deletes shared data and is
+    refused with `--only` (usage error, exit 2). The output has one line per target: `disconnected`
+    (with what was restored, deleted or cleaned) or `nothing to remove`, then "Restart <the assistants> so
+    they stop loading AgentDiet." A full eject prints the same lines for every target it touched.
 
 ## 4. Filesystem Layout
 
@@ -1170,12 +1236,13 @@ Every file gets families **a**, **b** and **d**; *instruction files* (`*.md`, `*
 | `agentdiet mode [light\|balanced\|ultra-lean]` | Prints or sets the Diet Mode |
 | `agentdiet show <'#id'\|last> [--lines a..b]` | Prints the full stored (scrubbed) output, or a line slice; `last` is the last trimmed output |
 | `agentdiet top` | Opens the TUI |
-| `agentdiet mcp` | Starts the MCP server |
 | `agentdiet scan [paths]` | Runs the security scanner |
 | `agentdiet stats [--json]` | Prints trimming counters and the workspace's run log totals |
 | `agentdiet reflect [--dry-run]` | Writes `EXPERIENCE.md` from the run log (no LLM) |
-| `agentdiet eject` / `agentdiet uninstall [--purge]` | Restores backups and removes agentdiet |
-| `agentdiet hook <event>` | Internal; invoked by assistant hooks |
+| `agentdiet disconnect <targets>` | Removes agentdiet from the chosen assistants only (same targets as `init --only`) |
+| `agentdiet eject [--only <targets>] [--purge]` / `agentdiet uninstall` | Restores backups and removes agentdiet; `--only` is `disconnect`; `--purge` needs a full eject |
+| `agentdiet mcp` | Internal; the MCP server that `init` registers. Hidden from `--help`, fully supported |
+| `agentdiet hook <event>` | Internal; invoked by assistant hooks. Hidden from `--help` |
 
 ## 6. Invariants
 
@@ -1297,6 +1364,24 @@ and this change (10,022,080 bytes, sha256 `3510c5cb…`), copied out and timed t
 - `status`, `doctor`, `mode` and the `init` summary add 82,736 bytes. Shim and hook dispatch still run
   before clap and reach none of that code; B1 and B2 are within run-to-run noise. **B1 remains NOT MET.**
 
+**UX-P1 re-measurement** (2026-10-20, same machine and harness, n = 1000 per arm). Release binaries built
+with `cargo build --release --locked` from `a827255` (UX-P0, 10,022,096 bytes, sha256 `5bfc51f2…`) and
+this change (10,071,616 bytes, sha256 `fd107e8e…`), timed through `AGENTDIET_PERF_BIN`, alternating head,
+new, head, new:
+
+| Binary | B1 p50 | B2 p50 | B3 p50 |
+|---|---|---|---|
+| UX-P0 (`a827255`) | 3.63, 3.60 ms | 2.46, 2.43 ms | 0.027 ms |
+| this change | 3.58, 3.58 ms | 2.44, 2.40 ms | 0.027 ms |
+
+- The Control Center, `disconnect` and the Verification block add 49,520 bytes. Shim and hook dispatch
+  still run before clap and reach none of that code; B1 and B2 are within run-to-run noise. **B1 remains
+  NOT MET.**
+- Re-run on the final P1 binary (with the signal handling, which is installed only when a full-screen
+  view opens; 10,104,672 bytes, sha256 `4ecd4e10…`), same method, on a quieter machine: head B1 2.66,
+  2.69 ms and B2 1.59, 1.62 ms; this change B1 2.69, 2.68 ms and B2 1.61, 1.61 ms. Within noise; only
+  the paired comparison is meaningful across sessions. **B1 remains NOT MET.**
+
 Notes:
 
 - Routing (B3, 0.03 ms) is about 1% of B1. B1 is consistent with paying for two process images in
@@ -1329,6 +1414,7 @@ Notes:
 | 5.1 | dogfooding fixes (`@diet:full` directive, `diet_exec` head/tail fallback and `npm ls` rule, workspace root and run log, scanner credential filter) and `stats` / `reflect` / `diet_reflect` / `EXPERIENCE.md` pointer | done, with tests; the run log's latency is measured above (§7); live check under Claude Code 2.1.303 (§3 Tier 3, "Run log"). Open: Grep's result fields were not checked against a live payload; B1 still NOT MET |
 
 | UX-P0 | CLI/UX overhaul, phase P0 (`docs/CLI_UX_OVERHAUL.md`): `status`, `doctor`, `mode`, `show last`, the §2.2 `init` output and non-terminal `--dry-run`, the §2.5 terminal rules | done, with tests. Later phases (Control Center redesign, `eject --only`, help layout, completions) are in that document and not started |
+| UX-P1 | CLI/UX overhaul, phase P1 (`docs/CLI_UX_OVERHAUL.md`): the ratatui Control Center (§2.1), `disconnect` and `eject --only`, post-`init` verification, `verified` / `not yet observed` wording, one-line binary warning, ASCII glyph fallback, `mcp` hidden from help | done, with tests. Help layout, wording of `stats`/`top`, completions, `--json` and bare-ID breadcrumbs are P2/P3 |
 
 License: MIT (`LICENSE`); third-party notices in `THIRD_PARTY_NOTICES`.
 

@@ -10,7 +10,7 @@ use anyhow::Context;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
@@ -19,6 +19,8 @@ use crate::cas::{Cas, CasStats};
 use crate::init;
 use crate::memory::MemoryDb;
 use crate::state::{self, DEREFERENCE_WARN_RATE, Mode, State, Status};
+use crate::tui::{self, Ctx};
+use crate::ui::Level;
 
 /// The dashboard reloads this often without a key press.
 pub const REFRESH: Duration = Duration::from_secs(2);
@@ -51,6 +53,9 @@ pub struct Snapshot {
     pub recent: Vec<RecentItem>,
     /// The result of the last key action, shown above the keys.
     pub message: Option<String>,
+    /// Why `state.json` could not be used (corrupt or unreadable), shown in the footer instead of
+    /// being printed over the screen.
+    pub state_warning: Option<String>,
 }
 
 impl Snapshot {
@@ -60,8 +65,10 @@ impl Snapshot {
         let cas = Cas::new(paths.cas_dir());
         // Best effort: `top` is one of the Vault's opportunistic GC points (SPEC §3 Tier 3).
         let _ = cas.gc(now);
+        let (state, state_warning) = state::read(paths);
         Self {
-            state: state::load(paths),
+            state,
+            state_warning,
             vault: cas.stats().unwrap_or_default(),
             assistants: init::installed(paths)
                 .into_iter()
@@ -73,7 +80,7 @@ impl Snapshot {
     }
 }
 
-fn recent_items(paths: &Paths, cas: &Cas, now: SystemTime) -> Vec<RecentItem> {
+pub(crate) fn recent_items(paths: &Paths, cas: &Cas, now: SystemTime) -> Vec<RecentItem> {
     let db_path = paths.memory_db();
     if !db_path.is_file() {
         return Vec::new();
@@ -123,8 +130,8 @@ pub fn next_mode(mode: Mode) -> Mode {
     }
 }
 
-/// Draw the dashboard into `frame`.
-pub fn draw(frame: &mut Frame<'_>, snap: &Snapshot) {
+/// Draw the dashboard into `frame`, with `ctx`'s glyphs and colour rules (SPEC §2.5).
+pub fn draw(frame: &mut Frame<'_>, snap: &Snapshot, ctx: Ctx) {
     let [header, metrics, table, footer] = Layout::vertical([
         Constraint::Length(3),
         Constraint::Length(7),
@@ -132,17 +139,17 @@ pub fn draw(frame: &mut Frame<'_>, snap: &Snapshot) {
         Constraint::Length(2),
     ])
     .areas(frame.area());
+    let block = |title: &str| {
+        Block::new()
+            .borders(Borders::ALL)
+            .border_set(ctx.border())
+            .title(ctx.t(title))
+    };
 
     let s = &snap.state;
-    let (status, status_style) = match s.status {
-        Status::Active => (
-            "● ACTIVE",
-            Style::new().fg(Color::Green).add_modifier(Modifier::BOLD),
-        ),
-        Status::Paused => (
-            "■ PAUSED",
-            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        ),
+    let (status, level) = match s.status {
+        Status::Active => ("● ACTIVE", Level::Ok),
+        Status::Paused => ("■ PAUSED", Level::Warning),
     };
     let assistants = if snap.assistants.is_empty() {
         "none".to_string()
@@ -150,14 +157,14 @@ pub fn draw(frame: &mut Frame<'_>, snap: &Snapshot) {
         snap.assistants.join(", ")
     };
     let header_line = Line::from(vec![
-        Span::styled(status, status_style),
+        ctx.span(status, ctx.level(level).add_modifier(Modifier::BOLD)),
         Span::raw("   Mode: "),
-        Span::styled(s.mode.label(), Style::new().add_modifier(Modifier::BOLD)),
+        Span::styled(s.mode.label(), ctx.bold()),
         Span::raw("   Assistants: "),
         Span::raw(assistants),
     ]);
     frame.render_widget(
-        Paragraph::new(header_line).block(Block::new().borders(Borders::ALL).title(" AgentDiet ")),
+        Paragraph::new(header_line).block(block(" AgentDiet ")),
         header,
     );
 
@@ -194,21 +201,17 @@ pub fn draw(frame: &mut Frame<'_>, snap: &Snapshot) {
                 thousands(s.trimmed_outputs)
             );
             if rate > DEREFERENCE_WARN_RATE {
-                let warn = Style::new().fg(Color::Red).add_modifier(Modifier::BOLD);
+                let warn = ctx.level(Level::Broken).add_modifier(Modifier::BOLD);
                 lines.push(Line::styled(text, warn));
-                lines.push(Line::styled(WARNING, Style::new().fg(Color::Yellow)));
+                lines.push(ctx.line(WARNING, ctx.level(Level::Warning)));
             } else {
                 lines.push(Line::from(text));
             }
         }
     }
-    frame.render_widget(
-        Paragraph::new(lines).block(Block::new().borders(Borders::ALL).title(" Metrics ")),
-        metrics,
-    );
+    frame.render_widget(Paragraph::new(lines).block(block(" Metrics ")), metrics);
 
-    let bold = Style::new().add_modifier(Modifier::BOLD);
-    let head = Row::new(["#id", "kind", "command / path", "summary"]).style(bold);
+    let head = Row::new(["#id", "kind", "command / path", "summary"]).style(ctx.bold());
     let rows = snap.recent.iter().map(|r| {
         let id =
             r.id.as_deref()
@@ -232,26 +235,33 @@ pub fn draw(frame: &mut Frame<'_>, snap: &Snapshot) {
         " Recent trimmed outputs & memory "
     };
     frame.render_widget(
-        Table::new(rows, widths)
-            .header(head)
-            .block(Block::new().borders(Borders::ALL).title(title)),
+        Table::new(rows, widths).header(head).block(block(title)),
         table,
     );
 
-    let footer_lines = vec![
-        Line::from(snap.message.clone().unwrap_or_default()),
-        Line::styled(KEYS, Style::new().fg(Color::DarkGray)),
-    ];
-    frame.render_widget(Paragraph::new(footer_lines), footer);
+    let note = match (&snap.message, &snap.state_warning) {
+        (Some(message), _) => Line::from(message.clone()),
+        (None, Some(warning)) => ctx.line(
+            &format!("⚠ state.json: {warning}"),
+            ctx.level(Level::Warning),
+        ),
+        (None, None) => Line::default(),
+    };
+    frame.render_widget(
+        Paragraph::new(vec![note, ctx.line(KEYS, ctx.dim())]),
+        footer,
+    );
 }
 
-/// Restores the terminal however [`run`] ends (ratatui's own panic hook covers a panic).
-struct Restore;
-
-impl Drop for Restore {
-    fn drop(&mut self) {
-        ratatui::restore();
-    }
+/// How a dashboard session ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ended {
+    /// `q` or Esc: back to whoever opened it.
+    Back,
+    /// Ctrl-C: quit altogether.
+    Quit,
+    /// A stop signal arrived (SIGTERM, SIGHUP, SIGINT); see [`tui::exit_for_signal`].
+    Signal(i32),
 }
 
 /// Open the dashboard. Fails, drawing nothing, without a terminal on stdin and stdout.
@@ -259,58 +269,77 @@ pub fn run(paths: &Paths) -> anyhow::Result<()> {
     if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
         anyhow::bail!(NO_TTY);
     }
-    let mut terminal = ratatui::try_init().context("could not set up the terminal")?;
-    let _restore = Restore;
+    let (mut terminal, restore) = tui::enter()?;
+    match run_in(&mut terminal, paths, Ctx::from_env())? {
+        Ended::Signal(sig) => tui::exit_for_signal(sig, restore),
+        Ended::Back | Ended::Quit => Ok(()),
+    }
+}
+
+/// The dashboard loop on a terminal the caller already owns (the Control Center's `t`). Leaves the
+/// terminal as it found it and says how it ended.
+pub fn run_in(
+    terminal: &mut ratatui::DefaultTerminal,
+    paths: &Paths,
+    ctx: Ctx,
+) -> anyhow::Result<Ended> {
     let mut snap = Snapshot::load(paths, SystemTime::now());
     let mut loaded = Instant::now();
     loop {
+        if let Some(sig) = tui::pending_signal() {
+            return Ok(Ended::Signal(sig));
+        }
         terminal
-            .draw(|frame| draw(frame, &snap))
+            .draw(|frame| draw(frame, &snap, ctx))
             .context("could not draw the dashboard")?;
         let wait = REFRESH.saturating_sub(loaded.elapsed());
-        let mut message = snap.message.take();
-        if event::poll(wait).context("could not read the keyboard")? {
-            let Event::Key(key) = event::read().context("could not read the keyboard")? else {
-                snap.message = message;
-                continue;
-            };
-            if key.kind != KeyEventKind::Press {
-                snap.message = message;
-                continue;
-            }
-            match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    return Ok(());
-                }
-                KeyCode::Char('p') => {
-                    let target = match snap.state.status {
-                        Status::Active => Status::Paused,
-                        Status::Paused => Status::Active,
-                    };
-                    message = Some(match state::set_status(paths, target) {
-                        Ok(_) if target == Status::Paused => "Paused.".to_string(),
-                        Ok(_) => "Resumed.".to_string(),
-                        Err(e) => format!("Could not change status: {e}"),
-                    });
-                }
-                KeyCode::Char('m') => {
-                    let mode = next_mode(snap.state.mode);
-                    message = Some(match state::set_mode(paths, mode) {
-                        Ok(_) => format!("Diet Mode set to {}.", mode.label()),
-                        Err(e) => format!("Could not change mode: {e}"),
-                    });
-                }
-                KeyCode::Char('r') => message = Some("Refreshed.".to_string()),
-                _ => {
-                    snap.message = message;
-                    continue;
+        let mut reload = false;
+        if tui::poll(wait).context("could not read the keyboard")? {
+            // Anything but a key press (a resize, a release) only needs the redraw above.
+            if let Event::Key(key) = event::read().context("could not read the keyboard")?
+                && key.kind == KeyEventKind::Press
+            {
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => return Ok(Ended::Back),
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        return Ok(Ended::Quit);
+                    }
+                    KeyCode::Char('p') => {
+                        let target = match snap.state.status {
+                            Status::Active => Status::Paused,
+                            Status::Paused => Status::Active,
+                        };
+                        snap.message = Some(match state::set_status(paths, target) {
+                            Ok(_) if target == Status::Paused => "Paused.".to_string(),
+                            Ok(_) => "Resumed.".to_string(),
+                            Err(e) => format!("Could not change status: {e}"),
+                        });
+                        reload = true;
+                    }
+                    KeyCode::Char('m') => {
+                        let mode = next_mode(snap.state.mode);
+                        snap.message = Some(match state::set_mode(paths, mode) {
+                            Ok(_) => format!("Diet Mode set to {}.", mode.label()),
+                            Err(e) => format!("Could not change mode: {e}"),
+                        });
+                        reload = true;
+                    }
+                    KeyCode::Char('r') => {
+                        snap.message = Some("Refreshed.".to_string());
+                        reload = true;
+                    }
+                    _ => {}
                 }
             }
         }
-        snap = Snapshot::load(paths, SystemTime::now());
-        snap.message = message;
-        loaded = Instant::now();
+        // The snapshot (and its Vault GC) is reloaded after an action or every REFRESH, never on
+        // every tick.
+        if reload || loaded.elapsed() >= REFRESH {
+            let message = snap.message.take();
+            snap = Snapshot::load(paths, SystemTime::now());
+            snap.message = message;
+            loaded = Instant::now();
+        }
     }
 }
 
@@ -325,7 +354,18 @@ mod tests {
     /// The rendered 80x24 screen, one string per row.
     fn render(snap: &Snapshot) -> Vec<String> {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        terminal.draw(|f| draw(f, snap)).unwrap();
+        terminal
+            .draw(|f| {
+                draw(
+                    f,
+                    snap,
+                    Ctx {
+                        ascii: false,
+                        color: true,
+                    },
+                )
+            })
+            .unwrap();
         let buffer = terminal.backend().buffer();
         (0..buffer.area.height)
             .map(|y| {
@@ -369,11 +409,92 @@ mod tests {
                 },
             ],
             message: None,
+            state_warning: None,
         }
     }
 
     fn screen(snap: &Snapshot) -> String {
         render(snap).join("\n")
+    }
+
+    fn screen_with(snap: &Snapshot, ctx: Ctx) -> (String, ratatui::buffer::Buffer) {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| draw(f, snap, ctx)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let text = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        (text, buffer)
+    }
+
+    #[test]
+    fn ascii_terminals_get_ascii_boxes_and_glyphs() {
+        let ctx = Ctx {
+            ascii: true,
+            color: true,
+        };
+        let (text, _) = screen_with(&sample(5, 10), ctx);
+        // Only our own text is checked: tool output in the table could hold anything.
+        assert!(text.is_ascii(), "{text}");
+        assert!(
+            text.contains("+ AgentDiet ---") && text.contains("# PAUSED"),
+            "{text}"
+        );
+        assert!(text.contains("! high: agents re-read"), "{text}");
+        assert!(text.contains("q/Esc quit - p pause/resume"), "{text}");
+    }
+
+    #[test]
+    fn no_color_means_no_hue_anywhere() {
+        let ctx = Ctx {
+            ascii: false,
+            color: false,
+        };
+        let (_, buffer) = screen_with(&sample(5, 10), ctx);
+        assert!(
+            buffer
+                .content()
+                .iter()
+                .all(|c| c.fg == ratatui::style::Color::Reset
+                    && c.bg == ratatui::style::Color::Reset)
+        );
+        let (_, colored) = screen_with(
+            &sample(5, 10),
+            Ctx {
+                ascii: false,
+                color: true,
+            },
+        );
+        assert!(
+            colored
+                .content()
+                .iter()
+                .any(|c| c.fg != ratatui::style::Color::Reset)
+        );
+    }
+
+    #[test]
+    fn a_corrupt_state_file_is_shown_in_the_footer_not_printed() {
+        let dir = TempDir::new().unwrap();
+        let paths = Paths::new(
+            dir.path().join("home"),
+            dir.path().join("cfg"),
+            dir.path().join("proj"),
+            "/x/agentdiet".into(),
+        );
+        std::fs::create_dir_all(&paths.agentdiet_home).unwrap();
+        std::fs::write(paths.state_file(), "{ not json").unwrap();
+        let snap = Snapshot::load(&paths, SystemTime::now());
+        assert_eq!(snap.state, State::default());
+        let warning = snap.state_warning.clone().unwrap();
+        assert!(warning.starts_with("ignoring corrupt"), "{warning}");
+        let text = screen(&snap);
+        assert!(text.contains("⚠ state.json: ignoring corrupt"), "{text}");
     }
 
     #[test]

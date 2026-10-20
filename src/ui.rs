@@ -102,10 +102,71 @@ impl Painter {
     }
 }
 
-/// Write `text` to stdout. A reader that went away (`agentdiet doctor | head`) ends the output
-/// quietly instead of panicking like `print!`; any other write error is returned.
+/// SPEC §2.5 "Glyphs": `true` when the locale (`LC_ALL`, else `LC_CTYPE`, else `LANG`: the first one
+/// that is set and not empty) names a non-UTF-8 charset, or `TERM` is `dumb`. Unset means UTF-8.
+pub fn ascii_wanted(
+    lc_all: Option<&OsStr>,
+    lc_ctype: Option<&OsStr>,
+    lang: Option<&OsStr>,
+    term: Option<&OsStr>,
+) -> bool {
+    if term.is_some_and(|t| t == "dumb") {
+        return true;
+    }
+    [lc_all, lc_ctype, lang]
+        .into_iter()
+        .flatten()
+        .find(|v| !v.is_empty())
+        .is_some_and(|v| {
+            let v = v.to_string_lossy().to_ascii_lowercase();
+            !(v.contains("utf-8") || v.contains("utf8"))
+        })
+}
+
+/// [`ascii_wanted`] for this process's environment.
+pub fn ascii_from_env() -> bool {
+    let var = |name| std::env::var_os(name);
+    ascii_wanted(
+        var("LC_ALL").as_deref(),
+        var("LC_CTYPE").as_deref(),
+        var("LANG").as_deref(),
+        var("TERM").as_deref(),
+    )
+}
+
+/// `✓ ⚠ ✗ · ● ■ ○ ≈ → …` as `+ ! x - * # o ~ -> ...` (the symbols this crate prints).
+pub fn asciify(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '✓' => out.push('+'),
+            '⚠' => out.push('!'),
+            '✗' => out.push('x'),
+            '·' => out.push('-'),
+            '●' => out.push('*'),
+            '■' => out.push('#'),
+            '○' => out.push('o'),
+            '≈' => out.push('~'),
+            '→' => out.push_str("->"),
+            '…' => out.push_str("..."),
+            '↑' => out.push('^'),
+            '↓' => out.push('v'),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Write `text` to stdout, in ASCII when the environment asks for it. A reader that went away
+/// (`agentdiet doctor | head`) ends the output quietly instead of panicking like `print!`; any other
+/// write error is returned.
 pub fn emit(text: &str) -> std::io::Result<()> {
     use std::io::Write;
+    let text = if ascii_from_env() {
+        asciify(text)
+    } else {
+        text.to_string()
+    };
     let mut out = std::io::stdout().lock();
     match out.write_all(text.as_bytes()).and_then(|()| out.flush()) {
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
@@ -177,6 +238,32 @@ mod tests {
             badge.ends_with("  "),
             "padding sits outside the colour codes"
         );
+    }
+
+    #[test]
+    fn the_locale_decides_between_unicode_and_ascii() {
+        let os = |s: &'static str| Some(OsStr::new(s));
+        let w = |a, c, l, t| ascii_wanted(a, c, l, t);
+        assert!(!w(None, None, None, None), "unset is UTF-8");
+        assert!(!w(None, None, os("en_US.UTF-8"), os("xterm")));
+        assert!(!w(None, None, os("de_DE.utf8"), None));
+        assert!(w(None, None, os("C"), None));
+        assert!(w(None, None, os("POSIX"), None));
+        assert!(w(None, None, os("en_US.ISO8859-1"), None));
+        // The first one that is set wins, and empty counts as unset.
+        assert!(w(os("C"), None, os("en_US.UTF-8"), None));
+        assert!(!w(os(""), None, os("en_US.UTF-8"), None));
+        assert!(!w(None, os("en_US.UTF-8"), os("C"), None));
+        assert!(w(None, None, os("en_US.UTF-8"), os("dumb")));
+    }
+
+    #[test]
+    fn asciify_keeps_meaning_and_other_text() {
+        assert_eq!(
+            asciify("✓ ok · ⚠ warn → fix… ≈5 ● ○ ✗"),
+            "+ ok - ! warn -> fix... ~5 * o x"
+        );
+        assert_eq!(asciify("plain café"), "plain café");
     }
 
     #[test]

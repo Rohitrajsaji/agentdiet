@@ -4,6 +4,7 @@
 //! never errors — a missing or corrupt file simply yields the defaults.
 
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -128,27 +129,52 @@ pub enum Change {
     Unchanged,
 }
 
-/// Load the state, falling back to defaults (with a stderr warning when the
-/// file exists but is unreadable or corrupt).
-pub fn load(paths: &Paths) -> State {
+/// While set, [`load`] keeps its warning to itself: a full-screen view (the Control Center, `top`)
+/// sets it, because stderr would land on top of the screen. Those views show the problem themselves
+/// (the doctor `State` check, [`read`]).
+static QUIET: AtomicBool = AtomicBool::new(false);
+
+/// Stop [`load`] (and so every state update) from writing warnings to stderr, for this process.
+pub fn quiet_warnings() {
+    QUIET.store(true, Ordering::Relaxed);
+}
+
+/// The state, falling back to defaults, and the reason when the file exists but is unreadable or
+/// corrupt. Never prints.
+pub fn read(paths: &Paths) -> (State, Option<String>) {
     let path = paths.state_file();
     match fsutil::read_optional_regular(&path) {
-        Ok(None) => State::default(),
-        Ok(Some(bytes)) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-            eprintln!(
-                "agentdiet: ignoring corrupt {} ({e}); using defaults",
+        Ok(None) => (State::default(), None),
+        Ok(Some(bytes)) => match serde_json::from_slice(&bytes) {
+            Ok(state) => (state, None),
+            Err(e) => (
+                State::default(),
+                Some(format!(
+                    "ignoring corrupt {} ({e}); using defaults",
+                    path.display()
+                )),
+            ),
+        },
+        Err(e) => (
+            State::default(),
+            Some(format!(
+                "cannot read {} ({e}); using defaults",
                 path.display()
-            );
-            State::default()
-        }),
-        Err(e) => {
-            eprintln!(
-                "agentdiet: cannot read {} ({e}); using defaults",
-                path.display()
-            );
-            State::default()
-        }
+            )),
+        ),
     }
+}
+
+/// Load the state, falling back to defaults (with a stderr warning when the file exists but is
+/// unreadable or corrupt, unless [`quiet_warnings`] was called).
+pub fn load(paths: &Paths) -> State {
+    let (state, warning) = read(paths);
+    if let Some(warning) = warning
+        && !QUIET.load(Ordering::Relaxed)
+    {
+        eprintln!("agentdiet: {warning}");
+    }
+    state
 }
 
 /// Atomically write the state.

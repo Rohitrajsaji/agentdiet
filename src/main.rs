@@ -9,7 +9,8 @@ use clap::Parser;
 use agentdiet::cas::{Cas, LineRange};
 use agentdiet::cli::{Cli, Command};
 use agentdiet::{
-    Paths, control, diet, hook, init, mcp, reflect, scan, shim, state, stats, status, top, ui,
+    Paths, center, control, diet, hook, init, mcp, reflect, scan, shim, state, stats, status, top,
+    ui,
 };
 
 fn main() -> ExitCode {
@@ -70,8 +71,11 @@ fn run_hook(event: Option<&OsString>) -> ExitCode {
 /// (a bare `show` to us) still fails instead of printing a different entry.
 fn show(paths: &Paths, id: &str, lines: Option<&str>) -> anyhow::Result<()> {
     let range = lines.map(LineRange::parse).transpose()?;
+    // `last` is how a person looks at their own output; breadcrumbs always give agents the ID. Only
+    // the ID form counts as an agent re-opening a trimmed output (SPEC §2.3).
+    let by_person = id.trim().eq_ignore_ascii_case("last");
     let id = match id {
-        id if !id.trim().eq_ignore_ascii_case("last") => id.to_string(),
+        id if !by_person => id.to_string(),
         _ => state::load(paths)
             .last_trimmed_id
             .context("nothing has been trimmed yet, so there is no last output to show")?,
@@ -80,7 +84,9 @@ fn show(paths: &Paths, id: &str, lines: Option<&str>) -> anyhow::Result<()> {
     let cas = Cas::new(paths.cas_dir());
     let bytes = cas.read(id, range, SystemTime::now())?;
     // Best effort: a dereference the lock cannot record within 100 ms is dropped (SPEC §2.3).
-    let _ = state::record_dereference(paths);
+    if !by_person {
+        let _ = state::record_dereference(paths);
+    }
     let mut out = std::io::stdout().lock();
     out.write_all(&bytes).context("could not write to stdout")?;
     out.flush().context("could not write to stdout")
@@ -95,7 +101,7 @@ fn run() -> anyhow::Result<ExitCode> {
     let paths = Paths::from_env()?;
 
     match cli.command {
-        None => control::run(&paths)?,
+        None => center::run(&paths)?,
         Some(Command::Init {
             only,
             all,
@@ -104,7 +110,8 @@ fn run() -> anyhow::Result<ExitCode> {
         }) => init::cmd_init(&paths, only, all, project, dry_run)?,
         Some(Command::Pause) => println!("{}", control::pause(&paths)?),
         Some(Command::Resume) => println!("{}", control::resume(&paths)?),
-        Some(Command::Eject { purge }) => init::cmd_eject(&paths, purge)?,
+        Some(Command::Eject { only, purge }) => init::cmd_eject(&paths, &only, purge)?,
+        Some(Command::Disconnect { targets }) => init::cmd_eject(&paths, &targets, false)?,
         Some(Command::Mcp) => {
             // The engine runs here too (`diet_exec`): a panic message must not echo its output.
             install_quiet_panic_hook();

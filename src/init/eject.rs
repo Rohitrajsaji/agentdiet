@@ -19,8 +19,20 @@ use super::targets::{self, Target};
 use super::{InitError, io_err, shims};
 use crate::{Paths, fsutil};
 
+/// What eject did to one file (or the shim links) of a target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    Restored,
+    Deleted,
+    Cleaned,
+    ShimsRemoved,
+}
+
 #[derive(Debug, Default)]
 pub struct EjectReport {
+    /// The same outcomes per target, in the order they happened (`ShimsRemoved` carries the shims
+    /// directory). The flat lists below stay for callers that only count.
+    pub actions: Vec<(Target, Action, PathBuf)>,
     /// Files restored byte-for-byte from a backup.
     pub restored: Vec<PathBuf>,
     /// Files init had created, now deleted.
@@ -34,6 +46,19 @@ pub struct EjectReport {
 }
 
 impl EjectReport {
+    fn note(&mut self, target: Target, action: Action, path: &Path) {
+        self.actions.push((target, action, path.to_path_buf()));
+    }
+
+    /// The files eject touched for `target`, with what it did to each.
+    pub fn for_target(&self, target: Target) -> Vec<(Action, &Path)> {
+        self.actions
+            .iter()
+            .filter(|(t, ..)| *t == target)
+            .map(|(_, a, p)| (*a, p.as_path()))
+            .collect()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.restored.is_empty()
             && self.deleted.is_empty()
@@ -100,7 +125,11 @@ pub fn eject(
     sweep(paths, &wanted, &mut report)?;
 
     if wanted(Target::Shims) {
-        report.shims_removed.extend(shims::remove(paths)?);
+        let removed = shims::remove(paths)?;
+        if !removed.is_empty() {
+            report.note(Target::Shims, Action::ShimsRemoved, &paths.shims_dir());
+        }
+        report.shims_removed.extend(removed);
     }
 
     for loaded in &manifests {
@@ -129,6 +158,7 @@ fn restore_pristine(
                 Ok(original) => {
                     fsutil::atomic_write(path, &original).map_err(io_err(path))?;
                     report.restored.push(path.to_path_buf());
+                    report.note(earliest.target, Action::Restored, path);
                 }
                 Err(e) => {
                     report.warnings.push(format!(
@@ -143,6 +173,7 @@ fn restore_pristine(
         None => {
             fs::remove_file(path).map_err(io_err(path))?;
             report.deleted.push(path.to_path_buf());
+            report.note(earliest.target, Action::Deleted, path);
         }
     }
     Ok(())
@@ -176,6 +207,7 @@ fn strip_entries(
                 path.display()
             ));
             report.cleaned.push(path.to_path_buf());
+            report.note(entry.target, Action::Cleaned, path);
         }
         Ok(None) => {}
         Err(e) => report
@@ -212,6 +244,7 @@ fn sweep(
                             && !report.restored.contains(&file.path)
                         {
                             report.cleaned.push(file.path.clone());
+                            report.note(target, Action::Cleaned, &file.path);
                         }
                     }
                     Ok(None) => {}

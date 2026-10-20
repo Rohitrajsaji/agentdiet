@@ -58,14 +58,24 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Disconnect AgentDiet from some assistants, leaving the others as they are
+    Disconnect {
+        /// Assistants to disconnect (comma-separated or repeated): claude, cursor, windsurf,
+        /// gemini, copilot, codex, shims. Removes them at user scope and in this project.
+        #[arg(required = true, value_enum, value_delimiter = ',')]
+        targets: Vec<Target>,
+    },
     /// Restore original configs from backups and remove AgentDiet
     #[command(visible_alias = "uninstall")]
     Eject {
+        /// Only these assistants (same as `disconnect`)
+        #[arg(long, value_enum, value_delimiter = ',', conflicts_with = "purge")]
+        only: Vec<Target>,
         /// Also delete the vault, project memory and state ledger
         #[arg(long)]
         purge: bool,
     },
-    /// Open the live TUI dashboard
+    /// Open the live dashboard (refreshes every 2 s)
     Top,
     /// Print trimming counters and this workspace's run log totals
     Stats {
@@ -85,6 +95,7 @@ pub enum Command {
         paths: Vec<std::path::PathBuf>,
     },
     /// Start the MCP server on stdio (assistants run this; `init` registers it)
+    #[command(hide = true)]
     Mcp,
     /// Internal: invoked by assistant hooks
     #[command(hide = true)]
@@ -129,7 +140,10 @@ mod tests {
     #[test]
     fn uninstall_is_an_alias_for_eject() {
         let cli = Cli::try_parse_from(["agentdiet", "uninstall", "--purge"]).unwrap();
-        assert!(matches!(cli.command, Some(Command::Eject { purge: true })));
+        assert!(matches!(
+            cli.command,
+            Some(Command::Eject { purge: true, .. })
+        ));
     }
 
     #[test]
@@ -146,6 +160,34 @@ mod tests {
             Some(Mode::UltraLean)
         );
         assert!(Cli::try_parse_from(["agentdiet", "mode", "ligth"]).is_err());
+    }
+
+    #[test]
+    fn disconnect_takes_targets_and_eject_only_refuses_purge() {
+        let cli =
+            Cli::try_parse_from(["agentdiet", "disconnect", "cursor,codex", "gemini"]).unwrap();
+        let Some(Command::Disconnect { targets }) = cli.command else {
+            panic!("expected disconnect");
+        };
+        assert_eq!(targets, vec![Target::Cursor, Target::Codex, Target::Gemini]);
+        assert!(Cli::try_parse_from(["agentdiet", "disconnect"]).is_err());
+        let cli = Cli::try_parse_from(["agentdiet", "uninstall", "--only", "cursor"]).unwrap();
+        assert!(
+            matches!(cli.command, Some(Command::Eject { only, .. }) if only == [Target::Cursor])
+        );
+        assert!(
+            Cli::try_parse_from(["agentdiet", "eject", "--only", "cursor", "--purge"]).is_err()
+        );
+    }
+
+    #[test]
+    fn mcp_and_hook_are_hidden_but_still_parse() {
+        use clap::CommandFactory;
+        let help = Cli::command().render_help().to_string();
+        assert!(!help.contains("  mcp"), "{help}");
+        assert!(!help.contains("  hook"), "{help}");
+        assert!(help.contains("disconnect"));
+        assert!(Cli::try_parse_from(["agentdiet", "mcp"]).is_ok());
     }
 
     #[test]

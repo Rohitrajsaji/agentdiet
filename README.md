@@ -96,7 +96,7 @@ agentdiet init --project --dry-run     # project-level configs; print the diff, 
 Day to day:
 
 ```sh
-agentdiet                              # Control Center: pause/resume, inspect last output, Diet Mode, assistants, top
+agentdiet                              # Control Center: status at a glance, one-key pause, mode, last output, assistants, checks, live dashboard
 agentdiet status                       # on or paused, Diet Mode, connected assistants, tokens saved, health
 agentdiet doctor                       # checks configs, binary paths, shims and PATH; prints the fix for each problem
 agentdiet pause                        # stays paused until resumed (Claude Code: or type "@diet pause" in chat)
@@ -109,6 +109,7 @@ agentdiet top                          # live dashboard: tokens saved, Vault, CA
 agentdiet scan                         # static scan of .claude/, .cursor/, .mcp.json, SKILL.md, CLAUDE.md, AGENTS.md
 agentdiet stats                        # counters plus this workspace's run log (shim / MCP / hook runs); --json
 agentdiet reflect                      # write EXPERIENCE.md: recipes and pitfalls learned from the run log (no LLM)
+agentdiet disconnect cursor            # remove AgentDiet from some assistants only (same as `eject --only cursor`)
 agentdiet eject                        # restore original configs, remove hooks and shims (--purge also deletes the Vault)
 ```
 
@@ -128,7 +129,7 @@ agentdiet eject                        # restore original configs, remove hooks 
 
 ### MCP tools
 
-`agentdiet mcp` is a stdio JSON-RPC 2.0 server, which `init` registers for every assistant. It
+`agentdiet mcp` is a stdio JSON-RPC 2.0 server, which `init` registers for every assistant (assistants run it; it is hidden from `--help`, as is `agentdiet hook <event>`, which the hooks call). It
 offers four tools:
 
 | Tool | Arguments | Does |
