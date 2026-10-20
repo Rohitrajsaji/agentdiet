@@ -1,6 +1,6 @@
 # AgentDiet CLI/UX overhaul
 
-Status: **P0 and P1 implemented**; P2–P3 designed, not started. `SPEC.md` stays the source of truth for
+Status: **P0 and P1 implemented** (`a827255`, `0b58e02`); P2 planned (below), P3 designed; neither started. `SPEC.md` stays the source of truth for
 behaviour (§2.2 `init` output, §2.5 terminal rules, §3b Status / Doctor / Mode / `show last`); this
 document holds the design reasoning, the mockups and the task list.
 
@@ -561,18 +561,143 @@ Acceptance criteria (all covered by tests):
   - one moved or deleted binary behind several rows gets one fix naming every target;
   - "TUI" is gone from `--help`.
 
-### P2 — help, vocabulary, errors
+### P2 — help, vocabulary, broken pipes, README (planned, not started)
 
-- Help per §6.6; `mcp` hidden (decision below); `after_help` examples on `init`, `show`, `mode`, `scan`.
-- `stats` text: "CAS dereferences" → "re-opened"; `top`: same; JSON unchanged.
-- Error hints: `no vault entry matches #x` adds "IDs come from breadcrumbs; `agentdiet status` shows
-  the last one"; the state-busy error names the retry.
-- README rewritten around §5 workflows.
-- Broken pipes: `stats`, `reflect`, `scan`, `pause`/`resume` and the eject report still use
-  `print!`/`println!`, which panic when the reader closes early (`agentdiet stats | head -1`); route
-  them through `ui::emit` like the P0 commands.
-- Acceptance: a test that every visible `Command` variant appears in the help template; `stats --json`
-  snapshot unchanged; `top` render tests updated to the new words.
+Inventory taken after the P1 commit (`0b58e02`), from the isolated-HOME walkthrough and a probe that
+runs every command with a stdout pipe whose reader has already closed.
+
+**Problems found**
+
+| Area | Today | Why it matters |
+|---|---|---|
+| Broken pipe | `stats`, `stats --json`, `reflect --dry-run`, `pause`, `resume`, `mode <m>` **panic** (exit 101). `pause` panics *after* changing the state | A panic trace for `agentdiet stats \| head`; looks like a crash |
+| Broken pipe | `scan` and `show` print "could not write to stdout: Broken pipe" and exit 1 | `show last \| head` is normal use; for `scan` a closed pipe must not replace its 0/1/2 exit status |
+| `stats` words | "All projects (state.json)", "CAS dereferences", "Run log, workspace /abs/path", origins `shim`/`mcp`/`hook`, "tokens in -> out" | Internal names; an absolute path; tokens not labelled as estimates |
+| `top` words | "● ACTIVE", "CAS dereference rate", "Raw tokens passed while paused", "Recent trimmed outputs & memory", keys "q/Esc quit · m cycle mode" | Differs from the Control Center and `status` for the same facts |
+| Help | One flat list; no examples; `init --only` repeats the target list twice (`[possible values: …]`); targets are bare slugs | Hard to scan; nothing to copy |
+| Errors | `no vault entry matches #0000`, `invalid ID "#zz"` give no next step | A person does not know where IDs come from or that they expire |
+| README | Architecture first; quick start in the middle; no troubleshooting; no Control Center, `disconnect` or `doctor` workflow | First-time readers start in the wrong place |
+| Wording drift | Pause/resume, re-open and Vault phrases are formatted separately in `status`, the Control Center, `top` and `stats` | They have already drifted once (P1 fixed `status` and the Control Center only) |
+
+**Contracts that P2 must not touch:** `stats --json` keys and values; `scan` report lines and its 0/1/2
+exit codes; `show`'s bytes; breadcrumbs and fold markers; `CasError`'s `Display` (the MCP tool
+`diet_inspect` returns it to agents, so person-facing hints go in `main.rs`, not in the error type);
+hook stdout; the MCP server.
+
+**P2.1 — one place for shared phrases** (`src/status.rs` → a small `src/words.rs`)
+
+- Functions for: the status word (`● Active` / `■ Paused`), the mode line (`control::mode_line`, moved),
+  the savings phrase, the re-open phrase (`1 re-open for 4 trimmed outputs (25%)`), the Vault phrase
+  (`12 entries, 340.2 KiB`), the paused phrase ("passes through untrimmed (still scrubbed)").
+- `status`, `doctor`, the Control Center, `top` and `stats` all call them.
+- Test: the four renderers produce the same phrase for the same `State`.
+
+**P2.2 — `stats` and `top` vocabulary** (`src/stats.rs`, `src/top.rs`)
+
+- `stats` text:
+
+  ```
+  AgentDiet is active · Balanced mode
+
+  All projects (estimated)
+    trimmed outputs       4
+    tokens saved          ≈134,830
+    re-opened by agents   1 re-open for 4 trimmed outputs (25%)
+    passed while paused   ≈0 tokens, untrimmed (still scrubbed)
+    last trimmed          #683db530 · agentdiet show last
+
+  This workspace (~/code/app)
+    via               runs  failed  trimmed  est. tokens before → after
+    shims                4       0        0  0 → 0
+    MCP (diet_exec)      1       0        1  8,000 → 120
+    Claude Code hooks   34       0        0  32,080 → 32,080
+  ```
+
+  With no memory.db: "Nothing recorded in this workspace yet." `--json` is byte-for-byte unchanged
+  (snapshot test).
+- `top`: the same status word, re-open, paused and Vault phrases; the table is titled "Recent activity
+  (this workspace)"; the keys read `p pause  m next mode  r reload  q back` (`q` quits when `top` was
+  started on its own).
+- Test: a banned-words check over every people-facing render (`status`, `doctor`, `stats`, `mode`,
+  `init`/`disconnect` summaries, the Control Center, `top`, `--help`): no "CAS", "dereference", "run log",
+  "origin", "TUI", "LLM" or "raw" (except "raw bytes" in `show --help`). Paths such as
+  `~/.agentdiet/state.json` are allowed.
+
+**P2.3 — broken pipes everywhere** (`src/main.rs`, `src/ui.rs`, `src/init.rs`)
+
+- Every people-facing `println!`/`print!` goes through `ui::emit`: `pause`, `resume`, `mode <m>`,
+  `stats`, `reflect`, eject warnings, "Nothing selected".
+- `show`: a closed reader ends the output quietly with exit 0. The bytes it does write are unchanged.
+- `scan`: a closed reader is ignored, and the exit status stays the one the findings decide (0/1/2).
+- `stats --json`: quiet, exit 0.
+- Test (`tests/cli.rs`, with `std::io::pipe`, stable since Rust 1.87, under the README's 1.90 floor,
+  so no new crate): every command with a stdout whose reader is closed. Expect
+  no panic, no "Broken pipe" message, and the documented exit status. `pause` still pauses.
+
+**P2.4 — help hierarchy and examples** (`src/cli.rs`)
+
+- Top-level help is grouped. clap has a single subcommand heading, so this uses a `help_template` that
+  prints the usage and an `after_help` command map:
+  - **Everyday:** status, pause/resume, mode, show, doctor
+  - **Setup:** init, disconnect, eject
+  - **Insight & tools:** top, stats, scan, reflect
+
+  It ends with "Run `agentdiet` with no arguments for the Control Center." `mcp` and `hook` stay hidden.
+- Per-command `after_help` examples:
+  - `init`: `--only claude,shims`, `--dry-run`, `--project`
+  - `disconnect`: `cursor`, `codex,gemini`
+  - `show`: `last`, `'#4f9a1b2c' --lines 10..40`, and why to quote
+  - `mode`: `light`
+  - `doctor` and `scan`: exit statuses
+  - `eject`: `--only` versus a full eject, and `--purge`
+- `--only`: `hide_possible_values`, with the targets explained once: `claude` (Claude Code), `cursor`,
+  `windsurf`, `gemini` (Gemini CLI), `copilot` (VS Code), `codex`, `shims` (wrappers for git, cargo, npm, …).
+- Tests:
+  - every visible subcommand appears exactly once in the command map, and nothing is listed that does
+    not exist;
+  - every example line in every `after_help` parses with `Cli::try_parse_from`.
+
+**P2.5 — errors with a next step** (`src/main.rs` only)
+
+- `show` with an unknown or expired ID adds: "IDs come from the 🥗 Diet line under a trimmed output;
+  `agentdiet show last` prints the newest. Entries are kept 7 days after their last use."
+- An invalid ID adds the same hint.
+- The `state.json` warning on stderr shows `~/…` paths.
+- `CasError` itself is unchanged, because it is agent-facing.
+
+**P2.6 — README overhaul** (`README.md`)
+
+Order:
+
+1. What it is: one paragraph and the breadcrumb example.
+2. **Quick start:** install, `agentdiet init`, add the PATH line, restart the assistant,
+   `agentdiet doctor`, then `agentdiet`, with the Control Center capture.
+3. **Everyday use:** a command table (status, pause/resume, mode, show last, doctor, disconnect), the
+   chat directives (`@diet pause`, `@diet resume`, `@diet:full`), and the Control Center keys.
+4. **Troubleshooting:** each `doctor` message with its meaning and fix: PATH, moved binary, different
+   build, JSONC config, corrupt `state.json`, "not yet observed".
+5. Before/After numbers.
+6. Diet Modes.
+7. What `init` writes for each assistant, backups, `disconnect` and `eject`.
+8. **Advanced:** MCP tools, `stats`, `scan`, `reflect`, `top`, `--project`, `AGENTDIET_WORKSPACE`, and the
+   internal `mcp`/`hook`.
+9. How it works (three tiers).
+10. Build from source, status and limits, license.
+
+Test: every `agentdiet …` line in the README's code blocks parses with `Cli::try_parse_from`, so the README
+cannot document a command that does not exist.
+
+**Order and acceptance**
+
+- Order: P2.3 first (crash fixes, smallest), then P2.1, P2.2, P2.5, P2.4, and P2.6 last (it quotes the
+  final output).
+- SPEC first for each step: §2.5 words and pipes, §3b Stats and `top`, §5.
+- Acceptance:
+  - the full suite, clippy and fmt pass;
+  - the banned-words, pipe, help-map, README-parse and phrase-equality tests are added;
+  - the `stats --json` snapshot is unchanged;
+  - the new-user walkthrough is re-run in an isolated HOME;
+  - B1/B2 re-measured paired against `0b58e02`.
 
 ### P3 — optional
 
