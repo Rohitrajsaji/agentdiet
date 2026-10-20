@@ -104,6 +104,17 @@ impl PatchKind {
         }
     }
 
+    /// The agentdiet executable the entry in `text` runs. `None` for the rules pointer, which runs
+    /// nothing, and for an entry without a readable command.
+    pub fn configured_exe(&self, text: &str) -> Option<PathBuf> {
+        match self {
+            PatchKind::ClaudeHooks => json_patch::claude_hook_program(text),
+            PatchKind::Mcp { key, .. } => json_patch::mcp_command(text, key),
+            PatchKind::CodexBlock => toml_block::block_command(text),
+            PatchKind::RulePointer => None,
+        }
+    }
+
     pub fn is_present(&self, text: &str) -> bool {
         match self {
             PatchKind::ClaudeHooks => json_patch::has_claude_hooks(text),

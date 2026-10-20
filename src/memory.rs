@@ -485,6 +485,15 @@ impl MemoryDb {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// When the newest run of `origin` was recorded (ms since the epoch), if there is one.
+    pub fn last_run_ms(&self, origin: Origin) -> Result<Option<i64>, MemoryError> {
+        Ok(self.conn.query_row(
+            "SELECT max(created_ms) FROM runs WHERE origin = ?1",
+            params![origin.as_str()],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Totals per origin (`shim`, `mcp`, `hook`), in that order; an origin with no runs is all 0.
     pub fn run_totals(&self) -> Result<Vec<(Origin, RunTotals)>, MemoryError> {
         let mut out = Vec::new();

@@ -84,6 +84,51 @@ pub fn resume(paths: &Paths) -> anyhow::Result<String> {
     })
 }
 
+/// `agentdiet mode <mode>` (and the Control Center's mode switch).
+pub fn set_mode(paths: &Paths, mode: Mode) -> anyhow::Result<String> {
+    Ok(
+        match state::set_mode(paths, mode).context("could not update state.json")? {
+            Change::Changed => format!("Diet Mode set to {}.", mode.label()),
+            Change::Unchanged => format!("Diet Mode is already {}.", mode.label()),
+        },
+    )
+}
+
+/// `agentdiet mode`: the current mode and what each one does, from its §3 Tier 2 parameters.
+pub fn mode_overview(state: &State, p: crate::ui::Painter) -> String {
+    use crate::diet::ModeParams;
+    use crate::ui::{Level, plural, thousands};
+
+    let mut out = format!(
+        "Diet Mode: {}
+
+",
+        p.bold(state.mode.label())
+    );
+    for mode in Mode::ALL {
+        let params = ModeParams::for_mode(mode);
+        let (mark, name) = if mode == state.mode {
+            ("●", p.level(Level::Ok, &format!("{:<11}", mode.slug())))
+        } else {
+            ("○", format!("{:<11}", mode.slug()))
+        };
+        out.push_str(&format!(
+            "  {mark} {name} outputs over {} est. tokens · must save {}% · {}
+",
+            thousands(params.min_tokens as u64),
+            params.saving_pct,
+            plural(params.context_lines, "context line", "context lines"),
+        ));
+    }
+    out.push_str(&format!(
+        "
+Change it: {}
+",
+        p.bold("agentdiet mode <light|balanced|ultra-lean>")
+    ));
+    out
+}
+
 /// "Inspect last trimmed output" shows at most this many lines of the entry.
 pub const INSPECT_MAX_LINES: usize = 400;
 
@@ -132,7 +177,8 @@ pub fn run(paths: &Paths) -> anyhow::Result<()> {
     if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
         println!("{}", status_line(&state));
         println!(
-            "Run `agentdiet --help` for commands, or run in a terminal for the Control Center."
+            "Run `agentdiet status` for details, `agentdiet --help` for commands, or run in a \
+             terminal for the Control Center."
         );
         return Ok(());
     }
@@ -200,10 +246,7 @@ fn switch_mode(paths: &Paths, state: &State) -> anyhow::Result<()> {
     let ModeChoice(mode) = inquire::Select::new("Diet Mode", options)
         .with_starting_cursor(cursor)
         .prompt()?;
-    match state::set_mode(paths, mode).context("could not update state.json")? {
-        Change::Changed => println!("Diet Mode set to {}.", mode.label()),
-        Change::Unchanged => println!("Diet Mode is already {}.", mode.label()),
-    }
+    println!("{}", set_mode(paths, mode)?);
     Ok(())
 }
 
@@ -322,6 +365,41 @@ mod tests {
         assert!(resume(&p).unwrap().contains("resumed"));
         assert!(resume(&p).unwrap().contains("already"));
         assert_eq!(state::load(&p).status, Status::Active);
+    }
+
+    #[test]
+    fn mode_overview_marks_the_current_mode_and_quotes_the_engine_parameters() {
+        let state = State {
+            mode: Mode::UltraLean,
+            ..State::default()
+        };
+        let text = mode_overview(&state, crate::ui::Painter::plain());
+        assert!(text.starts_with("Diet Mode: Ultra-Lean\n"));
+        assert!(text.contains(
+            "  ○ light       outputs over 1,500 est. tokens · must save 40% · 5 context lines\n"
+        ));
+        assert!(text.contains(
+            "  ● ultra-lean  outputs over 250 est. tokens · must save 10% · 1 context line\n"
+        ));
+        assert!(
+            text.lines().all(|l| l.chars().count() <= 80),
+            "fits 80 columns"
+        );
+    }
+
+    #[test]
+    fn set_mode_reports_changes() {
+        let dir = TempDir::new().unwrap();
+        let p = paths(&dir);
+        assert_eq!(
+            set_mode(&p, Mode::Light).unwrap(),
+            "Diet Mode set to Light."
+        );
+        assert_eq!(
+            set_mode(&p, Mode::Light).unwrap(),
+            "Diet Mode is already Light."
+        );
+        assert_eq!(state::load(&p).mode, Mode::Light);
     }
 
     #[test]

@@ -66,7 +66,27 @@ Running bare `agentdiet` opens an interactive Control Center menu (`inquire`), i
   - All edits are byte edits on the original text (append, or replace the block's own lines), so
     the user's comments and formatting are untouched.
   - `eject` applies the same marker validation and removes nothing it cannot prove is ours.
-- Shell rc files are never edited; `init` prints the `PATH` line for the shims directory instead.
+- Shell rc files are never edited; `init` prints the `PATH` line for the shims directory instead,
+  unless the shims directory already comes first on this process's `PATH` (the `doctor` PATH check,
+  §3b "Doctor").
+- **Choosing targets without a terminal.** `--only` and `--all` pick the targets. Without either, a
+  terminal gets the checklist. Without a terminal (stdin or stdout not a TTY), `--dry-run` previews
+  the targets the checklist would pre-select (the detected assistants, plus the shims at user scope),
+  and a real run exits 1 with a message that names `--only`, `--all` and the detected targets. Neither
+  case writes or creates anything.
+- **Output.** `init` prints one line per selected target, in checklist order: the target's label,
+  a word for what happened, and a short detail. The words are `connected` (agentdiet was not present
+  and its entries were written), `updated` (agentdiet was present and at least one file was
+  rewritten), `already connected` (every file was up to date), `skipped` (nothing written, with the
+  reason) and `partly connected` (some files written or up to date, some skipped, with the reasons).
+  A dry run says `would connect` / `would update` instead and prints the planned diffs first. Paths
+  under the home directory are shown as `~/…`. Shim symlinks are counted as commands (`11 commands
+  linked`), never listed one per line. After the targets come the backup directory, when anything
+  was backed up, and a numbered **Next** list: the `PATH` line (as above, only when the shims were
+  selected), "restart <the assistants just connected or updated> so they load the new config" when
+  anything was written, and `agentdiet doctor`. A dry run ends with
+  `Dry run: nothing was written. Run the same command without --dry-run to apply.`
+  This output is for people and is not a stable format; the library's `InitReport` is.
 - Slice 1 writes, per target (user scope / `--project` scope):
 
   | Target | User scope | `--project` |
@@ -115,7 +135,7 @@ Global state lives in `~/.agentdiet/state.json`:
 | `last_trimmed_id` | ID without the `#` (e.g. `"4f9a1b2c"`) of the most recently trimmed output, or `null` (default). Read by the Control Center's "Inspect last trimmed output". Any value of at least 4 hex is accepted on read. |
 | `trimmed_outputs` | non-negative integer: replacements the engine emitted (`Replaced`, §3 Tier 2) |
 | `tokens_saved` | non-negative integer: the sum, over those replacements, of the scrubbed original's estimated tokens minus the emitted text's (§3 Tier 2, "Estimated tokens") |
-| `cas_dereferences` | non-negative integer: successful Vault reads by an agent-facing path, i.e. `agentdiet show` and the MCP tool `diet_inspect` (every breadcrumb and fold marker points at `show`). The Control Center's "Inspect last trimmed output" and `agentdiet top` are not counted. |
+| `cas_dereferences` | non-negative integer: successful Vault reads by an agent-facing path, i.e. `agentdiet show` (with an ID or with `last`) and the MCP tool `diet_inspect` (every breadcrumb and fold marker points at `show`). The Control Center's "Inspect last trimmed output" and `agentdiet top` are not counted. |
 
 - A missing, unreadable or corrupt `state.json` loads as defaults (fail open); unknown fields are ignored,
   and a missing counter loads as 0.
@@ -195,6 +215,31 @@ Global state lives in `~/.agentdiet/state.json`:
     older than 7 days. `state.json` keeps exactly the §2.3 shape.
 - Every bypass skips trimming, TOON and folding and writes nothing to the Vault. None of them skips
   secret scrubbing (precedence rule P3).
+
+### 2.5 Terminal output
+
+These rules cover output meant for people: `status`, `doctor`, `mode`, `init`, `eject`, `pause`,
+`resume` and the Control Center. They never apply to agent-facing text, which keeps its own exact
+contracts: the breadcrumb and fold markers, `show`'s raw bytes, `stats --json`, `scan`'s report lines
+and exit codes, hook stdout and the MCP server.
+
+- **Colour** is used only when the stream it is written to is a terminal, `NO_COLOR` is unset or
+  empty, and `TERM` is not `dumb`. stdout and stderr are checked separately. Piped or redirected output
+  never contains an escape sequence.
+- **Symbols are never the only signal.** Every `✓`, `⚠`, `✗` or `·` is followed by a word
+  (`working`, `configured`, `warning`, `broken`, `not connected`, …), so the text reads correctly
+  without colour, in a screen reader, or pasted into an issue.
+- **Width.** Lines are laid out for an 80-column terminal: a label column as wide as the widest label
+  shown (at least 12 characters), a status column, then free text. Fixed-text lines (`mode`) fit in 80
+  columns; details that hold paths are allowed to wrap. Nothing depends on the terminal's width.
+- **Paths** under the home directory are shown as `~/…`, diff headers included.
+- **Pipes.** A reader that closes the pipe early (`agentdiet doctor | head`) ends the output quietly;
+  it is never a panic.
+- **Numbers** carry their scope and their nature: counters from `state.json` are "all projects",
+  run log totals are "this workspace", and token counts are "estimated" (§3 Tier 2).
+- **Words.** The user-facing names are *Vault* (never "CAS"), *trimmed output*, *re-opened* (an agent
+  read a trimmed output back from the Vault; `cas_dereferences` in JSON), *assistant*, *shims* and
+  *Diet Mode*. JSON keys and `state.json` fields keep their names.
 
 ## 3. Architecture — 3 Tiers
 
@@ -819,6 +864,8 @@ label (the agent's session id, `pid:<n>` or `agent:unknown`). It never holds out
   - `diet_search` — FTS5/BM25 search over `memory.db`.
   - `diet_exec` — run a command through the Diet Engine; returns trimmed output plus a breadcrumb.
   - `diet_reflect` — `agentdiet reflect` (below) as a tool.
+- **`agentdiet status`**, **`agentdiet doctor`**, **`agentdiet mode [<mode>]`** and
+  **`agentdiet show last`** — the everyday commands for people (below).
 - **`agentdiet stats [--json]`** — the §2.3 counters plus the workspace's run log totals (below).
 - **`agentdiet reflect [--dry-run]`** — learn `EXPERIENCE.md` from the run log, with no LLM (below).
 - **`agentdiet scan`** — static regex security scanner for skill, rule and MCP config files.
@@ -889,6 +936,100 @@ label (the agent's session id, `pid:<n>` or `agent:unknown`). It never holds out
 and estimated tokens before and after. `--json` prints one JSON object with the same numbers. It
 never creates memory.db; without one, the run log totals are zero and the text says nothing has been
 recorded.
+
+#### Status
+
+`agentdiet status` is the one-screen answer to "is AgentDiet on, and is it doing anything?". It is
+**read-only**: it never writes `state.json`, never runs the Vault GC, and opens memory.db only when it
+already exists. It always exits 0. Lines, in order (§2.5 rules apply):
+
+1. `AgentDiet is active · <Mode> mode`, or `AgentDiet is paused · <Mode> mode`.
+2. *Assistants*: the labels of the targets agentdiet is connected to (any scope), or
+   `none connected` with `agentdiet init` as the next step.
+3. *Saved*: `≈<tokens_saved> tokens in <trimmed_outputs> trimmed outputs (all projects, estimated)`,
+   or `nothing trimmed yet` while `trimmed_outputs` is 0.
+4. *Re-opened*, only while `trimmed_outputs` is above 0: `<cas_dereferences> of <trimmed_outputs>
+   (<rate>)`, with the same warning as `agentdiet top` when the rate is strictly above 20% (§2.3).
+   Raw counts are shown so a rate from a small sample is visibly one.
+5. *Paused*, only while paused: the estimated tokens passed untrimmed (still scrubbed) and
+   `agentdiet resume`.
+6. *Last trimmed*: `#<id>` and `agentdiet show last`, when `last_trimmed_id` is set.
+7. *Health*: the `doctor` verdict in one line: `✓ no problems found`, or the number of problems and
+   warnings and `agentdiet doctor`.
+
+#### Doctor
+
+`agentdiet doctor` checks that AgentDiet is wired up and working. It shares `status`'s read-only rule
+(it opens memory.db only when the file exists, and reads, never repairs, every file). Each check prints one line,
+`<label>  <symbol> <word>  <detail>`, and, when there is something to do, an indented `→ <fix>`
+line with an exact command. The words are `working`, `ok`, `configured`, `warning`, `broken`,
+`not connected` and `not installed`. Checks, in order:
+
+1. **This binary**: the running executable's path and version (information only).
+2. **State**: `~/.agentdiet/state.json`. Missing is `ok` (defaults). A file that cannot be read or is
+   not valid state JSON is `broken`: hooks and shims silently use the defaults (§2.3). The fix is to
+   remove the file (`rm ~/.agentdiet/state.json`); AgentDiet starts again from defaults and its
+   counters are lost. (`resume` is not a fix: on defaults it is already active and writes nothing.)
+3. **Each assistant** (every `init` target except the shims) at user scope, and at project scope
+   when the current project's file for it holds an agentdiet entry. Each of the target's files is
+   classified, and the target gets the worst of them:
+   - *not connected*: no file holds agentdiet's entry. Shown only when the assistant is detected
+     (as `init` detects it), with `agentdiet init --only <target>`; undetected assistants are listed on
+     one `not installed` line.
+   - `warning`, invalid file: a file that is not strict JSON / valid TOML or has an unexpected shape,
+     and that mentions `agentdiet` (or is one of several files of a connected target). AgentDiet can
+     neither check nor update it, but the assistant may well read it (Cursor and VS Code accept JSONC),
+     so it is not reported as broken. Fix: correct the file, then `agentdiet init --only <target>`. An
+     invalid file that does not mention agentdiet leaves the target `not connected`, with a note that
+     `init` would skip it.
+   - `broken`, missing binary: the agentdiet executable a file points at does not exist. Fix: run
+     `init --only <target>` from the agentdiet binary the assistant should use.
+   - `warning`, different binary: the file points at another agentdiet executable that exists. Both
+     paths are shown. This is not a failure (a development build is a common cause), and doctor
+     never suggests re-running `init` from a binary the configs do not use.
+   - `warning`, skipped: `init` deliberately leaves the file alone (a conflict, e.g. a hand-written
+     `mcp_servers.agentdiet` in Codex's `config.toml`).
+   - `warning`, incomplete: some of the target's files hold agentdiet's entry and others lack it,
+     or an entry differs from what `init` would write for the binary it points at (a missing hook
+     event, a missing `EXPERIENCE.md` pointer). Fix: `agentdiet init --only <target>`.
+   - Otherwise the target is `configured`. A configured Claude Code target is `working` when this
+     workspace's run log has hook runs; the detail gives their count and how long ago the newest was
+     recorded, so old evidence reads as old. Otherwise it says "no activity recorded in this workspace yet;
+     restart Claude Code if it was running". MCP-only assistants stay `configured`: an MCP run cannot be
+     attributed to one assistant. Missing activity is never a failure.
+4. **Shims**: not installed is `not installed` (optional). Otherwise each shim symlink must point at
+   an agentdiet executable that exists (`broken` if it dangles; `warning` if it is another
+   agentdiet, or if a shim is missing). Then **PATH, in this shell**: the shims directory missing from
+   `PATH` is `broken` (the shims are never reached), with the `export PATH=…` line as the fix; a
+   `PATH` directory before it that holds one of the shimmed commands is a `warning` naming the command
+   it shadows. The check reads doctor's own `PATH`, which can differ from an assistant's (an editor
+   started from the macOS Dock does not inherit the shell's `PATH`). The shims are `working` when
+   this workspace's run log has shim runs (count and age of the newest, as above).
+5. **Vault**: `~/.agentdiet/cas/`. Missing is `ok` (empty); otherwise its live entries and size, or
+   `broken` when it cannot be listed.
+6. **Workspace memory**: the workspace's memory.db. Missing is `ok` ("nothing recorded here yet");
+   otherwise its run count, or `broken` when it cannot be opened.
+
+When no assistant and no shims are connected, doctor reports `broken: nothing is connected` with
+`agentdiet init`. The last line is `All good.` or the counts that are not zero (`1 problem, 2 warnings.`, `3 warnings.`). Exit status: 0
+when nothing is `broken`, 1 otherwise.
+
+#### Mode
+
+`agentdiet mode` prints the current Diet Mode and the three modes, each described from its
+§3 Tier 2 parameters (size threshold, required saving, context lines), with the current one marked.
+`agentdiet mode <light|balanced|ultra-lean>` (also `ultra`) sets it, waiting up to 2 s for the state
+lock like `pause`; it prints `Diet Mode set to <Mode>.` or `Diet Mode is already <Mode>.`. An unknown
+mode is a usage error (exit 2) that lists the valid ones. The change applies to the next tool output.
+
+#### `show last`
+
+`agentdiet show last` (`last` in any case) shows the entry named by `last_trimmed_id`, exactly as
+`show '#<id>'` would: raw bytes on stdout, `--lines` allowed, counted as a dereference (§2.3). When
+nothing has been trimmed yet, or that entry has expired or is missing, it prints the reason on stderr
+and exits 1; stdout stays empty. The ID stays **required**: `last` is never a default, because an
+unquoted `agentdiet show #4f9a` reaches agentdiet as a bare `show` (the shell drops the comment), and
+that must fail as a usage error rather than print a different entry.
 
 #### Reflect
 
@@ -1021,10 +1162,13 @@ Every file gets families **a**, **b** and **d**; *instruction files* (`*.md`, `*
 | Command | What it does |
 |---|---|
 | `agentdiet` | Opens the Control Center |
+| `agentdiet status` | One-screen overview: on/paused, mode, assistants, savings, health (read-only) |
+| `agentdiet doctor` | Checks configs, binary paths, shims and `PATH`, state, Vault and memory; exits 1 on a problem |
 | `agentdiet init [--only <targets>] [--all] [--project] [--dry-run]` | Connects assistants |
 | `agentdiet pause` | Pauses trimming |
 | `agentdiet resume` | Resumes trimming |
-| `agentdiet show '#id' [--lines a..b]` | Prints the full stored (scrubbed) output, or a line slice |
+| `agentdiet mode [light\|balanced\|ultra-lean]` | Prints or sets the Diet Mode |
+| `agentdiet show <'#id'\|last> [--lines a..b]` | Prints the full stored (scrubbed) output, or a line slice; `last` is the last trimmed output |
 | `agentdiet top` | Opens the TUI |
 | `agentdiet mcp` | Starts the MCP server |
 | `agentdiet scan [paths]` | Runs the security scanner |
@@ -1140,6 +1284,19 @@ new, head, new, n = 1000 per arm):
   These costs sit on the agent paths, which have no budget of their own; the hook's share of the engine
   budget (B4 + B5 + B2) was already a miss and is not re-measured here.
 
+**UX-P0 re-measurement** (2026-10-20, same machine and harness, n = 1000 per arm). Release binaries
+built with `cargo build --release --locked` from `5092910` (head, 9,939,344 bytes, sha256 `460fc8b3…`)
+and this change (10,022,080 bytes, sha256 `3510c5cb…`), copied out and timed through
+`AGENTDIET_PERF_BIN`, alternating head, new, head, new:
+
+| Binary | B1 p50 | B2 p50 | B3 p50 |
+|---|---|---|---|
+| head (`5092910`) | 3.88, 3.49 ms | 2.59, 2.39 ms | 0.025 ms |
+| this change | 3.45, 3.58 ms | 2.41, 2.41 ms | 0.027 ms |
+
+- `status`, `doctor`, `mode` and the `init` summary add 82,736 bytes. Shim and hook dispatch still run
+  before clap and reach none of that code; B1 and B2 are within run-to-run noise. **B1 remains NOT MET.**
+
 Notes:
 
 - Routing (B3, 0.03 ms) is about 1% of B1. B1 is consistent with paying for two process images in
@@ -1170,6 +1327,8 @@ Notes:
 | 4 | hooks **and** PPID shims, wiring the engine to real entry points, shim redesign question (B1) | in progress: hook router (`hook.rs`), agent-path shims and the per-session sidecars are implemented and tested; the shim agent path was checked live under Claude Code 2.1.302 (§3 Tier 1); the Control Center shows the last trimmed entry. The live Claude Code check passed under Claude Code 2.1.302 on 2026-10-17 (§3 Hook router, "Live check"): `updatedToolOutput` replacements of `Bash` and `Read` results reached the model, and a JSON `mcp__agentdiet__diet_inspect` result reached it unchanged. Open: B1 still NOT MET and worse than in Slice 3B (§7; the shim redesign is not done), Reads are not folded |
 | 5 | MCP tools (`diet_exec` etc.), scanner, `agentdiet top` | done: `diet_inspect`/`diet_search`/`diet_exec` in the stdio MCP server (§3b), the static scanner with the §3b rule table, the `agentdiet top` dashboard (also Control Center item 5) and the §2.3 telemetry counters, with end-to-end tests; B1 re-measured (§7, still NOT MET); `top` was driven in an 80x24 pseudo-terminal, directly and through Control Center item 5 (renders, keys work, the terminal is restored and the menu returns). Live checks (2026-10-17): a scripted JSON-RPC client ran `diet_exec` (`cargo test`, 400 tests: breadcrumb, Vault entry, memory.db row), `diet_search` (hit `#<id> command: cargo test`) and `diet_inspect` (lines 3..9 byte-identical to `agentdiet show --lines 3..9`, `cas_dereferences` +1); `@modelcontextprotocol/inspector --cli` listed the three tools and called `diet_inspect`; and Claude Code 2.1.302 connected the server and called `diet_inspect` (§3 Hook router, "Live check") |
 | 5.1 | dogfooding fixes (`@diet:full` directive, `diet_exec` head/tail fallback and `npm ls` rule, workspace root and run log, scanner credential filter) and `stats` / `reflect` / `diet_reflect` / `EXPERIENCE.md` pointer | done, with tests; the run log's latency is measured above (§7); live check under Claude Code 2.1.303 (§3 Tier 3, "Run log"). Open: Grep's result fields were not checked against a live payload; B1 still NOT MET |
+
+| UX-P0 | CLI/UX overhaul, phase P0 (`docs/CLI_UX_OVERHAUL.md`): `status`, `doctor`, `mode`, `show last`, the §2.2 `init` output and non-terminal `--dry-run`, the §2.5 terminal rules | done, with tests. Later phases (Control Center redesign, `eject --only`, help layout, completions) are in that document and not started |
 
 License: MIT (`LICENSE`); third-party notices in `THIRD_PARTY_NOTICES`.
 

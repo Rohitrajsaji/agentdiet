@@ -97,8 +97,12 @@ Day to day:
 
 ```sh
 agentdiet                              # Control Center: pause/resume, inspect last output, Diet Mode, assistants, top
+agentdiet status                       # on or paused, Diet Mode, connected assistants, tokens saved, health
+agentdiet doctor                       # checks configs, binary paths, shims and PATH; prints the fix for each problem
 agentdiet pause                        # stays paused until resumed (Claude Code: or type "@diet pause" in chat)
 agentdiet resume                       # (Claude Code: or type "@diet resume" in chat)
+agentdiet mode                         # show the Diet Mode; `agentdiet mode light|balanced|ultra-lean` sets it
+agentdiet show last                    # the last trimmed output in full
 agentdiet show '#f5f26875'             # full stored output for a breadcrumb ID
 agentdiet show '#f5f26875' --lines 10..40
 agentdiet top                          # live dashboard: tokens saved, Vault, CAS dereference rate

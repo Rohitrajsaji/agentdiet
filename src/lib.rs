@@ -28,8 +28,10 @@ pub mod session;
 pub mod shim;
 pub mod state;
 pub mod stats;
+pub mod status;
 pub mod toon;
 pub mod top;
+pub mod ui;
 
 /// Every filesystem location the library touches, injected by the caller.
 ///

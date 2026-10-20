@@ -14,7 +14,7 @@
 //!
 //! SPEC.md §2.2 has the rules.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use toml::{Table, Value};
 
@@ -230,6 +230,12 @@ pub fn unpatch(text: &str) -> Result<Option<String>, PatchError> {
     Ok(Some(cleaned))
 }
 
+/// The executable the `[mcp_servers.agentdiet]` entry runs, when it has a string `command`.
+pub fn block_command(text: &str) -> Option<PathBuf> {
+    let doc = parse(text).ok()?;
+    our_entry(&doc)?.get("command")?.as_str().map(PathBuf::from)
+}
+
 pub fn has_block(text: &str) -> bool {
     let Ok(doc) = parse(text) else { return false };
     let lines: Vec<&str> = text.split_inclusive('\n').collect();
@@ -244,6 +250,13 @@ mod tests {
 
     fn exe() -> PathBuf {
         PathBuf::from("/opt/bin/agentdiet")
+    }
+
+    #[test]
+    fn reads_the_configured_executable_back() {
+        let patched = patch(Some("model = \"o3\"\n"), &exe()).unwrap().unwrap();
+        assert_eq!(block_command(&patched), Some(exe()));
+        assert_eq!(block_command("model = \"o3\"\n"), None);
     }
 
     #[test]

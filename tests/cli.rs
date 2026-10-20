@@ -31,6 +31,25 @@ fn state(env: &Env) -> Value {
     serde_json::from_str(&env.read(&env.paths.state_file())).unwrap()
 }
 
+/// The row whose first column is exactly `label`, in `init`/`doctor`/`status` output.
+fn row<'a>(text: &'a str, label: &str) -> &'a str {
+    text.lines()
+        .find(|l| {
+            l.trim_start()
+                .strip_prefix(label)
+                .is_some_and(|rest| rest.starts_with("  "))
+        })
+        .unwrap_or_else(|| panic!("no {label} row in:\n{text}"))
+}
+
+/// `PATH` with the shims directory first.
+fn shims_first_path(env: &Env) -> std::ffi::OsString {
+    let rest = std::env::var_os("PATH").unwrap_or_default();
+    let mut dirs = vec![env.paths.shims_dir()];
+    dirs.extend(std::env::split_paths(&rest));
+    std::env::join_paths(dirs).unwrap()
+}
+
 fn stdout(out: &Output) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
@@ -214,7 +233,9 @@ fn init_without_flags_and_without_a_terminal_explains_itself() {
     let env = Env::empty();
     let out = run(&env, &["init"]);
     assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("--all"));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("--all") && err.contains("--dry-run"), "{err}");
+    assert!(err.contains("detected here: shims"), "{err}");
     assert!(!env.paths.agentdiet_home.exists());
 }
 
@@ -228,8 +249,36 @@ fn init_all_dry_run_writes_nothing() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(stdout(&out).contains("would change"));
+    let text = stdout(&out);
+    assert!(
+        row(&text, "Claude Code").contains("✓ would connect"),
+        "{text}"
+    );
+    assert!(text.contains("Dry run: nothing was written."), "{text}");
     assert_eq!(env.snapshot(), before);
+}
+
+#[test]
+fn init_dry_run_without_a_terminal_previews_the_detected_targets() {
+    let env = Env::with_existing_configs();
+    let before = env.snapshot();
+    let out = run(&env, &["init", "--dry-run"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = stdout(&out);
+    // Copilot is not detected here: on macOS its config dir ignores XDG_CONFIG_HOME.
+    for label in ["Claude Code", "Cursor", "Gemini CLI", "Codex", "Shims"] {
+        assert!(row(&text, label).contains("✓ would connect"), "{text}");
+    }
+    assert!(
+        !text.contains("Windsurf"),
+        "not detected, so not previewed:\n{text}"
+    );
+    assert_eq!(env.snapshot(), before);
+    assert!(!env.paths.agentdiet_home.exists());
 }
 
 #[test]
@@ -237,19 +286,48 @@ fn init_thrice_then_eject_via_the_binary() {
     let env = Env::with_existing_configs();
     let pristine = env.snapshot();
 
-    assert!(run(&env, &["init", "--all"]).status.success());
+    let first = run(&env, &["init", "--all"]);
+    assert!(first.status.success());
+    let first = stdout(&first);
+    assert_eq!(first.matches("✓ connected").count(), 7, "{first}");
+    assert!(
+        first.contains("11 commands linked in ~/.agentdiet/shims"),
+        "{first}"
+    );
+    assert!(
+        first.contains("Backed up the originals to ~/.agentdiet/backups/"),
+        "{first}"
+    );
+    assert!(first.contains("so they load the new config."), "{first}");
+    assert!(
+        !first.contains(&env.paths.home.display().to_string()),
+        "home shown as ~"
+    );
     let after_first = env.snapshot();
     for _ in 0..2 {
         let out = run(&env, &["init", "--all"]);
         assert!(out.status.success());
-        assert!(
-            stdout(&out).contains("changed 0 file(s)"),
-            "{}",
-            stdout(&out)
-        );
+        let again = stdout(&out);
+        // Same targets, same counts: every one is already connected.
+        assert_eq!(again.matches("✓ already connected").count(), 7, "{again}");
+        assert!(again.contains("11 commands linked"), "{again}");
+        assert!(!again.contains("Restart"), "nothing changed:\n{again}");
+        assert!(!again.contains("Backed up"), "{again}");
         assert_eq!(env.snapshot(), after_first);
     }
-    assert!(stdout(&run(&env, &["init", "--all"])).contains("export PATH="));
+    assert!(
+        stdout(&run(&env, &["init", "--all"]))
+            .contains("export PATH=\"$HOME/.agentdiet/shims:$PATH\"")
+    );
+    let shims_first = agentdiet(&env)
+        .args(["init", "--all"])
+        .env("PATH", shims_first_path(&env))
+        .output()
+        .unwrap();
+    assert!(
+        !stdout(&shims_first).contains("export PATH="),
+        "already first on PATH"
+    );
 
     // Registered commands point at the real binary and contain no shell-rc edits.
     let claude: Value =
@@ -341,4 +419,294 @@ fn shim_without_a_real_binary_exits_127() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(127));
+}
+
+// ---- status, doctor, mode, show last (SPEC §3b) --------------------------------------------------
+
+fn doctor(env: &Env) -> Output {
+    agentdiet(env)
+        .arg("doctor")
+        .env("PATH", shims_first_path(env))
+        .output()
+        .unwrap()
+}
+
+fn init_everything(env: &Env) {
+    let out = run(env, &["init", "--all"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn status_and_doctor_never_write_anything() {
+    let env = Env::with_existing_configs();
+    init_everything(&env);
+    let before = env.snapshot();
+    for args in [&["status"][..], &["doctor"], &[]] {
+        run(&env, args);
+    }
+    doctor(&env);
+    assert_eq!(env.snapshot(), before);
+    assert!(
+        !env.paths.memory_db().exists(),
+        "memory.db is never created"
+    );
+    assert!(
+        !env.paths.state_file().exists(),
+        "state.json is never created"
+    );
+}
+
+/// The paths that could write are exercised for real: a live Vault entry (`Cas::stats` takes its lock)
+/// and an existing memory.db with runs (opened to count them).
+#[test]
+fn status_and_doctor_never_write_to_an_existing_vault_or_memory_db() {
+    use agentdiet::cas::Cas;
+    use agentdiet::memory::{self, NewRun, Origin, RunKind, RunOutcome};
+    use agentdiet::scrubber::scrub;
+
+    let env = Env::with_existing_configs();
+    init_everything(&env);
+    let put = Cas::new(env.paths.cas_dir())
+        .put(&scrub(b"stored\n"), std::time::SystemTime::now())
+        .unwrap();
+    let (family, title) = (scrub(b"cargo"), scrub(b"cargo test"));
+    let run = NewRun {
+        origin: Origin::Hook,
+        kind: RunKind::Shell,
+        family: &family,
+        title: &title,
+        outcome: RunOutcome::Ok,
+        exit_code: Some(0),
+        raw_tokens: 900,
+        emitted_tokens: 90,
+        cas_sha: Some(&put.sha),
+        session: None,
+    };
+    memory::record_run(&env.paths.memory_db(), &run).unwrap();
+
+    let before = env.snapshot();
+    let report = doctor(&env);
+    run_status(&env);
+    assert_eq!(env.snapshot(), before, "no byte, WAL or lock file changed");
+    let text = stdout(&report);
+    assert!(row(&text, "Claude Code").contains("✓ working"), "{text}");
+    assert!(
+        row(&text, "Claude Code").contains("1 hook run recorded in this workspace, the last "),
+        "{text}"
+    );
+    assert!(row(&text, "Vault").contains("1 entry"), "{text}");
+    assert!(row(&text, "Memory").contains("1 run in"), "{text}");
+}
+
+fn run_status(env: &Env) -> Output {
+    agentdiet(env)
+        .arg("status")
+        .env("PATH", shims_first_path(env))
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn doctor_on_a_fresh_home_says_nothing_is_connected() {
+    let env = Env::empty();
+    let out = doctor(&env);
+    assert_eq!(out.status.code(), Some(1));
+    let text = stdout(&out);
+    assert!(row(&text, "Setup").contains("✗ broken"), "{text}");
+    assert!(text.contains("→ agentdiet init\n"), "{text}");
+    assert!(row(&text, "Shims").contains("· not installed"), "{text}");
+
+    let status = stdout(&run(&env, &["status"]));
+    assert!(
+        row(&status, "Assistants").contains("none connected · agentdiet init"),
+        "{status}"
+    );
+    assert!(
+        row(&status, "Health").contains("✗ 1 problem · agentdiet doctor"),
+        "{status}"
+    );
+}
+
+#[test]
+fn doctor_passes_a_complete_setup_and_flags_each_kind_of_breakage() {
+    let env = Env::with_existing_configs();
+    init_everything(&env);
+    let ok = doctor(&env);
+    let text = stdout(&ok);
+    assert_eq!(ok.status.code(), Some(0), "{text}");
+    assert!(text.ends_with("All good.\n"), "{text}");
+    assert!(row(&text, "Claude Code").contains("✓ configured"), "{text}");
+    assert!(row(&text, "PATH").contains("✓ ok"), "{text}");
+    let status = agentdiet(&env)
+        .arg("status")
+        .env("PATH", shims_first_path(&env))
+        .output()
+        .unwrap();
+    assert!(row(&stdout(&status), "Health").contains("✓ no problems found"));
+
+    // A corrupt state.json is a problem; removing it is the fix doctor names.
+    env.write(env.paths.state_file(), "{\"status\": 7}");
+    let out = doctor(&env);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(row(&stdout(&out), "State").contains("✗ broken"));
+    assert!(stdout(&out).contains("→ rm ~/.agentdiet/state.json"));
+    fs::remove_file(env.paths.state_file()).unwrap();
+    assert_eq!(doctor(&env).status.code(), Some(0));
+
+    // A config pointing at a binary that no longer exists is a problem.
+    let claude_json = env.paths.home.join(".claude.json");
+    let original = env.read(&claude_json);
+    let mut cfg: Value = serde_json::from_str(&original).unwrap();
+    cfg["mcpServers"]["agentdiet"]["command"] = "/gone/bin/agentdiet".into();
+    env.write(claude_json.clone(), &cfg.to_string());
+    let out = doctor(&env);
+    assert_eq!(out.status.code(), Some(1));
+    let text = stdout(&out);
+    assert!(row(&text, "Claude Code").contains("✗ broken"), "{text}");
+    assert!(
+        text.contains("configured binary /gone/bin/agentdiet is missing"),
+        "{text}"
+    );
+
+    // Another agentdiet that exists is only a warning, and doctor does not push `init` from here.
+    let other = env.dir.path().join("other/agentdiet");
+    env.write(other.clone(), "");
+    cfg["mcpServers"]["agentdiet"]["command"] = other.display().to_string().into();
+    env.write(claude_json.clone(), &cfg.to_string());
+    let out = doctor(&env);
+    let text = stdout(&out);
+    assert_eq!(out.status.code(), Some(0), "{text}");
+    assert!(
+        row(&text, "Claude Code").contains("⚠ warning")
+            && row(&text, "Claude Code").contains("uses a different agentdiet"),
+        "{text}"
+    );
+    assert!(!text.contains("init --only claude"), "{text}");
+    env.write(claude_json, &original);
+
+    // A config that is not strict JSON can be neither checked nor updated.
+    let cursor = env.paths.home.join(".cursor/mcp.json");
+    env.write(cursor, "{ // agentdiet\n \"mcpServers\": {} }");
+    let text = stdout(&doctor(&env));
+    assert!(
+        row(&text, "Cursor").contains("⚠ warning")
+            && row(&text, "Cursor").contains("~/.cursor/mcp.json is not strict JSON"),
+        "{text}"
+    );
+
+    // Shims that are installed but not on PATH are never reached.
+    let out = agentdiet(&env)
+        .arg("doctor")
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let text = stdout(&out);
+    assert!(row(&text, "PATH").contains("✗ broken"), "{text}");
+    assert!(
+        text.contains("export PATH=\"$HOME/.agentdiet/shims:$PATH\""),
+        "{text}"
+    );
+}
+
+#[test]
+fn mode_shows_sets_and_rejects() {
+    let env = Env::empty();
+    let shown = run(&env, &["mode"]);
+    assert!(shown.status.success());
+    let text = stdout(&shown);
+    assert!(text.starts_with("Diet Mode: Balanced\n"), "{text}");
+    assert!(
+        text.contains("  ● balanced    outputs over 600 est. tokens"),
+        "{text}"
+    );
+    assert!(!env.paths.state_file().exists(), "showing writes nothing");
+
+    assert_eq!(
+        stdout(&run(&env, &["mode", "light"])),
+        "Diet Mode set to Light.\n"
+    );
+    assert_eq!(state(&env)["mode"], "light");
+    assert_eq!(
+        stdout(&run(&env, &["mode", "light"])),
+        "Diet Mode is already Light.\n"
+    );
+    run(&env, &["mode", "ultra"]);
+    assert_eq!(state(&env)["mode"], "ultra-lean");
+
+    let bad = run(&env, &["mode", "ligth"]);
+    assert_eq!(bad.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&bad.stderr);
+    assert!(
+        err.contains("possible values: light, balanced, ultra-lean"),
+        "{err}"
+    );
+}
+
+#[test]
+fn show_last_prints_the_last_trimmed_output_byte_for_byte() {
+    use agentdiet::cas::Cas;
+    use agentdiet::scrubber::scrub;
+
+    let env = Env::empty();
+    let out = run(&env, &["show", "last"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("nothing has been trimmed yet"), "{err}");
+
+    let body = b"one\ntwo\n\xff raw\n";
+    let put = Cas::new(env.paths.cas_dir())
+        .put(&scrub(body), std::time::SystemTime::now())
+        .unwrap();
+    env.write(
+        env.paths.state_file(),
+        &format!("{{\"last_trimmed_id\": \"{}\"}}", put.short_id),
+    );
+    let by_id = run(&env, &["show", &format!("#{}", put.short_id)]).stdout;
+    assert_eq!(by_id, body);
+    for args in [&["show", "last"][..], &["show", "LAST"]] {
+        let out = run(&env, args);
+        assert!(out.status.success());
+        assert_eq!(out.stdout, by_id, "{args:?}");
+    }
+    assert_eq!(
+        run(&env, &["show", "last", "--lines", "2..2"]).stdout,
+        b"two\n"
+    );
+    // A bare `show` (what an unquoted `show #id` becomes) is still a usage error, never `last`.
+    let bare = run(&env, &["show"]);
+    assert_eq!(bare.status.code(), Some(2));
+    assert!(bare.stdout.is_empty());
+    assert_eq!(
+        state(&env)["cas_dereferences"],
+        4,
+        "every successful show counts"
+    );
+}
+
+#[test]
+fn people_facing_output_has_no_escape_codes_when_piped() {
+    let env = Env::with_existing_configs();
+    let mut outputs = vec![
+        run(&env, &["init", "--all", "--dry-run"]),
+        run(&env, &["init", "--all"]),
+    ];
+    for args in [
+        &["status"][..],
+        &["doctor"],
+        &["mode"],
+        &["mode", "light"],
+        &["pause"],
+    ] {
+        outputs.push(run(&env, args));
+    }
+    for out in outputs {
+        assert!(!out.stdout.contains(&0x1b), "{}", stdout(&out));
+        assert!(!out.stderr.contains(&0x1b));
+    }
 }

@@ -3,6 +3,7 @@
 use clap::{Parser, Subcommand};
 
 use crate::init::Target;
+use crate::state::Mode;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -19,6 +20,29 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Show whether AgentDiet is on, connected and saving anything
+    Status,
+    /// Pause trimming; output passes through untrimmed (still scrubbed) until resumed
+    Pause,
+    /// Resume trimming
+    Resume,
+    /// Show or set the Diet Mode: how aggressively output is trimmed
+    Mode {
+        /// The mode to switch to; omit it to see the current mode and what each one does
+        #[arg(value_enum)]
+        mode: Option<Mode>,
+    },
+    /// Print a trimmed output in full, by short ID or `last`
+    Show {
+        /// Short ID from a breadcrumb, e.g. '#4f9a' (quote it: an unquoted # starts a shell
+        /// comment), or `last` for the last trimmed output
+        id: String,
+        /// Only these lines, e.g. 10..40 (1-based, inclusive)
+        #[arg(long)]
+        lines: Option<String>,
+    },
+    /// Check the setup and explain how to fix what is wrong; exits 1 on a problem
+    Doctor,
     /// Connect AgentDiet to your AI assistants
     Init {
         /// Comma-separated targets: claude, cursor, windsurf, gemini, copilot, codex, shims
@@ -30,21 +54,16 @@ pub enum Command {
         /// Write project-level configs instead of user-level ones
         #[arg(long)]
         project: bool,
-        /// Print the planned diffs; write nothing
+        /// Print the planned changes; write nothing (works without a terminal)
         #[arg(long)]
         dry_run: bool,
     },
-    /// Pause trimming; output passes through raw until resumed
-    Pause,
-    /// Resume trimming
-    Resume,
-    /// Print a trimmed output by short ID
-    Show {
-        /// Short ID, e.g. #4f9a
-        id: String,
-        /// Only these lines, e.g. 10..40 (1-based, inclusive)
+    /// Restore original configs from backups and remove AgentDiet
+    #[command(visible_alias = "uninstall")]
+    Eject {
+        /// Also delete the vault, project memory and state ledger
         #[arg(long)]
-        lines: Option<String>,
+        purge: bool,
     },
     /// Open the live TUI dashboard
     Top,
@@ -60,20 +79,13 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Start the MCP server on stdio
-    Mcp,
     /// Scan skills, rules and MCP configs for risks; exits 1 on findings
     Scan {
         /// Files or directories (default: .claude/, .cursor/, .mcp.json, SKILL.md, CLAUDE.md, AGENTS.md)
         paths: Vec<std::path::PathBuf>,
     },
-    /// Restore original configs from backups and remove AgentDiet
-    #[command(visible_alias = "uninstall")]
-    Eject {
-        /// Also delete the vault, project memory and state ledger
-        #[arg(long)]
-        purge: bool,
-    },
+    /// Start the MCP server on stdio (assistants run this; `init` registers it)
+    Mcp,
     /// Internal: invoked by assistant hooks
     #[command(hide = true)]
     Hook {
@@ -118,6 +130,30 @@ mod tests {
     fn uninstall_is_an_alias_for_eject() {
         let cli = Cli::try_parse_from(["agentdiet", "uninstall", "--purge"]).unwrap();
         assert!(matches!(cli.command, Some(Command::Eject { purge: true })));
+    }
+
+    #[test]
+    fn mode_takes_an_optional_name_with_an_ultra_alias() {
+        let mode = |args: &[&str]| match Cli::try_parse_from(args).unwrap().command {
+            Some(Command::Mode { mode }) => mode,
+            other => panic!("expected mode, got {other:?}"),
+        };
+        assert_eq!(mode(&["agentdiet", "mode"]), None);
+        assert_eq!(mode(&["agentdiet", "mode", "light"]), Some(Mode::Light));
+        assert_eq!(mode(&["agentdiet", "mode", "ultra"]), Some(Mode::UltraLean));
+        assert_eq!(
+            mode(&["agentdiet", "mode", "ultra-lean"]),
+            Some(Mode::UltraLean)
+        );
+        assert!(Cli::try_parse_from(["agentdiet", "mode", "ligth"]).is_err());
+    }
+
+    #[test]
+    fn show_needs_an_id_or_last() {
+        // An unquoted `show #id` reaches us as a bare `show`: it must fail, not pick another entry.
+        assert!(Cli::try_parse_from(["agentdiet", "show", "--lines", "1..3"]).is_err());
+        let cli = Cli::try_parse_from(["agentdiet", "show", "last"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Show { id, .. }) if id == "last"));
     }
 
     #[test]

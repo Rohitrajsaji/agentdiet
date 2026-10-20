@@ -41,17 +41,27 @@ pub enum Status {
     Paused,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum Mode {
     Light,
     #[default]
     Balanced,
+    #[value(alias = "ultra")]
     UltraLean,
 }
 
 impl Mode {
     pub const ALL: [Mode; 3] = [Mode::Light, Mode::Balanced, Mode::UltraLean];
+
+    /// The name `agentdiet mode` takes and `state.json` stores.
+    pub fn slug(self) -> &'static str {
+        match self {
+            Mode::Light => "light",
+            Mode::Balanced => "balanced",
+            Mode::UltraLean => "ultra-lean",
+        }
+    }
 
     pub fn label(self) -> &'static str {
         match self {

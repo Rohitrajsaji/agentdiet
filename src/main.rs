@@ -8,7 +8,9 @@ use clap::Parser;
 
 use agentdiet::cas::{Cas, LineRange};
 use agentdiet::cli::{Cli, Command};
-use agentdiet::{Paths, control, diet, hook, init, mcp, reflect, scan, shim, state, stats, top};
+use agentdiet::{
+    Paths, control, diet, hook, init, mcp, reflect, scan, shim, state, stats, status, top, ui,
+};
 
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().collect();
@@ -63,9 +65,18 @@ fn run_hook(event: Option<&OsString>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// `agentdiet show #id [--lines a..b]`: print a vault entry (or a slice of it) raw.
+/// `agentdiet show <#id|last> [--lines a..b]`: print a vault entry (or a slice of it) raw. `last` is
+/// the last trimmed output (SPEC §3b "`show last`"); there is no default, so an unquoted `show #id`
+/// (a bare `show` to us) still fails instead of printing a different entry.
 fn show(paths: &Paths, id: &str, lines: Option<&str>) -> anyhow::Result<()> {
     let range = lines.map(LineRange::parse).transpose()?;
+    let id = match id {
+        id if !id.trim().eq_ignore_ascii_case("last") => id.to_string(),
+        _ => state::load(paths)
+            .last_trimmed_id
+            .context("nothing has been trimmed yet, so there is no last output to show")?,
+    };
+    let id = id.as_str();
     let cas = Cas::new(paths.cas_dir());
     let bytes = cas.read(id, range, SystemTime::now())?;
     // Best effort: a dereference the lock cannot record within 100 ms is dropped (SPEC §2.3).
@@ -73,6 +84,10 @@ fn show(paths: &Paths, id: &str, lines: Option<&str>) -> anyhow::Result<()> {
     let mut out = std::io::stdout().lock();
     out.write_all(&bytes).context("could not write to stdout")?;
     out.flush().context("could not write to stdout")
+}
+
+fn path_var() -> OsString {
+    std::env::var_os("PATH").unwrap_or_default()
 }
 
 fn run() -> anyhow::Result<ExitCode> {
@@ -103,6 +118,29 @@ fn run() -> anyhow::Result<ExitCode> {
             .context("MCP server failed")?;
         }
         Some(Command::Show { id, lines }) => show(&paths, &id, lines.as_deref())?,
+        Some(Command::Status) => {
+            let report = status::doctor(&paths, &path_var());
+            let painter = ui::Painter::stdout();
+            ui::emit(&status::render_status(
+                &state::load(&paths),
+                &report,
+                painter,
+            ))?;
+        }
+        Some(Command::Doctor) => {
+            let report = status::doctor(&paths, &path_var());
+            ui::emit(&report.render(ui::Painter::stdout()))?;
+            return Ok(ExitCode::from(report.exit_code()));
+        }
+        Some(Command::Mode { mode: None }) => {
+            ui::emit(&control::mode_overview(
+                &state::load(&paths),
+                ui::Painter::stdout(),
+            ))?;
+        }
+        Some(Command::Mode { mode: Some(mode) }) => {
+            println!("{}", control::set_mode(&paths, mode)?)
+        }
         Some(Command::Top) => top::run(&paths)?,
         Some(Command::Stats { json }) => {
             let stats = stats::collect(&paths).context("could not read the run log")?;

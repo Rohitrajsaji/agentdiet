@@ -8,7 +8,7 @@
 //! // pattern ref: rtk/src/hooks/init/claude.rs (behavior only) — BOM tolerance
 //! // and "detect our own hook entry, update in place" semantics.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
 
@@ -130,6 +130,13 @@ pub fn unpatch_mcp(text: &str, key: &str) -> Result<Option<String>, PatchError> 
     Ok(finish(&before, root, bom))
 }
 
+/// The executable `<key>.agentdiet` runs, when that entry has a string `command`.
+pub fn mcp_command(text: &str, key: &str) -> Option<PathBuf> {
+    let parsed = parse(Some(text)).ok()?;
+    let command = parsed.root.get(key)?.get(SERVER_NAME)?.get("command")?;
+    command.as_str().map(PathBuf::from)
+}
+
 pub fn has_mcp(text: &str, key: &str) -> bool {
     parse(Some(text))
         .ok()
@@ -148,22 +155,26 @@ pub fn hook_command(exe: &Path, event: &str) -> String {
     format!("\"{}\" hook {event}", exe.to_string_lossy())
 }
 
-/// `true` for a command line that runs `agentdiet hook ...`.
-pub fn is_agentdiet_hook_command(command: &str) -> bool {
+/// `(program, rest)` of a command line whose program may be double-quoted.
+fn split_program(command: &str) -> Option<(&str, &str)> {
     let command = command.trim();
-    let (program, rest) = if let Some(quoted) = command.strip_prefix('"') {
-        match quoted.find('"') {
-            Some(end) => (&quoted[..end], quoted[end + 1..].trim_start()),
-            None => return false,
-        }
+    Some(if let Some(quoted) = command.strip_prefix('"') {
+        let end = quoted.find('"')?;
+        (&quoted[..end], quoted[end + 1..].trim_start())
     } else {
         match command.split_once(char::is_whitespace) {
             Some((program, rest)) => (program, rest.trim_start()),
             None => (command, ""),
         }
-    };
-    matches!(basename(program), "agentdiet" | "agentdiet.exe")
-        && (rest == "hook" || rest.starts_with("hook "))
+    })
+}
+
+/// `true` for a command line that runs `agentdiet hook ...`.
+pub fn is_agentdiet_hook_command(command: &str) -> bool {
+    split_program(command).is_some_and(|(program, rest)| {
+        matches!(basename(program), "agentdiet" | "agentdiet.exe")
+            && (rest == "hook" || rest.starts_with("hook "))
+    })
 }
 
 fn is_ours(hook: &Value) -> bool {
@@ -267,6 +278,23 @@ pub fn unpatch_claude_hooks(text: &str) -> Result<Option<String>, PatchError> {
     Ok(finish(&before, root, bom))
 }
 
+/// The executable the first agentdiet hook runs.
+pub fn claude_hook_program(text: &str) -> Option<PathBuf> {
+    let parsed = parse(Some(text)).ok()?;
+    let hooks = parsed.root.get("hooks")?.as_object()?;
+    hooks
+        .values()
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(|g| g.get("hooks").and_then(Value::as_array))
+        .flatten()
+        .filter(|hook| is_ours(hook))
+        .find_map(|hook| {
+            let command = hook.get("command")?.as_str()?;
+            split_program(command).map(|(program, _)| PathBuf::from(program))
+        })
+}
+
 pub fn has_claude_hooks(text: &str) -> bool {
     let Ok(parsed) = parse(Some(text)) else {
         return false;
@@ -304,6 +332,25 @@ mod tests {
             .flat_map(|g| g["hooks"].as_array().unwrap())
             .filter(|h| is_ours(h))
             .count()
+    }
+
+    #[test]
+    fn reads_the_configured_executable_back() {
+        let hooks = apply("{}");
+        assert_eq!(claude_hook_program(&hooks), Some(exe()));
+        let spaced = patch_claude_hooks(None, Path::new("/My Apps/agentdiet"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            claude_hook_program(&spaced),
+            Some(PathBuf::from("/My Apps/agentdiet"))
+        );
+        assert_eq!(claude_hook_program(r#"{"hooks":{}}"#), None);
+
+        let mcp = patch_mcp(None, "servers", true, &exe()).unwrap().unwrap();
+        assert_eq!(mcp_command(&mcp, "servers"), Some(exe()));
+        assert_eq!(mcp_command(&mcp, "mcpServers"), None);
+        assert_eq!(mcp_command("not json", "servers"), None);
     }
 
     #[test]
