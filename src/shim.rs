@@ -417,7 +417,9 @@ fn find_real(name: &str) -> PathBuf {
         shims_dir.as_deref().unwrap_or(Path::new("")),
     );
     let Some(real) = real else {
-        eprintln!("agentdiet shim: could not find the real `{name}` on PATH");
+        crate::ui::warn(&format!(
+            "agentdiet shim: could not find the real `{name}` on PATH"
+        ));
         std::process::exit(127);
     };
     real
@@ -427,7 +429,10 @@ fn find_real(name: &str) -> PathBuf {
 fn exec(real: &Path, args: Vec<OsString>) -> ! {
     use std::os::unix::process::CommandExt;
     let err = Command::new(real).args(args).exec();
-    eprintln!("agentdiet shim: failed to exec {}: {err}", real.display());
+    crate::ui::warn(&format!(
+        "agentdiet shim: failed to exec {}: {err}",
+        real.display()
+    ));
     std::process::exit(126)
 }
 
@@ -436,7 +441,10 @@ fn exec(real: &Path, args: Vec<OsString>) -> ! {
     match Command::new(real).args(args).status() {
         Ok(status) => std::process::exit(status.code().unwrap_or(1)),
         Err(err) => {
-            eprintln!("agentdiet shim: failed to run {}: {err}", real.display());
+            crate::ui::warn(&format!(
+                "agentdiet shim: failed to run {}: {err}",
+                real.display()
+            ));
             std::process::exit(126)
         }
     }
@@ -485,7 +493,10 @@ fn agent(
     let mut child = match child {
         Ok(child) => child,
         Err(err) => {
-            eprintln!("agentdiet shim: failed to run {}: {err}", real.display());
+            crate::ui::warn(&format!(
+                "agentdiet shim: failed to run {}: {err}",
+                real.display()
+            ));
             std::process::exit(126)
         }
     };

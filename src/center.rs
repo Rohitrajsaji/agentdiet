@@ -516,9 +516,15 @@ fn savings_lines(data: &Data, ctx: Ctx) -> Vec<Line<'static>> {
         if let Some(reopens) = words::reopens(s) {
             lines.push(ctx.line(&format!(" {reopens}"), Style::new()));
         }
-        if words::reopens_high(s) {
-            // The full warning does not fit a half-width column; `status` and `top` carry it.
-            lines.push(ctx.line(" ⚠ high: try a lighter mode", ctx.level(Level::Warning)));
+        // The full sentences do not fit a half-width column; `status` and `top` carry them.
+        match words::reopen_verdict(s) {
+            words::Reopens::High => {
+                lines.push(ctx.line(" ⚠ high: try a lighter mode", ctx.level(Level::Warning)));
+            }
+            words::Reopens::TooFewToJudge => {
+                lines.push(ctx.line(" too few to judge yet", ctx.dim()));
+            }
+            words::Reopens::NoneYet | words::Reopens::Fine => {}
         }
     }
     if let Some(id) = &s.last_trimmed_id {
@@ -1265,7 +1271,7 @@ mod tests {
             "configured",
             "≈134,830 tokens saved",
             "1 re-open for 4 trimmed outputs (25%)",
-            "⚠ high: try a lighter mode",
+            "too few to judge yet",
             "last #683db530 · l to view",
             "≈2,500 tokens passed untrimmed",
             "Needs attention",

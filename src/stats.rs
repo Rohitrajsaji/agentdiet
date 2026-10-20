@@ -107,8 +107,12 @@ impl Stats {
         row("trimmed outputs", grouped(s.trimmed_outputs));
         row("tokens saved", format!("≈{}", grouped(s.tokens_saved)));
         row(
-            "re-opened by agents",
-            words::reopens(s).unwrap_or_else(none_yet),
+            "re-opened",
+            match (words::reopens(s), words::reopen_note(s)) {
+                (Some(text), Some((_, note))) => format!("{text} · {note}"),
+                (Some(text), None) => text,
+                (None, _) => none_yet(),
+            },
         );
         row("while paused", words::passed_while_paused(s));
         row(
@@ -223,7 +227,7 @@ mod tests {
                 "All projects (estimated)",
                 "  trimmed outputs      4",
                 "  tokens saved         ≈134,830",
-                "  re-opened by agents  1 re-open for 4 trimmed outputs (25%)",
+                "  re-opened            1 re-open for 4 trimmed outputs (25%) · too few trimmed outputs to judge yet (needs 10)",
                 "  while paused         ≈0 tokens passed untrimmed (still scrubbed)",
                 "  last trimmed         #683db530 · agentdiet show last",
                 "",

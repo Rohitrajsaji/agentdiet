@@ -1345,12 +1345,13 @@ fn every_command_in_the_readme_parses() {
             continue;
         }
         if in_sh && line.starts_with("agentdiet") {
-            commands.push(line.split("  #").next().unwrap().trim().to_string());
+            let line = line.split("  #").next().unwrap();
+            commands.push(line.split(" > ").next().unwrap().trim().to_string());
         }
         // Inline `agentdiet …` spans, in prose and tables.
         for (i, span) in line.split('`').enumerate() {
             if i % 2 == 1 && span.starts_with("agentdiet") && !span.contains(['<', '…']) {
-                commands.push(span.to_string());
+                commands.push(span.split(" > ").next().unwrap().to_string());
             }
         }
     }
@@ -1369,5 +1370,478 @@ fn every_command_in_the_readme_parses() {
             parsed.is_ok(),
             "README documents {command:?}, which does not parse: {parsed:?}"
         );
+    }
+}
+
+// ---- P3: status --json and doctor --json (SPEC §3b) ---------------------------------------------------
+
+fn keys(v: &Value) -> Vec<String> {
+    v.as_object().unwrap().keys().cloned().collect()
+}
+
+fn json_of(out: &Output) -> Value {
+    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "stdout is not one JSON object ({e}): {:?}",
+            String::from_utf8_lossy(&out.stdout)
+        )
+    })
+}
+
+#[test]
+fn status_json_has_the_documented_schema_in_order() {
+    let env = Env::empty();
+    let out = run(&env, &["status", "--json"]);
+    assert_eq!(out.status.code(), Some(0));
+    let v = json_of(&out);
+    assert_eq!(
+        keys(&v),
+        [
+            "schema",
+            "status",
+            "mode",
+            "assistants",
+            "trimmed_outputs",
+            "tokens_saved",
+            "cas_dereferences",
+            "raw_tokens_passed_while_paused",
+            "last_trimmed_id",
+            "reopen",
+            "health"
+        ]
+    );
+    assert_eq!(v["schema"], 1);
+    assert_eq!(v["status"], "active");
+    assert_eq!(v["mode"], "balanced");
+    assert_eq!(v["assistants"], serde_json::json!([]));
+    assert_eq!(
+        v["reopen"],
+        serde_json::json!({"rate": null, "verdict": "none_yet"})
+    );
+    assert_eq!(keys(&v["health"]), ["ok", "problems", "warnings"]);
+    assert_eq!(v["health"]["ok"], false, "nothing connected is a problem");
+
+    // Connected, paused, with counters: the same keys, the values follow.
+    let env = Env::with_existing_configs();
+    init_everything(&env);
+    env.write(
+        env.paths.state_file(),
+        r#"{"status":"paused","mode":"light","trimmed_outputs":20,"cas_dereferences":5,"tokens_saved":900,"last_trimmed_id":"683db530"}"#,
+    );
+    let v = json_of(&run(&env, &["status", "--json"]));
+    assert_eq!(v["status"], "paused");
+    assert_eq!(v["mode"], "light");
+    assert_eq!(
+        v["assistants"],
+        serde_json::json!([
+            "claude", "cursor", "windsurf", "gemini", "copilot", "codex", "shims"
+        ]),
+        "every target, in Target::ALL order"
+    );
+    assert_eq!(
+        v["reopen"],
+        serde_json::json!({"rate": 0.25, "verdict": "high"})
+    );
+    assert_eq!(v["last_trimmed_id"], "683db530");
+    assert_eq!(v["tokens_saved"], 900);
+}
+
+#[test]
+fn doctor_json_mirrors_the_text_and_keeps_the_exit_status() {
+    let env = Env::with_existing_configs();
+    init_everything(&env);
+    // Text and JSON agree on every check, in order, and on the exit status.
+    for (path, code) in [(Some(shims_first_path(&env)), 0), (None, 1)] {
+        let cmd = |args: &[&str]| {
+            let mut c = agentdiet(&env);
+            c.args(args);
+            match &path {
+                Some(p) => c.env("PATH", p),
+                None => c.env("PATH", "/usr/bin:/bin"),
+            };
+            c.output().unwrap()
+        };
+        let text = cmd(&["doctor"]);
+        let json = cmd(&["doctor", "--json"]);
+        assert_eq!(text.status.code(), Some(code));
+        assert_eq!(
+            json.status.code(),
+            Some(code),
+            "same exit status with --json"
+        );
+        let v = json_of(&json);
+        assert_eq!(keys(&v), ["schema", "ok", "problems", "warnings", "checks"]);
+        assert_eq!(v["ok"], code == 0);
+        let checks = v["checks"].as_array().unwrap();
+        let text_out = stdout(&text);
+        let rows: Vec<&str> = text_out
+            .lines()
+            .filter(|l| l.starts_with("  ") && !l.trim_start().starts_with('→'))
+            .collect();
+        assert_eq!(checks.len(), rows.len(), "{}", stdout(&text));
+        for (check, row) in checks.iter().zip(&rows) {
+            assert_eq!(
+                keys(check),
+                [
+                    "check", "target", "scope", "label", "level", "status", "observed", "detail",
+                    "fix"
+                ]
+            );
+            let label = check["label"].as_str().unwrap();
+            assert!(row.trim_start().starts_with(label), "{label} vs {row}");
+            assert!(row.contains(check["detail"].as_str().unwrap()), "{row}");
+        }
+        let claude = checks.iter().find(|c| c["target"] == "claude").unwrap();
+        assert_eq!(claude["check"], "assistant");
+        assert_eq!(claude["scope"], "user");
+        assert_eq!(claude["observed"], "not_yet");
+        let path_check = checks.iter().find(|c| c["check"] == "path").unwrap();
+        if code == 1 {
+            assert_eq!(path_check["level"], "broken");
+            assert!(path_check["fix"].as_str().unwrap().contains("export PATH="));
+        } else {
+            assert_eq!(path_check["fix"], Value::Null);
+        }
+    }
+}
+
+#[test]
+fn json_modes_print_only_json_deterministically_whatever_the_terminal() {
+    let env = Env::with_existing_configs();
+    init_everything(&env);
+    env.write(env.paths.state_file(), "{ broken");
+    for args in [&["status", "--json"][..], &["doctor", "--json"]] {
+        let a = run(&env, args);
+        let b = run(&env, args);
+        let ascii = agentdiet(&env)
+            .env("LANG", "C")
+            .args(args)
+            .output()
+            .unwrap();
+        let no_color = agentdiet(&env)
+            .env("NO_COLOR", "1")
+            .args(args)
+            .output()
+            .unwrap();
+        json_of(&a);
+        assert_eq!(
+            a.stdout, b.stdout,
+            "{args:?}: the same state gives the same bytes"
+        );
+        assert_eq!(a.stdout, ascii.stdout, "{args:?}: never transliterated");
+        assert_eq!(a.stdout, no_color.stdout);
+        assert!(!a.stdout.contains(&0x1b), "no escape codes");
+        assert_eq!(
+            a.stdout.iter().filter(|&&b| b == b'\n').count(),
+            1,
+            "one line"
+        );
+    }
+    // The corrupt state is reported inside the JSON; the warning stays on stderr.
+    let status = run(&env, &["status", "--json"]);
+    assert!(String::from_utf8_lossy(&status.stderr).contains("ignoring corrupt"));
+    let doctor = json_of(&run(&env, &["doctor", "--json"]));
+    let state = doctor["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["check"] == "state")
+        .unwrap();
+    assert_eq!(state["level"], "broken");
+    assert!(
+        state["fix"]
+            .as_str()
+            .unwrap()
+            .starts_with("rm ~/.agentdiet/state.json")
+    );
+}
+
+#[test]
+fn json_never_carries_config_contents() {
+    let env = Env::empty();
+    let secret = "sk-ant-api03-DOCTORJSONMUSTNOTLEAKTHISVALUE000000";
+    // An invalid (JSONC) config that mentions agentdiet and holds a secret...
+    env.write(
+        env.paths.home.join(".cursor/mcp.json"),
+        &format!("{{ // agentdiet\n \"mcpServers\": {{\"agentdiet\": {{\"command\": \"x\", \"env\": {{\"KEY\": \"{secret}\"}}}}}},\n}}"),
+    );
+    // ...and a valid one with a secret in its environment block.
+    env.write(
+        env.paths.home.join(".gemini/settings.json"),
+        &format!(
+            "{{\"mcpServers\": {{\"agentdiet\": {{\"command\": \"/gone/agentdiet\", \"args\": [\"mcp\"], \"env\": {{\"KEY\": \"{secret}\"}}}}}}}}"
+        ),
+    );
+    for args in [
+        &["doctor", "--json"][..],
+        &["status", "--json"],
+        &["doctor"],
+        &["status"],
+    ] {
+        let out = run(&env, args);
+        let all = format!("{}{}", stdout(&out), String::from_utf8_lossy(&out.stderr));
+        assert!(!all.contains(secret), "{args:?} leaked: {all}");
+        assert!(!all.contains("sk-ant"), "{args:?}");
+    }
+    let v = json_of(&run(&env, &["doctor", "--json"]));
+    let cursor = v["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["target"] == "cursor")
+        .unwrap();
+    assert_eq!(cursor["level"], "warning");
+    assert!(
+        cursor["detail"]
+            .as_str()
+            .unwrap()
+            .contains("is not strict JSON")
+    );
+}
+
+// ---- P3: hooks, the MCP server and shims survive closed stdio (SPEC §3 Tier 1) -------------------------
+
+/// A pipe whose reader is gone: every write to it fails with EPIPE.
+fn closed() -> std::io::PipeWriter {
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    writer
+}
+
+fn hook_with(env: &Env, event: &str, payload: &[u8], stdout: Stdio, stderr: Stdio) -> Output {
+    let mut child = agentdiet(env)
+        .args(["hook", event])
+        .stdin(Stdio::piped())
+        .stdout(stdout)
+        .stderr(stderr)
+        .spawn()
+        .unwrap();
+    // The hook may finish (and close stdin) before reading everything: that is fine.
+    let _ = child.stdin.take().unwrap().write_all(payload);
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn a_hook_exits_0_without_panicking_when_its_stderr_or_stdout_is_closed() {
+    let env = Env::empty();
+    // `.agentdiet` as a file: SessionStart cannot reset the session and says so on stderr.
+    fs::create_dir_all(&env.paths.home).unwrap();
+    fs::write(&env.paths.agentdiet_home, "in the way").unwrap();
+    let payload = br#"{"session_id":"s1","hook_event_name":"SessionStart","cwd":"."}"#;
+
+    let open = hook_with(
+        &env,
+        "SessionStart",
+        payload,
+        Stdio::piped(),
+        Stdio::piped(),
+    );
+    assert_eq!(open.status.code(), Some(0));
+    let note = String::from_utf8_lossy(&open.stderr);
+    assert!(
+        note.contains("could not reset the session"),
+        "this path does write a note: {note}"
+    );
+
+    for (out, err) in [
+        (Stdio::piped(), Stdio::from(closed())),
+        (Stdio::from(closed()), Stdio::piped()),
+        (Stdio::from(closed()), Stdio::from(closed())),
+    ] {
+        let run = hook_with(&env, "SessionStart", payload, out, err);
+        assert_eq!(
+            run.status.code(),
+            Some(0),
+            "always 0, never 101 or a signal"
+        );
+        assert!(!String::from_utf8_lossy(&run.stderr).contains("panicked"));
+    }
+}
+
+#[test]
+fn malformed_hook_input_is_a_quiet_success() {
+    let env = Env::empty();
+    let big = vec![b'x'; 2 * 1024 * 1024];
+    for payload in [
+        &b""[..],
+        b"not json",
+        b"{\"session_id\": ",
+        b"[1, 2, 3]",
+        b"\xff\xfe\x00 binary",
+        b"{\"hook_event_name\":\"PostToolUse\",\"tool_response\":42}",
+        &big,
+    ] {
+        for event in [
+            "PostToolUse",
+            "PreToolUse",
+            "UserPromptSubmit",
+            "SessionStart",
+            "PreCompact",
+        ] {
+            let out = hook_with(&env, event, payload, Stdio::piped(), Stdio::from(closed()));
+            assert_eq!(
+                out.status.code(),
+                Some(0),
+                "{event} {:?}",
+                &payload[..payload.len().min(20)]
+            );
+            assert!(
+                out.stdout.is_empty(),
+                "{event}: nothing on stdout for a bad payload"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_mcp_server_answers_normally_when_its_stderr_is_closed() {
+    let env = Env::empty();
+    // `.agentdiet` as a file in the workspace: the activity log cannot be written, which is a note.
+    fs::create_dir_all(env.paths.project_root.join(".git")).unwrap();
+    fs::write(env.paths.project_root.join(".agentdiet"), "in the way").unwrap();
+    let session = concat!(
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"diet_exec","arguments":{"command":["echo","hi"]}}}"#,
+        "\n"
+    );
+    let serve = |stderr: Stdio| {
+        let mut child = agentdiet(&env)
+            .arg("mcp")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(stderr)
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(session.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    };
+    let open = serve(Stdio::piped());
+    assert!(!open.stderr.is_empty(), "this path does write a note");
+    let closed_err = serve(Stdio::from(closed()));
+    assert_eq!(closed_err.status.code(), open.status.code());
+    let last = |out: &Output| -> Value {
+        let text = stdout(out);
+        serde_json::from_str(text.lines().last().unwrap()).unwrap()
+    };
+    let r = last(&closed_err);
+    assert!(r.get("error").is_none(), "{r}");
+    assert_eq!(
+        r["result"]["isError"],
+        last(&open)["result"]["isError"],
+        "{r}"
+    );
+    assert!(
+        r["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("hi"),
+        "{r}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_shim_without_the_real_program_still_exits_127_when_stderr_is_closed() {
+    let env = Env::empty();
+    let shims = env.paths.shims_dir();
+    fs::create_dir_all(&shims).unwrap();
+    std::os::unix::fs::symlink(BIN, shims.join("make")).unwrap();
+    for stderr in [Stdio::piped(), Stdio::from(closed())] {
+        let out = Command::new(shims.join("make"))
+            .env("HOME", &env.paths.home)
+            .env("PATH", &shims) // no real `make` anywhere
+            .env("AGENTDIET_FORCE_HUMAN", "1")
+            .stdin(Stdio::null())
+            .stderr(stderr)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(127));
+    }
+}
+
+// ---- P3: shell completions are valid scripts ------------------------------------------------------------
+
+#[test]
+fn completions_are_valid_shell_scripts_and_only_the_script_is_printed() {
+    let env = Env::empty();
+    for (shell, checker) in [("bash", "bash"), ("zsh", "zsh"), ("fish", "fish")] {
+        let out = run(&env, &["completions", shell]);
+        assert_eq!(out.status.code(), Some(0));
+        assert!(out.stderr.is_empty());
+        assert!(stdout(&out).contains("agentdiet"), "{shell}");
+        let ascii = agentdiet(&env)
+            .env("LANG", "C")
+            .args(["completions", shell])
+            .output()
+            .unwrap();
+        assert_eq!(out.stdout, ascii.stdout, "data, never transliterated");
+        // Syntax check with the shell itself, where it is installed.
+        let file = env.dir.path().join(format!("agentdiet.{shell}"));
+        fs::write(&file, &out.stdout).unwrap();
+        match Command::new(checker).arg("-n").arg(&file).output() {
+            Ok(check) => assert!(
+                check.status.success(),
+                "{shell} -n: {}",
+                String::from_utf8_lossy(&check.stderr)
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // not installed here
+            Err(e) => panic!("{e}"),
+        }
+    }
+    assert_eq!(
+        run(&env, &["completions", "powershell"]).status.code(),
+        Some(2)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn bash_completion_offers_the_right_words() {
+    let env = Env::empty();
+    let script = env.dir.path().join("agentdiet.bash");
+    fs::write(&script, run(&env, &["completions", "bash"]).stdout).unwrap();
+    // Drive the completion function the way bash would for each partial command line.
+    let complete = |words: &str| -> Vec<String> {
+        let cword = words.split_whitespace().count() - usize::from(!words.ends_with(' '));
+        let probe = format!(
+            "source '{}'; COMP_WORDS=({words}); [[ '{words}' == *' ' ]] && COMP_WORDS+=(''); \
+             COMP_CWORD={cword}; COMP_LINE='{words}'; COMP_POINT=${{#COMP_LINE}}; \
+             _agentdiet agentdiet \"${{COMP_WORDS[COMP_CWORD]}}\" \"${{COMP_WORDS[COMP_CWORD-1]}}\"; \
+             printf '%s\\n' \"${{COMPREPLY[@]}}\"",
+            script.display()
+        );
+        let out = Command::new("bash").args(["-c", &probe]).output().unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(String::from)
+            .collect()
+    };
+    let top = complete("agentdiet ");
+    for word in ["status", "doctor", "disconnect", "uninstall", "completions"] {
+        assert!(
+            top.contains(&word.to_string()),
+            "{word} not offered: {top:?}"
+        );
+    }
+    assert!(
+        !top.contains(&"mcp".to_string()) && !top.contains(&"hook".to_string()),
+        "{top:?}"
+    );
+    assert_eq!(complete("agentdiet dis"), ["disconnect"]);
+    let modes = complete("agentdiet mode ");
+    for mode in ["light", "balanced", "ultra-lean"] {
+        assert!(modes.contains(&mode.to_string()), "{modes:?}");
+    }
+    let flags = complete("agentdiet init --");
+    for flag in ["--only", "--all", "--project", "--dry-run"] {
+        assert!(flags.contains(&flag.to_string()), "{flags:?}");
     }
 }

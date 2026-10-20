@@ -26,6 +26,7 @@ Advanced:
   stats           Savings and this workspace's activity (--json for scripts)
   scan            Check skills, rules and MCP configs for risky content
   reflect         Turn this workspace's past runs into tips in EXPERIENCE.md
+  completions     Print shell completions (bash, zsh or fish)
 
 Examples:
   agentdiet init --only claude,shims
@@ -55,16 +56,80 @@ pub struct Cli {
     pub command: Option<Command>,
 }
 
+/// The shells `agentdiet completions` writes for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Shell {
+    Bash,
+    Zsh,
+    Fish,
+}
+
+/// The completion script for `shell`, generated from [`Cli`] (SPEC §5).
+pub fn completions(shell: Shell) -> Vec<u8> {
+    use clap::CommandFactory;
+    // The generators do not skip hidden subcommands, so complete from a copy without them: `mcp`
+    // and `hook` keep working, they are just never offered.
+    let full = Cli::command();
+    let mut cmd = clap::Command::new("agentdiet")
+        .version(env!("CARGO_PKG_VERSION"))
+        .subcommands(full.get_subcommands().filter(|s| !s.is_hide_set()).cloned());
+    let mut out = Vec::new();
+    match shell {
+        Shell::Bash => {
+            clap_complete::generate(clap_complete::Shell::Bash, &mut cmd, "agentdiet", &mut out)
+        }
+        Shell::Zsh => {
+            clap_complete::generate(clap_complete::Shell::Zsh, &mut cmd, "agentdiet", &mut out)
+        }
+        Shell::Fish => {
+            clap_complete::generate(clap_complete::Shell::Fish, &mut cmd, "agentdiet", &mut out);
+            fish_positional_values(&cmd, &mut out);
+        }
+    }
+    out
+}
+
+/// clap_complete's fish script completes flags' values but not positional ones (`mode light`,
+/// `disconnect cursor`, `completions zsh`); add those, from the same value lists.
+fn fish_positional_values(cmd: &clap::Command, out: &mut Vec<u8>) {
+    for sub in cmd.get_subcommands() {
+        for arg in sub.get_positionals() {
+            let values: Vec<String> = arg
+                .get_possible_values()
+                .iter()
+                .filter(|v| !v.is_hide_set())
+                .map(|v| v.get_name().to_string())
+                .collect();
+            if values.is_empty() {
+                continue;
+            }
+            out.extend_from_slice(
+                format!(
+                    "complete -c agentdiet -n \"__fish_agentdiet_using_subcommand {}\" -f -a \"{}\"\n",
+                    sub.get_name(),
+                    values.join(" ")
+                )
+                .as_bytes(),
+            );
+        }
+    }
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Show whether AgentDiet is on, connected and saving anything
     #[command(after_help = "\
 Examples:
   agentdiet status
-  agentdiet doctor    # the details, with a fix for each problem
+  agentdiet status --json    # for scripts (schema in SPEC.md)
+  agentdiet doctor           # the details, with a fix for each problem
 
 Exit status: always 0 (`agentdiet doctor` exits 1 when something is broken).")]
-    Status,
+    Status {
+        /// Print one JSON object instead of text (stable keys; for scripts)
+        #[arg(long)]
+        json: bool,
+    },
     /// Pause trimming: output passes through untrimmed (still scrubbed) until you resume
     #[command(after_help = "\
 In Claude Code you can also type `@diet pause` and `@diet resume` in the chat.")]
@@ -102,9 +167,14 @@ Trimmed outputs are kept 7 days after their last use. Secrets were removed befor
     #[command(after_help = "\
 Examples:
   agentdiet doctor
+  agentdiet doctor --json    # every check with its fix, for scripts and CI
 
-Exit status: 0 when nothing is broken (warnings allowed), 1 otherwise.")]
-    Doctor,
+Exit status: 0 when nothing is broken (warnings allowed), 1 otherwise, with or without --json.")]
+    Doctor {
+        /// Print one JSON object instead of text (stable keys; for scripts and CI)
+        #[arg(long)]
+        json: bool,
+    },
     /// Connect AgentDiet to your AI assistants
     #[command(after_help = "\
 Examples:
@@ -214,6 +284,19 @@ Exit status: 0 clean, 1 findings, 2 a path could not be read. A clean result is 
         /// Files or directories (default: .claude/, .cursor/, .mcp.json, SKILL.md, CLAUDE.md, AGENTS.md)
         paths: Vec<std::path::PathBuf>,
     },
+    /// Print a shell completion script (bash, zsh or fish)
+    #[command(after_help = "\
+Examples:
+  agentdiet completions bash > ~/.local/share/bash-completion/completions/agentdiet
+  agentdiet completions zsh > ~/.zfunc/_agentdiet    # with fpath=(~/.zfunc $fpath) before compinit
+  agentdiet completions fish > ~/.config/fish/completions/agentdiet.fish
+
+Open a new shell afterwards.")]
+    Completions {
+        /// The shell to complete for
+        #[arg(value_enum)]
+        shell: Shell,
+    },
     /// Internal: the MCP server that `init` registers (assistants start it)
     #[command(hide = true)]
     Mcp,
@@ -239,7 +322,9 @@ mod tests {
             .map(str::trim_start)
             .filter(|l| l.starts_with("agentdiet"))
             .map(|l| {
+                // A trailing comment, and a redirection, are the shell's, not ours.
                 let l = l.split("  #").next().unwrap_or(l);
+                let l = l.split(" > ").next().unwrap_or(l);
                 l.split_whitespace()
                     .map(|w| w.trim_matches('\'').to_string())
                     .collect()
@@ -323,6 +408,69 @@ mod tests {
             let help_is_ok =
                 matches!(&parsed, Err(e) if e.kind() == clap::error::ErrorKind::DisplayHelp);
             assert!(parsed.is_ok() || help_is_ok, "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn completions_cover_commands_aliases_flags_and_values_but_not_internals() {
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
+            let script = String::from_utf8(completions(shell)).unwrap();
+            for word in [
+                "status",
+                "pause",
+                "resume",
+                "mode",
+                "show",
+                "doctor",
+                "init",
+                "disconnect",
+                "eject",
+                "uninstall",
+                "top",
+                "stats",
+                "reflect",
+                "scan",
+                "completions",
+                "--only",
+                "--all",
+                "--project",
+                "--dry-run",
+                "--json",
+                "--purge",
+                "--lines",
+                "light",
+                "balanced",
+                "ultra-lean",
+                "claude",
+                "cursor",
+                "windsurf",
+                "gemini",
+                "copilot",
+                "codex",
+                "shims",
+                "bash",
+                "zsh",
+                "fish",
+            ] {
+                // Fish spells a long flag `-l only`.
+                let spelled = match (shell, word.strip_prefix("--")) {
+                    (Shell::Fish, Some(flag)) => format!("-l {flag}"),
+                    _ => word.to_string(),
+                };
+                assert!(script.contains(&spelled), "{shell:?} lacks {spelled:?}");
+            }
+            for internal in [
+                "subcmd__mcp",
+                "subcmd__hook",
+                "-a \"mcp\"",
+                "-a \"hook\"",
+                "(mcp)",
+                "(hook)",
+                "'mcp:",
+                "'hook:",
+            ] {
+                assert!(!script.contains(internal), "{shell:?} offers {internal:?}");
+            }
         }
     }
 

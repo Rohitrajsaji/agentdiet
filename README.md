@@ -179,12 +179,33 @@ agentdiet eject                        # everything; your original configs come 
 agentdiet eject --purge                # …and delete stored outputs, activity and counters
 ```
 
+## Shell completion
+
+Tab-completion for commands, flags, Diet Modes and assistant names:
+
+```sh
+# bash (needs the bash-completion package)
+mkdir -p ~/.local/share/bash-completion/completions
+agentdiet completions bash > ~/.local/share/bash-completion/completions/agentdiet
+
+# zsh: also add `fpath=(~/.zfunc $fpath)` to ~/.zshrc, before `compinit`
+mkdir -p ~/.zfunc
+agentdiet completions zsh > ~/.zfunc/_agentdiet
+
+# fish
+mkdir -p ~/.config/fish/completions
+agentdiet completions fish > ~/.config/fish/completions/agentdiet.fish
+```
+
+Open a new shell afterwards. Re-run the command after upgrading AgentDiet so new commands complete too.
+
 ## Advanced
 
 ```sh
 agentdiet top                          # live dashboard (refreshes every 2 s)
 agentdiet stats                        # savings and this workspace's activity
 agentdiet stats --json                 # the same numbers, stable keys, for scripts
+agentdiet doctor --json                # every check with its fix, for scripts and CI
 agentdiet scan                         # check .claude/, .cursor/, .mcp.json, SKILL.md, CLAUDE.md, AGENTS.md
 agentdiet reflect --dry-run            # tips learned from this workspace's past runs, for EXPERIENCE.md
 ```
@@ -196,6 +217,9 @@ agentdiet reflect --dry-run            # tips learned from this workspace's past
   Every tip cites where it came from, and anything you write outside its marked block is kept.
 - **Workspace:** activity is recorded in the nearest directory with `.agentdiet/memory.db` or `.git`
   (or `AGENTDIET_WORKSPACE`), so commands run in a subdirectory count for the whole project.
+- **Scripts and CI:** `agentdiet status --json` and `agentdiet doctor --json` print one JSON object with
+  stable keys (documented in `SPEC.md` §3b); `doctor --json` keeps `doctor`'s exit status (1 when
+  something is broken), so `agentdiet doctor --json > health.json || echo "needs attention"` works.
 - **Internal commands**, which assistants run and `--help` does not list: `agentdiet mcp` (the MCP
   server `init` registers) and `agentdiet hook <event>` (Claude Code's hooks).
 

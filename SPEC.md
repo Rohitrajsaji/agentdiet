@@ -177,9 +177,19 @@ Global state lives in `~/.agentdiet/state.json`:
   ride the engine's existing `state.json` update for `last_trimmed_id` (one locked write, no extra
   `fsync`); `cas_dereferences` is one locked update after a successful read. Each waits at most 100 ms for
   the lock and is dropped when it cannot take it (§3 Tier 3, "`state.json` updates are serialised").
-- **CAS dereference rate** = `cas_dereferences / trimmed_outputs`, shown by `agentdiet top` (§3b) as
-  "n/a" while `trimmed_outputs` is 0 and flagged as a warning when it is **strictly above 20%**: agents
-  are going back to the full output often, so the trimming is probably too aggressive for them.
+- **CAS dereference rate** = `cas_dereferences / trimmed_outputs`, shown as *re-opened* by `status`,
+  `stats`, the Control Center and `top` (§3b) as "none yet" while `trimmed_outputs` is 0. It is flagged as
+  a warning ("trimmed output is often read back in full; consider a lighter mode") only when it is
+  **strictly above 20% and `trimmed_outputs` is at least 10** (`state::REOPEN_MIN_SAMPLE`). Below 10 a
+  rate that would be high is shown with "too few trimmed outputs to judge yet (needs 10)" instead: one
+  re-open of four outputs is 25% but says nothing yet. The counters, the rate and `state.json` are
+  unchanged.
+- **Attribution (audited for P3).** `cas_dereferences` counts every successful `show '#id'` and every
+  `diet_inspect`. `diet_inspect` is always an agent (MCP), but `show '#id'` run by an agent through its
+  shell cannot be told apart from the same command typed by a person: only Claude Code exports a session
+  marker, so any heuristic would be wrong for the other assistants. People-facing text therefore says
+  *re-opened* (an ID was read back in full), never "by agents". `show last` and the Control Center's `l`
+  are still not counted: those are certainly a person.
 
 - Writes are atomic (temp file + rename).
 - Pausing: `agentdiet pause`, the Control Center toggle, or typing `@diet pause` in chat
@@ -309,8 +319,8 @@ and exit codes, hook stdout and the MCP server.
 
   These are the CLI's words only: `CasError`'s own text, which the MCP tool `diet_inspect` returns to
   agents, does not change. The `state.json` warning shows `~/…` paths.
-- **Words.** The user-facing names are *Vault* (never "CAS"), *trimmed output*, *re-opened by agents*
-  (an agent read a trimmed output back from the Vault; `cas_dereferences` in JSON), *assistant*,
+- **Words.** The user-facing names are *Vault* (never "CAS"), *trimmed output*, *re-opened* (a trimmed
+  output was read back in full by its ID, by an agent or a person; `cas_dereferences` in JSON), *assistant*,
   *shims*, *Diet Mode*, *this workspace's activity* (never "run log" or "origin"), *untrimmed (still
   scrubbed)* (never "raw" for output that was scrubbed) and *estimated* tokens. A phrase that appears in
   more than one view (the status word, savings, re-opens, what passed while paused, the Vault, the mode
@@ -396,6 +406,12 @@ these shapes; re-checking them is a deliberate change to this section.
   **5 s** and **32 MiB**. A timeout, an oversize payload, invalid JSON, a missing field or any
   internal error makes the hook exit `0` with nothing on stdout (fail open). Diagnostics go to stderr
   only. The payload is never echoed back.
+- **Closed or broken stdio.** A hook whose stdout or stderr is closed, full of errors, or gone still exits
+  `0` and never panics: a failed write is dropped, including the panic hook's own fixed note (a panic
+  while handling a panic would abort). No write blocks longer than the write itself (no retries, no
+  waiting). The same holds for the MCP server's notes (a failed note must not turn a successful
+  `diet_exec` into an error) and for the shims' error messages (the shim's exit status stays the one it
+  documents, e.g. 127 when the real program is missing).
 - **Output channel.** SessionStart and UserPromptSubmit add plain stdout to the model's context;
   PostToolUse can only change a tool result through JSON
   `{"hookSpecificOutput":{"hookEventName":"PostToolUse","updatedToolOutput":…}}`, whose value must
@@ -789,7 +805,21 @@ lesser form):
 6. **Breadcrumb.** Append one line to the trimmed output **[3B]**:
    `🥗 Diet: <summary of what was trimmed> Run: agentdiet show '#4f9a1b2c'`
    The ID is always single-quoted, because an unquoted `#…` starts a shell comment in `sh`, `bash`
-   and `zsh`. The summary is scrubbed and at most 160 bytes, e.g. `kept 42/1830 lines; cargo test:
+   and `zsh`.
+
+   **Bare IDs were assessed for P3 and deferred** (2026-10-20). Measured with the engine's estimator on
+   real lines: dropping `'#…'` saves 3 estimated tokens and 3 bytes per breadcrumb or fold marker, 2.5%
+   of the 120 tokens emitted for `seq 1 4000` through `diet_exec` and 1.0% of the 309 emitted for the
+   README's `cargo test` row (less for larger outputs). In `sh`, `bash` and `zsh` the quoted form,
+   `"#id"` and a bare ID all print the entry; an unquoted `#id` is already a safe usage error (`show`
+   requires an ID, §3b). `diet_inspect` and `show` accept both forms already (`normalize_id`). Against
+   that: the hook recognises existing breadcrumbs by `" Run: agentdiet show '#"` (`hook::has_breadcrumb`),
+   so both forms would have to be recognised indefinitely; 18 assertions in 6 test files (plus unit tests
+   in `diet.rs` and `hook.rs`) pin the format; a bare 8-hex
+   string reads like a git short hash next to `git` output; and that agents still follow the new line
+   could be checked live for Claude Code only. A 1–2.5% saving does not outweigh a model-facing change
+   that cannot be verified across the assistants, so the format stays. Revisit with live checks on more
+   assistants. The summary is scrubbed and at most 160 bytes, e.g. `kept 42/1830 lines; cargo test:
    1780 passing lines collapsed; exit 101; 2 secrets redacted (not recoverable)`. The whole line
    counts against the no-inflation check (P5).
 7. **Index summaries** into `.agentdiet/memory.db` (project-local SQLite, WAL, FTS5 + BM25) in the
@@ -1019,7 +1049,7 @@ AgentDiet is active · Balanced mode
 All projects (estimated)
   trimmed outputs      4
   tokens saved         ≈134,830
-  re-opened by agents  1 re-open for 4 trimmed outputs (25%)
+  re-opened            1 re-open for 4 trimmed outputs (25%) · too few trimmed outputs to judge yet (needs 10)
   while paused         ≈0 tokens passed untrimmed (still scrubbed)
   last trimmed         #683db530 · agentdiet show last
 
@@ -1031,7 +1061,7 @@ This workspace (~/code/app)
 ```
 
 Without memory.db the workspace part says "Nothing recorded in this workspace yet."; with nothing
-trimmed, "re-opened by agents" and "last trimmed" say "none yet". `--json` is a **contract** and does not
+trimmed, "re-opened" and "last trimmed" say "none yet". `--json` is a **contract** and does not
 change: one JSON object with the keys `status`, `mode`, `trimmed_outputs`, `tokens_saved`,
 `cas_dereferences`, `raw_tokens_passed_while_paused`, `last_trimmed_id`, `workspace`, `memory_db` and
 `runs` (`shim`, `mcp`, `hook`, each `runs`, `failed`, `trimmed`, `raw_tokens`, `emitted_tokens`), with an
@@ -1049,13 +1079,29 @@ already exists. It always exits 0. Lines, in order (§2.5 rules apply):
 3. *Savings*: `≈<tokens_saved> tokens saved in <trimmed_outputs> trimmed outputs (all projects, estimated)`,
    or `nothing trimmed yet` while `trimmed_outputs` is 0.
 4. *Re-opened*, only while `trimmed_outputs` is above 0: `<n> re-open(s) for <trimmed_outputs> trimmed output(s)
-   (<rate>)`, with the same warning as `agentdiet top` when the rate is strictly above 20% (§2.3).
+   (<rate>)`, with the same warning as `agentdiet top` when the rate is strictly above 20% over at least
+   10 trimmed outputs, or the "too few … to judge yet" note below 10 (§2.3).
    Raw counts are shown so a rate from a small sample is visibly one.
 5. *Paused*, only while paused: the estimated tokens passed untrimmed (still scrubbed) and
    `agentdiet resume`.
 6. *Last trimmed*: `#<id>` and `agentdiet show last`, when `last_trimmed_id` is set.
 7. *Health*: the `doctor` verdict in one line: `✓ no problems found`, or the number of problems and
    warnings and `agentdiet doctor`.
+
+**`status --json`** prints one JSON object and nothing else on stdout (any warning goes to stderr), exits
+0, and is never transliterated. It is a **contract**: keys are added only with their meaning kept, and a
+rename or removal bumps `schema`. Keys, in this order:
+
+| Key | Value |
+|---|---|
+| `schema` | `1` |
+| `status` | `"active"` \| `"paused"` |
+| `mode` | `"light"` \| `"balanced"` \| `"ultra-lean"` |
+| `assistants` | the connected targets (any scope) as `init` slugs, in `Target::ALL` order, `"shims"` included |
+| `trimmed_outputs`, `tokens_saved`, `cas_dereferences`, `raw_tokens_passed_while_paused` | the §2.3 counters (same names as `stats --json`) |
+| `last_trimmed_id` | ID without `#`, or `null` |
+| `reopen` | `{ "rate": <number or null>, "verdict": "none_yet" \| "fine" \| "too_few_to_judge" \| "high" }` (§2.3) |
+| `health` | `{ "ok": <no broken check>, "problems": <n>, "warnings": <n> }` (the `doctor` counts) |
 
 #### Doctor
 
@@ -1116,7 +1162,21 @@ line with an exact command. The words are `verified`, `ok`, `configured`, `warni
    otherwise its run count, or `broken` when it cannot be opened.
 
 When no assistant and no shims are connected, doctor reports `broken: nothing is connected` with
-`agentdiet init`. The last line is `All good.` or the counts that are not zero (`1 problem, 2 warnings.`, `3 warnings.`). Exit status: 0
+`agentdiet init`.
+
+**`doctor --json`** prints one JSON object and nothing else on stdout, with the same checks in the same
+order and the **same exit status** (0, or 1 when something is broken). Same contract rules as
+`status --json`. Keys:
+
+| Key | Value |
+|---|---|
+| `schema` | `1` |
+| `ok` | `true` when nothing is `broken` (warnings allowed) |
+| `problems`, `warnings` | counts |
+| `checks` | array, one object per line of the text report: `check` (`"binary"`, `"state"`, `"assistant"`, `"others"`, `"shims"`, `"path"`, `"vault"`, `"memory"`, `"setup"`), `target` (an `init` slug, or `null`), `scope` (`"user"` \| `"project"` for an assistant, else `null`), `label`, `level` (`"ok"` \| `"info"` \| `"warning"` \| `"broken"`), `status` (the text report's word: `"verified"`, `"configured"`, `"not connected"`, …), `observed` (`"verified"` \| `"not_yet"` \| `"not_observable"` \| `null`), `detail` and `fix` (the text report's sentences, `null` when there is no fix) |
+
+Neither JSON output carries file contents: details are the doctor's own sentences with `~/…` paths, never
+text read from an assistant's config (a parse error is named, not quoted). The last line is `All good.` or the counts that are not zero (`1 problem, 2 warnings.`, `3 warnings.`). Exit status: 0
 when nothing is `broken`, 1 otherwise.
 
 #### Mode
@@ -1240,7 +1300,7 @@ Every file gets families **a**, **b** and **d**; *instruction files* (`*.md`, `*
   "`agentdiet top` needs an interactive terminal (stdin and stdout must be a TTY)." and draws nothing.
 - Shows, in the §2.5 words and with the same phrases as `status` and the Control Center: a header with
   `● Active` / `■ Paused`, the Diet Mode and the connected assistants (`init` targets at user scope);
-  *tokens saved* in *trimmed outputs* (all projects, estimated), *re-opened by agents* (§2.3, with the
+  *tokens saved* in *trimmed outputs* (all projects, estimated), *re-opened* (§2.3, with the
   warning above 20%), what *passed while paused* (untrimmed, still scrubbed), the last trimmed ID and the
   Vault (entries, size, expired); *Recent activity (this workspace)*: the most recent memory.db rows
   (`#id` when its Vault entry is live, kind, command or path, summary); and a footer with the keys.
@@ -1295,6 +1355,7 @@ parses as a real command line (tested).
 | `agentdiet show <'#id'\|last> [--lines a..b]` | Prints the full stored (scrubbed) output, or a line slice; `last` is the last trimmed output |
 | `agentdiet top` | Opens the TUI |
 | `agentdiet scan [paths]` | Runs the security scanner |
+| `agentdiet completions <bash\|zsh\|fish>` | Prints a completion script for that shell on stdout (commands, aliases, flags, Diet Modes, assistant names; never the internal `mcp`/`hook`). Generated from the same clap definition as `--help` by `clap_complete`, so it cannot drift |
 | `agentdiet stats [--json]` | Prints trimming counters and the workspace's run log totals |
 | `agentdiet reflect [--dry-run]` | Writes `EXPERIENCE.md` from the run log (no LLM) |
 | `agentdiet disconnect <targets>` | Removes agentdiet from the chosen assistants only (same targets as `init --only`) |
@@ -1454,6 +1515,21 @@ this change (10,104,704 bytes, sha256 `c7d8aacd…`), timed through `AGENTDIET_P
   `PostToolUse` hook, `show '#id'`, `stats --json`, `scan`) produced byte-identical output. **B1 remains
   NOT MET.**
 
+**UX-P3 re-measurement** (2026-10-20, same machine and harness). Release binaries built with
+`cargo build --release --locked` from `b2b3c40` (UX-P2, 10,104,704 bytes) and this change (10,253,520
+bytes, sha256 `63b60a73…`; `scripts/check-binary-deps.sh --build`: only `libSystem`), alternating:
+
+| Binary | B1 p50 | B2 p50 | B3 p50 | `hook PostToolUse` p50, small / trimmed (n = 280) |
+|---|---|---|---|---|
+| UX-P2 (`b2b3c40`) | 2.76, 2.79 ms | 1.62, 1.65 ms | 0.027 ms | 5.46 / 17.32 ms |
+| this change | 2.75, 2.79 ms | 1.62, 1.65 ms | 0.027 ms | 5.47 / 17.50 ms |
+
+- `clap_complete` and the JSON outputs add 148,816 bytes; nothing new runs on the shim or hook path
+  (the hook's notes now go through a non-panicking write). Within noise. The hook figures are wall time
+  per spawn from a Python driver (it includes the driver's own spawn cost, the same for both binaries).
+  The P2 regression scenario (MCP session, `PostToolUse` hook, `show '#id'`, `stats --json`, `scan`) gives
+  byte-identical output. **B1 remains NOT MET.**
+
 Notes:
 
 - Routing (B3, 0.03 ms) is about 1% of B1. B1 is consistent with paying for two process images in
@@ -1488,6 +1564,7 @@ Notes:
 | UX-P0 | CLI/UX overhaul, phase P0 (`docs/CLI_UX_OVERHAUL.md`): `status`, `doctor`, `mode`, `show last`, the §2.2 `init` output and non-terminal `--dry-run`, the §2.5 terminal rules | done, with tests. Later phases (Control Center redesign, `eject --only`, help layout, completions) are in that document and not started |
 | UX-P1 | CLI/UX overhaul, phase P1 (`docs/CLI_UX_OVERHAUL.md`): the ratatui Control Center (§2.1), `disconnect` and `eject --only`, post-`init` verification, `verified` / `not yet observed` wording, one-line binary warning, ASCII glyph fallback, `mcp` hidden from help | done, with tests. Help layout, wording of `stats`/`top`, completions, `--json` and bare-ID breadcrumbs are P2/P3 |
 | UX-P2 | CLI/UX overhaul, phase P2: broken pipes end quietly for every command (§2.5), one vocabulary from `src/words.rs` across `status`, `doctor`, `stats`, the Control Center and `top`, actionable `show` errors (`CasError` unchanged), grouped `--help` with tested examples (§5), README overhaul | done, with tests. P3 (completions, `--json` for `status`/`doctor`, bare-ID breadcrumbs, a re-open minimum sample) not started |
+| UX-P3 | CLI/UX overhaul, phase P3: re-open warning only from 10 trimmed outputs and neutral "re-opened" wording (§2.3 audit), `status --json` / `doctor --json` (§3b schemas), hooks, MCP notes and shims never panic on closed stdio (§3 Tier 1), `agentdiet completions bash\|zsh\|fish` (`clap_complete`), bare-ID breadcrumbs assessed and deferred (§3 Tier 3 item 6) | done, with tests |
 
 License: MIT (`LICENSE`); third-party notices in `THIRD_PARTY_NOTICES`.
 

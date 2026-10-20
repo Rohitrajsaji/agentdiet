@@ -96,6 +96,8 @@ pub struct Report {
     pub checks: Vec<Check>,
     /// Labels of the assistants (and `Shims`) agentdiet is connected to, at any scope.
     pub connected: Vec<&'static str>,
+    /// The same, as targets (for `status --json`).
+    pub connected_targets: Vec<Target>,
 }
 
 impl Report {
@@ -277,6 +279,7 @@ fn run(paths: &Paths, path_var: &OsStr, only: Option<(&[Target], bool)>) -> Repo
     // Pass 2: the lines.
     let mut checks = Vec::new();
     let mut connected = Vec::new();
+    let mut connected_targets = Vec::new();
     let mut not_installed = Vec::new();
     for (target, project, assessment) in assessed {
         let kind = CheckKind::Assistant { target, project };
@@ -288,6 +291,7 @@ fn run(paths: &Paths, path_var: &OsStr, only: Option<(&[Target], bool)>) -> Repo
             Some(_) => {
                 if !connected.contains(&target.label()) {
                     connected.push(target.label());
+                    connected_targets.push(target);
                 }
                 let label = if project {
                     format!("{} (project)", target.label())
@@ -318,6 +322,7 @@ fn run(paths: &Paths, path_var: &OsStr, only: Option<(&[Target], bool)>) -> Repo
         let mut shim = shim_checks(paths, path_var, &activity, collapse.as_deref());
         if shim.first().is_some_and(|c| c.word != "not installed") {
             connected.push("Shims");
+            connected_targets.push(Target::Shims);
         }
         for (i, c) in shim.iter_mut().enumerate() {
             c.kind = if i == 0 {
@@ -366,7 +371,11 @@ fn run(paths: &Paths, path_var: &OsStr, only: Option<(&[Target], bool)>) -> Repo
         }
     }
     share_missing_binary_fix(&mut checks, paths);
-    Report { checks, connected }
+    Report {
+        checks,
+        connected,
+        connected_targets,
+    }
 }
 
 /// Several rows broken by one missing binary (it was moved or deleted) get one fix, on the last of
@@ -921,6 +930,93 @@ fn shim_checks(
 
 // ---- status ---------------------------------------------------------------------------------------
 
+fn level_name(level: Level) -> &'static str {
+    match level {
+        Level::Info => "info",
+        Level::Ok => "ok",
+        Level::Warning => "warning",
+        Level::Broken => "broken",
+    }
+}
+
+impl Check {
+    /// One `doctor --json` check (SPEC §3b "Doctor"). Keys in a fixed order.
+    pub fn to_json(&self) -> serde_json::Value {
+        let (check, target, scope) = match self.kind {
+            CheckKind::Binary => ("binary", None, None),
+            CheckKind::State => ("state", None, None),
+            CheckKind::Assistant { target, project } => (
+                "assistant",
+                Some(target.slug()),
+                Some(if project { "project" } else { "user" }),
+            ),
+            CheckKind::Others => ("others", None, None),
+            CheckKind::Shims => ("shims", Some(Target::Shims.slug()), None),
+            CheckKind::Path => ("path", None, None),
+            CheckKind::Vault => ("vault", None, None),
+            CheckKind::Memory => ("memory", None, None),
+            CheckKind::Setup => ("setup", None, None),
+        };
+        let observed = match self.observed {
+            Observed::NotApplicable => None,
+            Observed::Verified => Some("verified"),
+            Observed::NotYet => Some("not_yet"),
+            Observed::NotObservable => Some("not_observable"),
+        };
+        serde_json::json!({
+            "check": check,
+            "target": target,
+            "scope": scope,
+            "label": self.label,
+            "level": level_name(self.level),
+            "status": self.word,
+            "observed": observed,
+            "detail": self.detail,
+            "fix": self.fix,
+        })
+    }
+}
+
+impl Report {
+    /// `doctor --json` (SPEC §3b "Doctor"): the same checks, in the same order, as the text.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema": 1,
+            "ok": self.problems() == 0,
+            "problems": self.problems(),
+            "warnings": self.warnings(),
+            "checks": self.checks.iter().map(Check::to_json).collect::<Vec<_>>(),
+        })
+    }
+}
+
+/// `status --json` (SPEC §3b "Status"). Keys in a fixed order; counters named as in `stats --json`.
+pub fn status_json(state: &State, report: &Report) -> serde_json::Value {
+    let verdict = match words::reopen_verdict(state) {
+        words::Reopens::NoneYet => "none_yet",
+        words::Reopens::Fine => "fine",
+        words::Reopens::TooFewToJudge => "too_few_to_judge",
+        words::Reopens::High => "high",
+    };
+    serde_json::json!({
+        "schema": 1,
+        "status": state.status,
+        "mode": state.mode,
+        "assistants": report.connected_targets.iter().map(|t| t.slug()).collect::<Vec<_>>(),
+        "trimmed_outputs": state.trimmed_outputs,
+        "tokens_saved": state.tokens_saved,
+        "cas_dereferences": state.cas_dereferences,
+        "raw_tokens_passed_while_paused": state.raw_tokens_passed_while_paused,
+        "last_trimmed_id": state.last_trimmed_id,
+        "reopen": { "rate": state.dereference_rate(), "verdict": verdict },
+        "health": {
+            "ok": report.problems() == 0,
+            "problems": report.problems(),
+            "warnings": report.warnings(),
+        },
+    })
+}
+
 /// `agentdiet status`: the §3b overview, from `state.json` and a doctor run.
 pub fn render_status(state: &State, report: &Report, p: Painter) -> String {
     let status = match state.status {
@@ -958,9 +1054,16 @@ pub fn render_status(state: &State, report: &Report, p: Painter) -> String {
         );
     }
     if let Some(mut text) = words::reopens(state) {
-        if words::reopens_high(state) {
-            text.push(' ');
-            text.push_str(&p.level(Level::Warning, words::REOPEN_WARNING));
+        match words::reopen_note(state) {
+            Some((Level::Warning, note)) => {
+                text.push(' ');
+                text.push_str(&p.level(Level::Warning, note));
+            }
+            Some((_, note)) => {
+                text.push(' ');
+                text.push_str(&p.dim(&format!("· {note}")));
+            }
+            None => {}
         }
         row(&mut out, "Re-opened", text);
     }
@@ -1156,7 +1259,7 @@ mod tests {
         );
         for line in [
             "  Savings       ≈134,830 tokens saved in 4 trimmed outputs (all projects, estimated)",
-            "  Re-opened     1 re-open for 4 trimmed outputs (25%) ⚠ high: agents re-read trimmed output; consider a lighter mode",
+            "  Re-opened     1 re-open for 4 trimmed outputs (25%) · too few trimmed outputs to judge yet (needs 10)",
             "  Paused        ≈2,500 tokens passed untrimmed (still scrubbed) · agentdiet resume",
             "  Last trimmed  #683db530 · agentdiet show last",
             "  Health        ✗ 1 problem · agentdiet doctor",
@@ -1164,6 +1267,16 @@ mod tests {
             assert!(text.contains(line), "missing {line:?} in:\n{text}");
         }
 
+        // Enough trimmed outputs: now a high rate is a warning.
+        let busy = State {
+            trimmed_outputs: 20,
+            cas_dereferences: 5,
+            ..state.clone()
+        };
+        let text = render_status(&busy, &report, Painter::plain());
+        assert!(text.contains(
+            "  Re-opened     5 re-opens for 20 trimmed outputs (25%) ⚠ high: trimmed output is often read back in full; consider a lighter mode"
+        ), "{text}");
         let quiet = render_status(&State::default(), &report, Painter::plain());
         assert!(quiet.contains("  Savings       nothing trimmed yet\n"));
         assert!(

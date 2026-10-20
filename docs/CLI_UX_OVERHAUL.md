@@ -1,6 +1,6 @@
 # AgentDiet CLI/UX overhaul
 
-Status: **P0, P1 and P2 implemented** (`a827255`, `0b58e02`, then the P2 commit); P3 designed, not started. `SPEC.md` stays the source of truth for
+Status: **P0–P3 implemented** (`a827255`, `0b58e02`, `b2b3c40`, then the P3 commit). `SPEC.md` stays the source of truth for
 behaviour (§2.2 `init` output, §2.5 terminal rules, §3b Status / Doctor / Mode / `show last`); this
 document holds the design reasoning, the mockups and the task list.
 
@@ -616,7 +616,7 @@ hook stdout; the MCP server.
   All projects (estimated)
     trimmed outputs       4
     tokens saved          ≈134,830
-    re-opened by agents   1 re-open for 4 trimmed outputs (25%)
+    re-opened            1 re-open for 4 trimmed outputs (25%)
     passed while paused   ≈0 tokens, untrimmed (still scrubbed)
     last trimmed          #683db530 · agentdiet show last
 
@@ -727,7 +727,28 @@ cannot document a command that does not exist.
   - the new-user walkthrough is re-run in an isolated HOME;
   - B1/B2 re-measured paired against `0b58e02`.
 
-### P3 — optional
+### P3 — advanced developer experience and reliability (done)
+
+- **Re-opens:** the warning needs 10 trimmed outputs (`state::REOPEN_MIN_SAMPLE`); below that a high
+  rate says "too few trimmed outputs to judge yet (needs 10)". Audit: an agent's `show '#id'` and a
+  person's cannot be told apart (only Claude Code exports a session marker), so the wording is the
+  neutral *re-opened* everywhere; counters and `state.json` unchanged.
+- **`status --json`, `doctor --json`:** schemas in SPEC §3b (`schema: 1`, fixed key order); `doctor
+  --json` keeps the 0/1 exit status; one line of JSON on stdout, warnings on stderr; never transliterated;
+  no config contents (tested with a secret planted in two configs).
+- **Closed stdio:** with P2, a hook whose stderr was closed and which had a note to write died by
+  SIGABRT (the note's `eprintln!` panicked, then the panic hook's own `eprintln!` panicked); a shim
+  without its real program did the same instead of exiting 127. All stderr writes now go through
+  `ui::warn`; tests cover hooks (closed stdout/stderr, malformed payloads), the MCP server and shims.
+- **Completions:** `agentdiet completions bash|zsh|fish` via `clap_complete` (one crate, no transitive
+  dependencies). Generated from the visible commands only (the generators do not skip hidden ones);
+  fish gets positional values (modes, assistants, shells) added from clap's own lists. Tests: content per
+  shell, `bash -n`/`zsh -n`, and bash's completion function driven for real.
+- **Bare-ID breadcrumbs:** measured and deferred (SPEC §3 Tier 3 item 6): 3 estimated tokens per line
+  (1.0–2.5% of what is emitted) against a model-facing change that can be checked live for Claude Code
+  only.
+
+### P3 — the original list
 
 - `agentdiet completions <shell>` (needs the `clap_complete` crate: pure Rust, compile-time only;
   requires the CLAUDE.md dependency justification).

@@ -109,6 +109,9 @@ impl State {
 /// A dereference rate above this is flagged by `agentdiet top` (SPEC §2.3).
 pub const DEREFERENCE_WARN_RATE: f64 = 0.20;
 
+/// The warning needs at least this many trimmed outputs: below it a rate is noise (SPEC §2.3).
+pub const REOPEN_MIN_SAMPLE: u64 = 10;
+
 /// One engine telemetry update; see [`record_telemetry`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Telemetry<'a> {

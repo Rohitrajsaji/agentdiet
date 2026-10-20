@@ -7,7 +7,7 @@ use anyhow::Context;
 use clap::Parser;
 
 use agentdiet::cas::{Cas, CasError, LineRange};
-use agentdiet::cli::{Cli, Command};
+use agentdiet::cli::{self, Cli, Command};
 use agentdiet::{
     Paths, center, control, diet, hook, init, mcp, reflect, scan, shim, state, stats, status, top,
     ui,
@@ -41,7 +41,8 @@ fn main() -> ExitCode {
 /// The engine runs in hooks and shims, where a panic message could carry tool output: print only
 /// the fixed note (SPEC §3 Tier 2, "Panics").
 fn install_quiet_panic_hook() {
-    std::panic::set_hook(Box::new(|_| eprintln!("{}", diet::PANIC_NOTE)));
+    // `ui::warn`, not `eprintln!`: a panic inside the panic hook (stderr closed) would abort.
+    std::panic::set_hook(Box::new(|_| ui::warn(diet::PANIC_NOTE)));
 }
 
 /// Always exits 0. Unknown events (and `noop`) return before stdin is touched.
@@ -60,8 +61,9 @@ fn run_hook(event: Option<&OsString>) -> ExitCode {
     let mut out = std::io::stdout().lock();
     let _ = out.write_all(response.stdout.as_bytes());
     let _ = out.flush();
+    // A closed stderr must not cost the exit status 0 (SPEC §3 Tier 1, "Closed or broken stdio").
     for note in response.notes {
-        eprintln!("{note}");
+        ui::warn(&note);
     }
     ExitCode::SUCCESS
 }
@@ -168,20 +170,31 @@ fn run() -> anyhow::Result<ExitCode> {
             .context("MCP server failed")?;
         }
         Some(Command::Show { id, lines }) => show(&paths, &id, lines.as_deref())?,
-        Some(Command::Status) => {
+        Some(Command::Status { json }) => {
             let report = status::doctor(&paths, &path_var());
-            let painter = ui::Painter::stdout();
-            ui::emit(&status::render_status(
-                &state::load(&paths),
-                &report,
-                painter,
-            ))?;
+            let state = state::load(&paths);
+            if json {
+                // Data: one JSON object and nothing else on stdout (SPEC §3b "Status").
+                ui::write_out(format!("{}\n", status::status_json(&state, &report)).as_bytes())?;
+            } else {
+                ui::emit(&status::render_status(
+                    &state,
+                    &report,
+                    ui::Painter::stdout(),
+                ))?;
+            }
         }
-        Some(Command::Doctor) => {
+        Some(Command::Doctor { json }) => {
             let report = status::doctor(&paths, &path_var());
-            ui::emit(&report.render(ui::Painter::stdout()))?;
+            if json {
+                ui::write_out(format!("{}\n", report.to_json()).as_bytes())?;
+            } else {
+                ui::emit(&report.render(ui::Painter::stdout()))?;
+            }
             return Ok(ExitCode::from(report.exit_code()));
         }
+        // Data: the script exactly as generated.
+        Some(Command::Completions { shell }) => ui::write_out(&cli::completions(shell))?,
         Some(Command::Mode { mode: None }) => {
             ui::emit(&control::mode_overview(
                 &state::load(&paths),

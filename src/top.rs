@@ -163,11 +163,13 @@ pub fn draw(frame: &mut Frame<'_>, snap: &Snapshot, ctx: Ctx) {
         )
     }];
     lines.push(Line::from(format!(
-        "Re-opened by agents: {}",
+        "Re-opened: {}",
         words::reopens(s).unwrap_or_else(none_yet)
     )));
-    if words::reopens_high(s) {
-        lines.push(ctx.line(words::REOPEN_WARNING, ctx.level(Level::Warning)));
+    match words::reopen_note(s) {
+        Some((Level::Warning, note)) => lines.push(ctx.line(note, ctx.level(Level::Warning))),
+        Some((_, note)) => lines.push(ctx.line(note, ctx.dim())),
+        None => {}
     }
     lines.push(ctx.line(
         &format!("Passed while paused: {}", words::passed_while_paused(s)),
@@ -433,7 +435,10 @@ mod tests {
             text.contains("+ AgentDiet ---") && text.contains("# Paused"),
             "{text}"
         );
-        assert!(text.contains("! high: agents re-read"), "{text}");
+        assert!(
+            text.contains("! high: trimmed output is often read back"),
+            "{text}"
+        );
         assert!(text.contains("p resume  m next mode"), "{text}");
         assert!(text.contains("~123,456 tokens saved"), "{text}");
     }
@@ -495,8 +500,8 @@ mod tests {
             "Claude Code, Cursor",
             "All projects (estimated)",
             "Savings: ≈123,456 tokens saved in 20 trimmed outputs",
-            "Re-opened by agents: 5 re-opens for 20 trimmed outputs (25%)",
-            "⚠ high: agents re-read trimmed output; consider a lighter mode",
+            "Re-opened: 5 re-opens for 20 trimmed outputs (25%)",
+            "⚠ high: trimmed output is often read back in full; consider a lighter mode",
             "Passed while paused: ≈4,321 tokens passed untrimmed (still scrubbed)",
             "Last trimmed: #4f9a1b2c   Vault: 12 entries, 2.0 KiB (3 expired)",
             "Recent activity (this workspace)",
@@ -512,14 +517,14 @@ mod tests {
     fn the_warning_needs_a_rate_strictly_above_20_percent() {
         let text = screen(&sample(3, 20));
         assert!(
-            text.contains("Re-opened by agents: 3 re-opens for 20 trimmed outputs (15%)"),
+            text.contains("Re-opened: 3 re-opens for 20 trimmed outputs (15%)"),
             "{text}"
         );
         assert!(!text.contains("⚠"), "{text}");
         let text = screen(&sample(4, 20));
         assert!(text.contains("(20%)") && !text.contains("⚠"), "{text}");
         let text = screen(&sample(0, 0));
-        assert!(text.contains("Re-opened by agents: none yet"), "{text}");
+        assert!(text.contains("Re-opened: none yet"), "{text}");
         assert!(text.contains("Savings: nothing trimmed yet"), "{text}");
         // Opened from the Control Center, `q` goes back.
         let back = screen(&Snapshot {
@@ -593,7 +598,9 @@ mod tests {
         let text = screen(&snap);
         assert!(text.contains(&format!("#{}", put.short_id)), "{text}");
         assert!(
-            text.contains("1 re-open for 4 trimmed outputs (25%)") && text.contains("⚠ high"),
+            text.contains("1 re-open for 4 trimmed outputs (25%)")
+                && text.contains("too few trimmed outputs to judge yet")
+                && !text.contains("⚠ high"),
             "{text}"
         );
     }

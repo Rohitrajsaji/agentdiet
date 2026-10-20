@@ -331,7 +331,7 @@ impl Server<'_> {
                 &settings,
             );
             if let Some(note) = outcome.note {
-                eprintln!("{note}");
+                crate::ui::warn(&note);
             }
             sha = sha.take().or(outcome.sha);
             emitted_tokens += estimate_tokens(&outcome.output);
@@ -358,7 +358,7 @@ impl Server<'_> {
             },
         );
         if let Err(note) = logged {
-            eprintln!("{note}");
+            crate::ui::warn(&note);
         }
 
         let mut text = out;

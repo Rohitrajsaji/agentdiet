@@ -3,14 +3,51 @@
 
 use crate::cas::CasStats;
 use crate::diet::ModeParams;
-use crate::state::{DEREFERENCE_WARN_RATE, Mode, State, Status};
+use crate::state::{DEREFERENCE_WARN_RATE, Mode, REOPEN_MIN_SAMPLE, State, Status};
 use crate::ui::{Level, plural, thousands};
 
 /// What "paused" means for output, wherever it is explained.
 pub const PAUSED_MEANING: &str = "output passes through untrimmed (still scrubbed)";
 
-/// The warning for a high re-open rate (above [`DEREFERENCE_WARN_RATE`]).
-pub const REOPEN_WARNING: &str = "⚠ high: agents re-read trimmed output; consider a lighter mode";
+/// The warning for a high re-open rate (above [`DEREFERENCE_WARN_RATE`], over at least
+/// [`REOPEN_MIN_SAMPLE`] trimmed outputs). Neutral about who re-opened: an agent's `show '#id'` and a
+/// person's cannot be told apart (SPEC §2.3 "Attribution").
+pub const REOPEN_WARNING: &str =
+    "⚠ high: trimmed output is often read back in full; consider a lighter mode";
+
+/// What a rate that would be high says while the sample is too small.
+pub const REOPEN_TOO_FEW: &str = "too few trimmed outputs to judge yet (needs 10)";
+
+/// How the re-open rate should be read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reopens {
+    /// Nothing trimmed yet.
+    NoneYet,
+    /// Nothing to say about it.
+    Fine,
+    /// Above the warning rate, but over fewer than [`REOPEN_MIN_SAMPLE`] trimmed outputs.
+    TooFewToJudge,
+    /// Above the warning rate over enough trimmed outputs: [`REOPEN_WARNING`].
+    High,
+}
+
+pub fn reopen_verdict(state: &State) -> Reopens {
+    match state.dereference_rate() {
+        None => Reopens::NoneYet,
+        Some(rate) if rate <= DEREFERENCE_WARN_RATE => Reopens::Fine,
+        Some(_) if state.trimmed_outputs < REOPEN_MIN_SAMPLE => Reopens::TooFewToJudge,
+        Some(_) => Reopens::High,
+    }
+}
+
+/// The note that goes after [`reopens`], with its level: the warning, or the "too few" explanation.
+pub fn reopen_note(state: &State) -> Option<(Level, &'static str)> {
+    match reopen_verdict(state) {
+        Reopens::High => Some((Level::Warning, REOPEN_WARNING)),
+        Reopens::TooFewToJudge => Some((Level::Info, REOPEN_TOO_FEW)),
+        Reopens::NoneYet | Reopens::Fine => None,
+    }
+}
 
 /// `● Active` / `■ Paused`, with the level it is shown at.
 pub fn status_word(status: Status) -> (&'static str, Level) {
@@ -50,9 +87,7 @@ pub fn reopens(state: &State) -> Option<String> {
 
 /// Whether [`REOPEN_WARNING`] applies.
 pub fn reopens_high(state: &State) -> bool {
-    state
-        .dereference_rate()
-        .is_some_and(|rate| rate > DEREFERENCE_WARN_RATE)
+    reopen_verdict(state) == Reopens::High
 }
 
 /// `≈2,500 tokens passed untrimmed (still scrubbed)`.
@@ -120,7 +155,26 @@ mod tests {
             reopens(&s).unwrap(),
             "1 re-open for 4 trimmed outputs (25%)"
         );
-        assert!(reopens_high(&s));
+        // 25% of 4 is not evidence yet: explained, not alarmed.
+        assert_eq!(reopen_verdict(&s), Reopens::TooFewToJudge);
+        assert!(!reopens_high(&s));
+        assert_eq!(reopen_note(&s), Some((Level::Info, REOPEN_TOO_FEW)));
+        s.trimmed_outputs = 9;
+        s.cas_dereferences = 9;
+        assert_eq!(
+            reopen_verdict(&s),
+            Reopens::TooFewToJudge,
+            "9 is still too few"
+        );
+        s.trimmed_outputs = 10;
+        s.cas_dereferences = 3;
+        assert_eq!(reopen_verdict(&s), Reopens::High, "30% of 10 warns");
+        assert_eq!(reopen_note(&s), Some((Level::Warning, REOPEN_WARNING)));
+        s.cas_dereferences = 2;
+        assert_eq!(reopen_verdict(&s), Reopens::Fine, "exactly 20% does not");
+        assert!(REOPEN_TOO_FEW.contains(&REOPEN_MIN_SAMPLE.to_string()));
+        s.trimmed_outputs = 4;
+        s.cas_dereferences = 1;
         s.trimmed_outputs = 1;
         s.cas_dereferences = 3;
         assert_eq!(
