@@ -804,6 +804,14 @@ fn shim_checks(
     activity: &Activity,
     collapse: Option<&Path>,
 ) -> Vec<Check> {
+    if cfg!(windows) {
+        return vec![Check::new(
+            "Shims",
+            Level::Info,
+            "not installed",
+            "not supported on Windows yet; hooks and the MCP server work".into(),
+        )];
+    }
     // A "different build" that the Binary row already reports counts as this one here.
     let links: Vec<(&'static str, Link)> = shims::inspect(paths)
         .into_iter()
@@ -1156,6 +1164,7 @@ mod tests {
         assert_eq!(verdict(&f.paths, Target::Cursor, false), None);
     }
 
+    #[cfg(unix)] // its configured paths (`/gone/agentdiet`) are absolute only on Unix
     #[test]
     fn the_worst_file_decides_and_a_missing_binary_beats_a_missing_entry() {
         let f = fixture();
@@ -1323,6 +1332,7 @@ mod p1_tests {
             .unwrap_or_else(|| panic!("no {label} row in {:?}", report.checks))
     }
 
+    #[cfg(unix)] // expects shims, which Windows does not have (SPEC §10)
     #[test]
     fn configuration_alone_is_never_verified() {
         let dir = TempDir::new().unwrap();
@@ -1354,6 +1364,7 @@ mod p1_tests {
         assert!(report.checks.iter().all(|c| c.word != "verified"));
     }
 
+    #[cfg(unix)] // expects shims, which Windows does not have (SPEC §10)
     #[test]
     fn many_different_builds_are_reported_once_on_the_binary_row() {
         let dir = TempDir::new().unwrap();
@@ -1453,6 +1464,7 @@ mod p1_tests {
         );
     }
 
+    #[cfg(unix)] // expects shims, which Windows does not have (SPEC §10)
     #[test]
     fn one_missing_binary_behind_several_rows_gets_one_fix() {
         let dir = TempDir::new().unwrap();
@@ -1482,6 +1494,7 @@ mod p1_tests {
         assert!(fixes[0].contains("put agentdiet back at"), "{}", fixes[0]);
     }
 
+    #[cfg(unix)] // expects shims, which Windows does not have (SPEC §10)
     #[test]
     fn doctor_for_checks_only_the_selected_targets() {
         let dir = TempDir::new().unwrap();

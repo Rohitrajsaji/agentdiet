@@ -138,6 +138,8 @@ fn mcp_session(env: &Env, command: &str, args: &[String], requests: &[Value]) ->
         .args(args)
         .env("HOME", &env.paths.home)
         .env("USERPROFILE", &env.paths.home)
+        .env("XDG_CONFIG_HOME", &env.paths.config_dir)
+        .env("APPDATA", &env.paths.config_dir)
         .current_dir(&env.paths.project_root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -262,7 +264,7 @@ fn every_assistant_reaches_the_mcp_server_recovers_output_and_disconnects_cleanl
             ],
         );
         assert_eq!(
-            text_of(&recovered[1]).trim_end(),
+            text_of(&recovered[1]).replace("\r\n", "\n").trim_end(), // `cmd`'s echo ends lines CRLF
             "3999\n4000",
             "{}",
             client.slug

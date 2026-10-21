@@ -1,6 +1,10 @@
 //! Foundation hardening, end to end. Everything that depends on the process
 //! umask runs in a **child process** (`sh -c 'umask …; exec …'`), never by
 //! changing the umask or environment of this parallel test process.
+//!
+//! Unix only: umasks and file modes do not exist on Windows (SPEC §10: files there are protected by
+//! the user profile's ACL).
+#![cfg(unix)]
 
 mod common;
 

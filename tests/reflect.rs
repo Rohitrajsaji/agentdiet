@@ -15,7 +15,9 @@ const SESSION: &str = "7c0ffee0-reflect-session";
 fn agentdiet(env: &Env) -> Command {
     let mut cmd = Command::new(BIN);
     cmd.env("HOME", &env.paths.home)
+        .env("USERPROFILE", &env.paths.home)
         .env("XDG_CONFIG_HOME", &env.paths.config_dir)
+        .env("APPDATA", &env.paths.config_dir)
         .env_remove("CLAUDECODE")
         .env_remove("CLAUDE_CODE_SESSION_ID")
         .env_remove("AGENTDIET_WORKSPACE")

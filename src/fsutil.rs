@@ -158,6 +158,7 @@ pub fn create_private_dir(path: &Path) -> io::Result<()> {
 }
 
 fn private_dir_builder() -> fs::DirBuilder {
+    #[cfg_attr(not(unix), expect(unused_mut, reason = "only Unix sets a mode"))]
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
     {
@@ -213,7 +214,14 @@ fn harden(options: &mut OpenOptions) {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
-    #[cfg(not(unix))]
+    // A symlink or junction is opened as itself, so `require_regular` refuses it (SPEC §10).
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    #[cfg(not(any(unix, windows)))]
     let _ = options;
 }
 
@@ -275,6 +283,10 @@ pub fn read_optional_regular(path: &Path) -> io::Result<Option<Vec<u8>>> {
 /// crash. Filesystems that cannot sync a directory report `Unsupported` or
 /// `EINVAL`; that is not a failure to persist anything we could do better.
 pub fn sync_dir(dir: &Path) -> io::Result<()> {
+    // Windows cannot open a directory as a file to flush it; NTFS journals its metadata (SPEC §10).
+    if cfg!(windows) {
+        return Ok(());
+    }
     match fs::File::open(dir).and_then(|d| d.sync_all()) {
         Err(e)
             if matches!(

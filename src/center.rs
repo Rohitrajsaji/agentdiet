@@ -1258,6 +1258,7 @@ mod tests {
         (p, d)
     }
 
+    #[cfg(unix)] // expects shims, which Windows does not have (SPEC §10)
     #[test]
     fn a_busy_install_shows_status_assistants_savings_attention_and_activity() {
         let dir = TempDir::new().unwrap();
@@ -1290,6 +1291,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)] // expects shims, which Windows does not have (SPEC §10)
     #[test]
     fn every_row_fits_at_every_size_and_small_screens_degrade() {
         let dir = TempDir::new().unwrap();
@@ -1370,6 +1372,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)] // expects shims, which Windows does not have (SPEC §10)
     #[test]
     fn views_render_their_content() {
         let dir = TempDir::new().unwrap();

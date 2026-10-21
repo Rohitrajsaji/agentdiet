@@ -5,7 +5,9 @@ mod common;
 
 use std::io::Write;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant, SystemTime};
+#[cfg(unix)]
+use std::time::Instant;
+use std::time::{Duration, SystemTime};
 
 use agentdiet::cas::{Cas, DEFAULT_TTL};
 use agentdiet::memory::{Kind, MemoryDb};
@@ -21,7 +23,9 @@ fn session_with(env: &Env, extra_env: &[(&str, &str)], requests: &[Value]) -> Ve
     let mut cmd = Command::new(BIN);
     cmd.arg("mcp")
         .env("HOME", &env.paths.home)
+        .env("USERPROFILE", &env.paths.home)
         .env("XDG_CONFIG_HOME", &env.paths.config_dir)
+        .env("APPDATA", &env.paths.config_dir)
         .env("USERPROFILE", &env.paths.home)
         .current_dir(&env.paths.project_root)
         .stdin(Stdio::piped())
@@ -280,6 +284,7 @@ fn diet_search_ranks_by_bm25_and_points_at_live_entries() {
 }
 
 /// A shell-free command whose output the cargo rules compress: many passing tests, one failure.
+#[cfg(unix)] // used by the Unix-only diet_exec tests
 fn cargo_like_output(env: &Env) -> std::path::PathBuf {
     let mut body = String::from("   Compiling demo v0.1.0\n");
     for i in 0..400 {
@@ -292,6 +297,7 @@ fn cargo_like_output(env: &Env) -> std::path::PathBuf {
 }
 
 /// An executable named `cargo` that prints [`cargo_like_output`], warns on stderr and exits 101.
+#[cfg(unix)] // used by the Unix-only diet_exec tests
 fn fake_cargo(env: &Env) -> std::path::PathBuf {
     let file = cargo_like_output(env);
     let script = env.paths.project_root.join("cargo");
@@ -311,6 +317,7 @@ fn fake_cargo(env: &Env) -> std::path::PathBuf {
     script
 }
 
+#[cfg(unix)] // runs Unix programs (sh, cat, seq) or Unix-only error paths
 #[test]
 fn diet_exec_trims_stores_and_reports_the_exit_status() {
     let env = Env::empty();
@@ -354,6 +361,7 @@ fn diet_exec_trims_stores_and_reports_the_exit_status() {
     );
 }
 
+#[cfg(unix)] // runs Unix programs (sh, cat, seq) or Unix-only error paths
 #[test]
 fn diet_exec_expands_a_repeated_command_and_never_starts_a_shell() {
     let env = Env::empty();
@@ -399,6 +407,7 @@ fn diet_exec_expands_a_repeated_command_and_never_starts_a_shell() {
     assert_eq!(r(5)["isError"], true);
 }
 
+#[cfg(unix)] // runs Unix programs (sh, cat, seq) or Unix-only error paths
 #[test]
 fn diet_exec_kills_the_whole_process_group_on_timeout() {
     let env = Env::empty();
@@ -431,6 +440,7 @@ fn diet_exec_kills_the_whole_process_group_on_timeout() {
     assert!(!marker.exists(), "the grandchild was killed with its group");
 }
 
+#[cfg(unix)] // runs Unix programs (sh, cat, seq) or Unix-only error paths
 #[test]
 fn diet_exec_stdin_is_not_the_json_rpc_stream() {
     let env = Env::empty();
@@ -447,6 +457,7 @@ fn diet_exec_stdin_is_not_the_json_rpc_stream() {
 }
 
 /// An executable named `name` that prints `body` from a file and exits `code`.
+#[cfg(unix)] // used by the Unix-only diet_exec tests
 fn fake_tool(env: &Env, name: &str, body: &str, code: i32) -> std::path::PathBuf {
     let file = env.paths.project_root.join(format!("{name}-output.txt"));
     std::fs::write(&file, body).unwrap();
@@ -466,6 +477,7 @@ fn fake_tool(env: &Env, name: &str, body: &str, code: i32) -> std::path::PathBuf
 
 /// About 2,000 lines shaped like `npm ls --all`: a dependency tree, many `deduped` lines, one
 /// unmet peer dependency in the middle.
+#[cfg(unix)] // used by the Unix-only diet_exec tests
 fn npm_ls_tree() -> String {
     let mut out = String::from("germany-masters-2027@0.1.0 /Users/dev/germany-masters-2027\n");
     for top in 0..100 {
@@ -482,6 +494,7 @@ fn npm_ls_tree() -> String {
     out
 }
 
+#[cfg(unix)] // used by the Unix-only diet_exec tests
 fn breadcrumb_id(t: &str) -> String {
     t.lines()
         .find_map(|l| l.split("agentdiet show '#").nth(1))
@@ -492,6 +505,7 @@ fn breadcrumb_id(t: &str) -> String {
 
 /// Dogfooding regression: `npm ls --all` (about 1,900 lines) came back whole, with no breadcrumb,
 /// `trimmed_outputs` 0 and `tokens_saved` 0.
+#[cfg(unix)] // runs Unix programs (sh, cat, seq) or Unix-only error paths
 #[test]
 fn diet_exec_trims_a_2000_line_npm_ls_stores_it_and_counts_it() {
     let env = Env::empty();
@@ -552,6 +566,7 @@ fn diet_exec_trims_a_2000_line_npm_ls_stores_it_and_counts_it() {
 }
 
 /// A command no rule knows is still cut to its head, its tail and its diagnostics when it is long.
+#[cfg(unix)] // runs Unix programs (sh, cat, seq) or Unix-only error paths
 #[test]
 fn diet_exec_cuts_any_long_output_to_head_tail_and_diagnostics() {
     let env = Env::empty();

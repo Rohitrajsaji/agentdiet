@@ -143,6 +143,7 @@ impl Fixture {
         let mut cmd = Command::new(program);
         cmd.env_clear()
             .env("HOME", &self.home)
+            .env("USERPROFILE", &self.home)
             .env("PATH", path_var)
             .stdin(Stdio::null())
             .stdout(Stdio::null())

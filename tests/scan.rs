@@ -15,7 +15,9 @@ fn scan(env: &Env, args: &[&str]) -> Output {
         .arg("scan")
         .args(args)
         .env("HOME", &env.paths.home)
+        .env("USERPROFILE", &env.paths.home)
         .env("XDG_CONFIG_HOME", &env.paths.config_dir)
+        .env("APPDATA", &env.paths.config_dir)
         .current_dir(&env.paths.project_root)
         .stdin(Stdio::null())
         .output()
@@ -44,7 +46,8 @@ fn findings(out: &Output) -> Vec<(String, String)> {
             let loc = parts.next().unwrap();
             let rule = parts.nth(1).unwrap();
             let (path_line, _col) = loc.rsplit_once(':').unwrap();
-            (path_line.to_string(), rule.to_string())
+            // Paths are shown with the platform's separator.
+            (path_line.replace('\\', "/"), rule.to_string())
         })
         .collect()
 }

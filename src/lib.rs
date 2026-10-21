@@ -81,6 +81,27 @@ pub fn discover_workspace(start: &Path, home: &Path) -> PathBuf {
     start.to_path_buf()
 }
 
+/// The home directory: `$HOME` on Unix; on Windows `%USERPROFILE%`, which is what Node's
+/// `os.homedir()` (Claude Code, Gemini CLI, VS Code) reads, then the profile folder Windows reports
+/// (SPEC §10). `dirs` alone asks only Windows, ignoring the environment.
+fn home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    if let Some(dir) = std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
+    dirs::home_dir()
+}
+
+/// The platform config directory: `%APPDATA%` first on Windows (where VS Code keeps `Code\User`),
+/// as for [`home_dir`]; the `dirs` lookup otherwise.
+fn config_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    if let Some(dir) = std::env::var_os("APPDATA").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
+    dirs::config_dir()
+}
+
 impl Paths {
     /// Build paths from explicit locations; `agentdiet_home` is `<home>/.agentdiet`.
     pub fn new(home: PathBuf, config_dir: PathBuf, project_root: PathBuf, exe: PathBuf) -> Self {
@@ -98,8 +119,8 @@ impl Paths {
     /// Resolve paths from the real environment. Called only from `main`.
     pub fn from_env() -> anyhow::Result<Self> {
         use anyhow::Context;
-        let home = dirs::home_dir().context("could not determine the home directory")?;
-        let config_dir = dirs::config_dir().unwrap_or_else(|| home.join(".config"));
+        let home = home_dir().context("could not determine the home directory")?;
+        let config_dir = config_dir().unwrap_or_else(|| home.join(".config"));
         let project_root =
             std::env::current_dir().context("could not read the current directory")?;
         let exe = std::env::current_exe().context("could not locate the agentdiet executable")?;

@@ -311,7 +311,7 @@ and exit codes, hook stdout and the MCP server.
   |---|---|
   | unknown ID | `no trimmed output #<id> in the Vault.` · where IDs come from (the `🥗 Diet` line), `agentdiet show last`, and the 7-day lifetime |
   | expired ID | `#<id> has expired: Vault entries are kept 7 days after their last use.` · run the command again to see its full output |
-  | invalid ID | `"<input>" is not a Vault ID: IDs are 4 or more hex characters, like '#4f9a1b2c'.` · copy it from the `🥗 Diet` line and quote it (an unquoted `#` starts a shell comment), or use `show last` |
+  | invalid ID | `"<input>" is not a Vault ID: IDs are 4 or more hex characters, like '#4f9a1b2c'.` · copy it from the `🥗 Diet` line and quote it (an unquoted `#` starts a shell comment), or use `show last`. One pair of single quotes around an ID is accepted (`cmd.exe` passes them on, §10) |
   | ambiguous | the candidates, then "type more characters of the ID" |
   | damaged entry | `#<id> is damaged in the Vault (its bytes no longer match its ID), so nothing is shown.` · run the command again |
   | bad `--lines` | `"<input>" is not a line range: use START..END, 1-based and inclusive, like 10..40.` |
@@ -1619,3 +1619,55 @@ License: MIT (`LICENSE`); third-party notices in `THIRD_PARTY_NOTICES`.
   deliberate, reviewed change to this section.
 
 **Secretlint** (MIT) is the source of the scrubber's ported patterns; see `THIRD_PARTY_NOTICES`.
+
+## 10. Platforms
+
+| Platform | Support | What has actually been run (see `docs/RELEASE_READINESS.md` §4) |
+|---|---|---|
+| macOS aarch64 | supported | full suite, pseudo-terminal tests, benchmarks, live client checks |
+| macOS x86_64 | supported | built by the release workflow only; not run on Intel hardware |
+| Linux aarch64 / x86_64, glibc | supported | full suite on aarch64 (Docker, Debian 12); x86_64 by CI |
+| Linux aarch64 / x86_64, static musl (the release binaries) | supported | built and run in Docker |
+| Windows x86_64 / aarch64 | **supported without shims** (P4) | not run on real Windows. aarch64 (llvm-mingw): whole suite under Wine 10 on arm64 Linux; x86_64 (mingw): built, clippy-clean, tests compiled, not run (Wine cannot run under Docker's Rosetta emulation here). Real Windows: the CI `windows` job, once it has run |
+
+**Windows (P4).** Everything but the shims: the CLI, the Control Center and `top`, `init`/`disconnect`/
+`eject` for every assistant, the MCP server, Claude Code hooks, the Vault, project memory, `doctor`,
+`status`, `stats`, `scan`, `reflect` and completions.
+
+- **Shims are not supported on Windows.** The shim's safety check (decision step 6, §3 Tier 1) compares
+  open files of the shim and its parent, which Windows does not expose to another process; without it a
+  shim could not tell an agent's capture from a redirect. `init --only shims` (or `--all`) skips the
+  shims on Windows with "shims are not supported on Windows yet", and `doctor` shows them as not
+  installed with the same reason. The binary never enters shim mode on Windows, whatever its name.
+- **Locations.** The home directory is `%USERPROFILE%` and the platform config directory `%APPDATA%`
+  (VS Code's `Code\User\mcp.json` lives there), read from the environment as Node's `os.homedir()`
+  reads them (Claude Code, Gemini CLI and VS Code are Node programs); only when one is unset or empty
+  does AgentDiet ask Windows for the profile or roaming-AppData folder. (Asking Windows first, as the
+  `dirs` crate does, would ignore the environment: AgentDiet and the assistants could disagree, and
+  no test could keep a run away from the real profile.)
+- **Recovery commands in `cmd.exe`.** `cmd.exe` does not treat `'` as quoting, so the breadcrumb's
+  `agentdiet show '#<id>'` reaches AgentDiet with its quotes; IDs are accepted inside one pair of single
+  quotes everywhere an ID is read. PowerShell and Git Bash need nothing special. The breadcrumb text
+  itself is unchanged on every platform.
+- **Claude Code hooks** are written as `"<exe>" hook <Event>`, which `cmd.exe` and Git Bash run as is;
+  PowerShell would need a leading `&`. Which shell Claude Code uses for hooks on Windows has not been
+  checked live.
+- **File protection.** Windows has no Unix modes; AgentDiet creates its files under `%USERPROFILE%`,
+  whose default access control list grants only the user, SYSTEM and Administrators, and does not change
+  ACLs. The `0700`/`0600` guarantees of §2.2 and §3 Tier 3 hold on Unix only; on Windows the profile's
+  ACL is the protection, config backups included.
+- **No following of links.** Private files are opened with `FILE_FLAG_OPEN_REPARSE_POINT`, so a symlink
+  or junction planted at a private path is opened as itself and refused as "not a regular file", the
+  equivalent of `O_NOFOLLOW`. There is no identity check after SQLite opens memory.db on Windows: its
+  Windows VFS has no `SQLITE_FCNTL_HAS_MOVED`, and the path check confirms only a regular file
+  (§3 Tier 3 "memory.db metadata").
+- **Durability.** File contents are flushed (`FlushFileBuffers`, through `sync_all`) before the atomic
+  rename; a directory cannot be synced on Windows, so that step is skipped (NTFS journals its metadata).
+- **Locks** are `LockFileEx` locks (Rust's `File::try_lock`), with the same timeouts.
+- **One file, no runtime.** The Windows release binary (`x86_64-pc-windows-msvc`) links the C runtime
+  statically (`+crt-static`), so it loads only DLLs that ship with Windows, the equivalent of the
+  single-binary rule on macOS and Linux. (Not yet checked with a DLL listing on a real build.)
+- **`diet_exec`** kills only the child it started when a call is cancelled or times out: Windows has no
+  process groups, so a grandchild can outlive it.
+- **Full-screen views.** There are no SIGTERM/SIGHUP handlers on Windows; Ctrl-C reaches the view as a
+  key in raw mode, as on Unix.

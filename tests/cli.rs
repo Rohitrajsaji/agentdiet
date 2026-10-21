@@ -22,7 +22,9 @@ fn agentdiet(env: &Env) -> Command {
         .env("LANG", "en_US.UTF-8")
         .env("TERM", "xterm-256color")
         .env("HOME", &env.paths.home)
+        .env("USERPROFILE", &env.paths.home)
         .env("XDG_CONFIG_HOME", &env.paths.config_dir)
+        .env("APPDATA", &env.paths.config_dir)
         .env("USERPROFILE", &env.paths.home)
         .current_dir(&env.paths.project_root)
         .stdin(Stdio::null());
@@ -288,6 +290,7 @@ fn init_all_dry_run_writes_nothing() {
     assert_eq!(env.snapshot(), before);
 }
 
+#[cfg(unix)] // expects shims, which Windows does not have (SPEC §10)
 #[test]
 fn init_dry_run_without_a_terminal_previews_the_detected_targets() {
     let env = Env::with_existing_configs();
@@ -311,6 +314,7 @@ fn init_dry_run_without_a_terminal_previews_the_detected_targets() {
     assert!(!env.paths.agentdiet_home.exists());
 }
 
+#[cfg(unix)] // expects shims, which Windows does not have (SPEC §10)
 #[test]
 fn init_thrice_then_eject_via_the_binary() {
     let env = Env::with_existing_configs();
@@ -421,6 +425,7 @@ fn shim_passes_through_to_the_real_binary() {
     let out = Command::new(shims.join("make"))
         .args(["-j", "4"])
         .env("HOME", &env.paths.home)
+        .env("USERPROFILE", &env.paths.home)
         .env("PATH", path)
         .env("AGENTDIET_FORCE_HUMAN", "1")
         .stdin(Stdio::null())
@@ -443,6 +448,7 @@ fn shim_without_a_real_binary_exits_127() {
     std::os::unix::fs::symlink(BIN, shims.join("ruff")).unwrap();
     let out = Command::new(shims.join("ruff"))
         .env("HOME", &env.paths.home)
+        .env("USERPROFILE", &env.paths.home)
         .env("PATH", &shims)
         .env("AGENTDIET_FORCE_AGENT", "1")
         .stdin(Stdio::null())
@@ -561,6 +567,7 @@ fn doctor_on_a_fresh_home_says_nothing_is_connected() {
     );
 }
 
+#[cfg(unix)] // expects shims, which Windows does not have (SPEC §10)
 #[test]
 fn doctor_passes_a_complete_setup_and_flags_each_kind_of_breakage() {
     let env = Env::with_existing_configs();
@@ -829,6 +836,7 @@ fn disconnect_removes_only_the_chosen_assistants() {
     assert!(row(&stdout(&again), "Cursor").contains("nothing to remove"));
 }
 
+#[cfg(unix)] // expects shims, which Windows does not have (SPEC §10)
 #[test]
 fn disconnect_takes_several_targets_and_the_shims() {
     let env = Env::with_existing_configs();
@@ -897,6 +905,7 @@ fn eject_only_is_disconnect_and_refuses_purge() {
     assert_eq!(run(&env, &["disconnect", "nope"]).status.code(), Some(2));
 }
 
+#[cfg(unix)] // expects shims, which Windows does not have (SPEC §10)
 #[test]
 fn a_full_eject_names_each_target_it_touched() {
     let env = Env::with_existing_configs();
@@ -946,6 +955,7 @@ fn help_hides_the_internal_commands_but_they_still_work() {
     assert!(run(&env, &["mcp", "--help"]).status.success());
 }
 
+#[cfg(unix)] // expects shims, which Windows does not have (SPEC §10)
 #[test]
 fn init_verifies_what_it_connected_without_calling_config_proof() {
     let env = Env::with_existing_configs();
@@ -1068,6 +1078,7 @@ fn trimmed_entry(env: &Env, body: &[u8]) -> String {
     put.short_id
 }
 
+#[cfg(unix)] // expects shims, which Windows does not have (SPEC §10)
 #[test]
 fn no_command_panics_or_complains_when_stdout_is_closed() {
     let env = Env::with_existing_configs();
@@ -1375,6 +1386,7 @@ fn every_command_in_the_readme_parses() {
 
 // ---- P3: status --json and doctor --json (SPEC §3b) ---------------------------------------------------
 
+#[cfg(unix)] // used by a Unix-only test
 fn keys(v: &Value) -> Vec<String> {
     v.as_object().unwrap().keys().cloned().collect()
 }
@@ -1388,6 +1400,7 @@ fn json_of(out: &Output) -> Value {
     })
 }
 
+#[cfg(unix)] // expects shims, which Windows does not have (SPEC §10)
 #[test]
 fn status_json_has_the_documented_schema_in_order() {
     let env = Env::empty();
@@ -1446,6 +1459,7 @@ fn status_json_has_the_documented_schema_in_order() {
     assert_eq!(v["tokens_saved"], 900);
 }
 
+#[cfg(unix)] // expects shims, which Windows does not have (SPEC §10)
 #[test]
 fn doctor_json_mirrors_the_text_and_keeps_the_exit_status() {
     let env = Env::with_existing_configs();
@@ -1505,6 +1519,7 @@ fn doctor_json_mirrors_the_text_and_keeps_the_exit_status() {
     }
 }
 
+#[cfg(unix)] // expects shims, which Windows does not have (SPEC §10)
 #[test]
 fn json_modes_print_only_json_deterministically_whatever_the_terminal() {
     let env = Env::with_existing_configs();
@@ -1621,6 +1636,7 @@ fn hook_with(env: &Env, event: &str, payload: &[u8], stdout: Stdio, stderr: Stdi
     child.wait_with_output().unwrap()
 }
 
+#[cfg(unix)] // runs Unix programs (sh, cat, seq) or Unix-only error paths
 #[test]
 fn a_hook_exits_0_without_panicking_when_its_stderr_or_stdout_is_closed() {
     let env = Env::empty();
@@ -1693,6 +1709,7 @@ fn malformed_hook_input_is_a_quiet_success() {
     }
 }
 
+#[cfg(unix)] // runs Unix programs (sh, cat, seq) or Unix-only error paths
 #[test]
 fn the_mcp_server_answers_normally_when_its_stderr_is_closed() {
     let env = Env::empty();
@@ -1757,6 +1774,7 @@ fn a_shim_without_the_real_program_still_exits_127_when_stderr_is_closed() {
     for stderr in [Stdio::piped(), Stdio::from(closed())] {
         let out = Command::new(shims.join("make"))
             .env("HOME", &env.paths.home)
+            .env("USERPROFILE", &env.paths.home)
             .env("PATH", &shims) // no real `make` anywhere
             .env("AGENTDIET_FORCE_HUMAN", "1")
             .stdin(Stdio::null())

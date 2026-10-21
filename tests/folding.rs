@@ -6,7 +6,9 @@
 
 mod common;
 
+#[cfg(unix)]
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::{Command, Stdio};
 
 use agentdiet::diet::{
@@ -14,6 +16,7 @@ use agentdiet::diet::{
     Transform,
 };
 use agentdiet::folding::{Language, count_lines, fold, parse};
+#[cfg(unix)]
 use agentdiet::scrubber::scrub;
 use agentdiet::state::Mode;
 use common::Env;
@@ -64,6 +67,10 @@ fn marker_re() -> Regex {
 struct Marker {
     first: usize,
     last: usize,
+    #[cfg_attr(
+        not(unix),
+        expect(dead_code, reason = "read by the Unix-only recovery tests")
+    )]
     id: String,
 }
 
@@ -770,6 +777,7 @@ fn mutated_files_never_panic_and_a_fold_always_yields_a_parsable_view() {
 
 // ---- through the engine, with the real recovery command ---------------------------------------
 
+#[cfg(unix)]
 fn bin_dir(env: &Env) -> PathBuf {
     let dir = env.dir.path().join("bin");
     std::fs::create_dir_all(&dir).unwrap();
@@ -780,13 +788,16 @@ fn bin_dir(env: &Env) -> PathBuf {
     dir
 }
 
+#[cfg(unix)]
 fn sh(env: &Env, command: &str) -> Vec<u8> {
     let out = Command::new("sh")
         .arg("-c")
         .arg(command)
         .env_clear()
         .env("HOME", &env.paths.home)
+        .env("USERPROFILE", &env.paths.home)
         .env("XDG_CONFIG_HOME", &env.paths.config_dir)
+        .env("APPDATA", &env.paths.config_dir)
         .env("PATH", format!("{}:/usr/bin:/bin", bin_dir(env).display()))
         .current_dir(&env.paths.project_root)
         .stdin(Stdio::null())
@@ -800,6 +811,7 @@ fn sh(env: &Env, command: &str) -> Vec<u8> {
     out.stdout
 }
 
+#[cfg(unix)]
 fn aws_key() -> String {
     ["AK", "IA"].concat() + &"Q7".repeat(8)
 }
@@ -824,6 +836,7 @@ fn run_engine(
     )
 }
 
+#[cfg(unix)]
 #[test]
 fn markers_carry_the_real_id_and_each_literal_command_returns_exactly_the_folded_lines() {
     let env = Env::empty();
@@ -869,6 +882,7 @@ fn markers_carry_the_real_id_and_each_literal_command_returns_exactly_the_folded
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_multi_line_redaction_shifts_the_numbers_and_markers_use_the_scrubbed_copy() {
     let env = Env::empty();

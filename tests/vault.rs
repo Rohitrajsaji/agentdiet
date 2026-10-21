@@ -797,7 +797,9 @@ fn the_show_command_reports_corruption_and_prints_nothing() {
     let out = std::process::Command::new(exe)
         .args(["show", &format!("#{}", put.short_id)])
         .env("HOME", &env.paths.home)
+        .env("USERPROFILE", &env.paths.home)
         .env("XDG_CONFIG_HOME", &env.paths.config_dir)
+        .env("APPDATA", &env.paths.config_dir)
         .current_dir(&env.paths.project_root)
         .output()
         .unwrap();

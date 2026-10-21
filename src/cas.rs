@@ -153,12 +153,17 @@ impl LineRange {
     }
 }
 
-/// Normalise a user-supplied ID: `#4F9A` / `4f9a` -> `4f9a`.
+/// Normalise a user-supplied ID: `#4F9A` / `4f9a` -> `4f9a`. One pair of single quotes around it is
+/// dropped as well: `cmd.exe` passes the breadcrumb's `'#4f9a'` on with its quotes (SPEC §10).
 pub fn normalize_id(input: &str) -> Result<String, CasError> {
     let trimmed = input.trim();
-    let id = trimmed
+    let unquoted = trimmed
+        .strip_prefix('\'')
+        .and_then(|s| s.strip_suffix('\''))
+        .unwrap_or(trimmed);
+    let id = unquoted
         .strip_prefix('#')
-        .unwrap_or(trimmed)
+        .unwrap_or(unquoted)
         .to_ascii_lowercase();
     if id.len() < MIN_INPUT_ID_LEN
         || id.len() > SHA_LEN
@@ -552,6 +557,14 @@ mod tests {
         assert_eq!(normalize_id("#4F9A").unwrap(), "4f9a");
         assert_eq!(normalize_id("4f9a").unwrap(), "4f9a");
         assert_eq!(normalize_id(" #4f9a1b ").unwrap(), "4f9a1b");
+    }
+
+    #[test]
+    fn normalize_drops_one_pair_of_single_quotes() {
+        assert_eq!(normalize_id("'#4F9A1b2c'").unwrap(), "4f9a1b2c");
+        assert_eq!(normalize_id("'4f9a'").unwrap(), "4f9a");
+        assert!(normalize_id("''#4f9a''").is_err());
+        assert!(normalize_id("'#4f9a").is_err());
     }
 
     #[test]

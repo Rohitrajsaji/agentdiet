@@ -33,7 +33,9 @@ fn aws_key() -> String {
 fn agentdiet(env: &Env) -> Command {
     let mut cmd = Command::new(BIN);
     cmd.env("HOME", &env.paths.home)
+        .env("USERPROFILE", &env.paths.home)
         .env("XDG_CONFIG_HOME", &env.paths.config_dir)
+        .env("APPDATA", &env.paths.config_dir)
         .env("USERPROFILE", &env.paths.home)
         .env_remove("CLAUDECODE")
         .env_remove("CLAUDE_CODE_SESSION_ID")

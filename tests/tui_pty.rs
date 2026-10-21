@@ -49,6 +49,7 @@ fn spawn(env: &Env, args: &[&str]) -> Session {
     let mut cmd = Command::new(BIN);
     cmd.args(args)
         .env("HOME", &env.paths.home)
+        .env("USERPROFILE", &env.paths.home)
         .env("TERM", "xterm-256color")
         .env("LANG", "en_US.UTF-8")
         .env_remove("LC_ALL")

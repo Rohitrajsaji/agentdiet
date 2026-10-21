@@ -9,8 +9,7 @@ use clap::Parser;
 use agentdiet::cas::{Cas, CasError, LineRange};
 use agentdiet::cli::{self, Cli, Command};
 use agentdiet::{
-    Paths, center, control, diet, hook, init, mcp, reflect, scan, shim, state, stats, status, top,
-    ui,
+    Paths, center, control, diet, hook, init, mcp, reflect, scan, state, stats, status, top, ui,
 };
 
 fn main() -> ExitCode {
@@ -18,9 +17,11 @@ fn main() -> ExitCode {
 
     // Shim mode comes first, before clap or any config is touched: invoked as
     // `git`, `cargo`, ... through ~/.agentdiet/shims/.
-    if let Some(name) = args.first().and_then(|a| shim::shim_name(a)) {
+    // Never on Windows: the shims are Unix-only (SPEC §10).
+    #[cfg(unix)]
+    if let Some(name) = args.first().and_then(|a| agentdiet::shim::shim_name(a)) {
         install_quiet_panic_hook();
-        shim::run(name, args.into_iter().skip(1).collect(), Paths::from_env);
+        agentdiet::shim::run(name, args.into_iter().skip(1).collect(), Paths::from_env);
     }
 
     // `agentdiet hook <event>` is invoked by assistants on every event. It never

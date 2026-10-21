@@ -9,6 +9,9 @@ use super::{InitError, io_err};
 use crate::shim::SHIM_COMMANDS;
 use crate::{Paths, is_agentdiet_exe};
 
+/// Why `init` skips the shims on Windows (SPEC §10).
+pub const SHIMS_UNSUPPORTED: &str = "shims: not supported on Windows yet (the safety check that tells an agent's capture from a redirect needs Unix process data); everything else works";
+
 /// What `install` did, per shim.
 #[derive(Debug, Default)]
 pub struct Outcome {
@@ -36,9 +39,7 @@ fn symlink(_original: &Path, _link: &Path) -> io::Result<()> {
 pub fn install(paths: &Paths, dry_run: bool) -> Result<Outcome, InitError> {
     let mut outcome = Outcome::default();
     if !cfg!(unix) {
-        outcome
-            .skipped
-            .push("shims: symlink shims are not supported on this platform".into());
+        outcome.skipped.push(SHIMS_UNSUPPORTED.into());
         return Ok(outcome);
     }
     let dir = paths.shims_dir();

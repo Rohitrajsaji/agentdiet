@@ -69,7 +69,9 @@ impl Shim {
             .arg(snippet)
             .arg(self.shims.join("cargo"))
             .env("HOME", &self.env.paths.home)
+            .env("USERPROFILE", &self.env.paths.home)
             .env("XDG_CONFIG_HOME", &self.env.paths.config_dir)
+            .env("APPDATA", &self.env.paths.config_dir)
             .env("PATH", path)
             .env_remove("CLAUDECODE")
             .env_remove("CLAUDE_CODE_SESSION_ID")
@@ -102,6 +104,7 @@ impl Shim {
         let out = Command::new(BIN)
             .args(["show", &format!("#{id}")])
             .env("HOME", &self.env.paths.home)
+            .env("USERPROFILE", &self.env.paths.home)
             .current_dir(&self.env.paths.project_root)
             .output()
             .unwrap();
@@ -188,6 +191,7 @@ fn hook(shim: &Shim, event: &str, session: &str, extra: serde_json::Value) {
     let mut child = Command::new(BIN)
         .args(["hook", event])
         .env("HOME", &shim.env.paths.home)
+        .env("USERPROFILE", &shim.env.paths.home)
         .current_dir(&shim.env.paths.project_root)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -302,6 +306,7 @@ fn transparent_cases_pass_through_byte_identical() {
     let direct = Command::new(shim.shims.join("cargo"))
         .arg("test")
         .env("HOME", &shim.env.paths.home)
+        .env("USERPROFILE", &shim.env.paths.home)
         .env(
             "PATH",
             std::env::join_paths([

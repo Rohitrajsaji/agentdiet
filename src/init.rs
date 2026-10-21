@@ -722,6 +722,7 @@ mod tests {
         assert_eq!(report(0, 0, 1, false).verdict(), Verdict::Skipped);
     }
 
+    #[cfg(unix)] // expects shims, which Windows does not have (SPEC §10)
     #[test]
     fn summary_explains_skips_and_ends_a_dry_run_plainly() {
         let paths = Paths::new(

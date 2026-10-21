@@ -2,6 +2,10 @@
 //! by `tests/hooks.rs` and `tests/shim_agent.rs`).
 //! Everything runs in a `TempDir` home; the recovery tests execute the literal command from the
 //! breadcrumb with the built `agentdiet` binary.
+//!
+//! Unix only: recovery runs the breadcrumb through `sh -c` (and the rest shares its helpers); the
+//! engine's platform-independent rules are covered by its unit tests on every platform.
+#![cfg(unix)]
 
 mod common;
 
@@ -55,7 +59,9 @@ fn in_shell(env: &Env, shell: &str, command: &str) -> Option<std::process::Outpu
             .arg(command)
             .env_clear()
             .env("HOME", &env.paths.home)
+            .env("USERPROFILE", &env.paths.home)
             .env("XDG_CONFIG_HOME", &env.paths.config_dir)
+            .env("APPDATA", &env.paths.config_dir)
             .env("PATH", path)
             .current_dir(&env.paths.project_root)
             .stdin(Stdio::null())

@@ -47,6 +47,7 @@ fn shim_links(env: &Env) -> usize {
         .count()
 }
 
+#[cfg(unix)] // expects shims, which Windows does not have (SPEC §10)
 #[test]
 fn init_three_times_is_fully_idempotent() {
     let env = Env::with_existing_configs();
@@ -319,6 +320,7 @@ fn project_scope_writes_only_inside_the_project() {
     assert!(!root.join(".claude").exists());
 }
 
+#[cfg(unix)] // expects shims, which Windows does not have (SPEC §10)
 #[test]
 fn unparseable_configs_are_skipped_and_never_rewritten() {
     let env = Env::with_existing_configs();
