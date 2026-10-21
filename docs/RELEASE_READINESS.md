@@ -283,3 +283,29 @@ behave the same way under heavy load.
   `~/.cargo/advisory-dbs` (6.6 MB, removed; later runs used a scratch path), and on 2026-10-21
   `rustup target add x86_64-apple-darwin` installed that target's standard library into `~/.rustup` for
   the macOS x86_64 build (removed with `rustup target remove` right after the build).
+
+## 5. P4.5: release-blocker resolution (plan, 2026-10-21)
+
+Scope is only the blockers from §4.10. No release is tagged or published; nothing is pushed without the
+owner's explicit approval.
+
+| # | Blocker | Plan |
+|---|---|---|
+| 1 | CI never ran | Review both workflows; add a `ci/**` branch trigger (CI) and a branch dry run of the release build (no draft release, no signing); validate locally (actionlint; Linux jobs under `act` in Docker; the macOS job's steps on this Mac); then ask for approval to push one branch |
+| 2 | Timing-sensitive tests | Keep every bound that encodes a SPEC requirement, but measure the requirement, not machine load: an unbounded parser for "parses cleanly" checks; the hook stdin wait bounded by its timeout plus launch overhead measured in the same test; reproduce failures under artificial load |
+| 3 | Linux symlinked installs record the versioned path | Record the invoked path when it resolves to this same binary (SPEC first) |
+| 4 | `.agentdiet/` used as is | Validate both roots before use (SPEC first), per the decisions below; `doctor` reports them |
+| 5 | Real Windows never ran | Harden the `windows-2025` job; Windows stays "under test" until it passes |
+| 6 | Archives unsigned | Evaluate; implement the chosen mechanism in `release.yml`, tag runs only |
+| 7 | B1 miss | Single binary kept; documented as a known issue for v0.2.0 |
+| 8 | Version | `0.2.0` in `Cargo.toml`/`Cargo.lock` and the CHANGELOG; local release artifacts; not tagged |
+
+Decisions (owner, 2026-10-21):
+- A project `.agentdiet` that is a symlink is **refused**: project memory and the run log are off there,
+  `doctor` explains (replace the link with a directory, or set `AGENTDIET_WORKSPACE`).
+- A symlinked `~/.agentdiet` is **allowed when its target is a directory owned by the user**, refused
+  otherwise.
+- An existing root directory owned by the user with a loose mode is **tightened to 0700** (said once);
+  one owned by another user is refused.
+- Signing: **GitHub artifact attestations** (Sigstore keyless SLSA build provenance), verified with
+  `gh attestation verify`.
