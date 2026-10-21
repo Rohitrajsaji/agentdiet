@@ -366,6 +366,15 @@ and exit codes, hook stdout and the MCP server.
      file** (Claude Code's capture file) shared with the per-command `zsh` that is its parent, stdin is
      `/dev/null`, and nothing is a terminal; a file type alone could not tell that capture file from
      `> out.txt`.
+     **Shells that redirect in the parent (found on Linux in P4).** The identity comparison assumes the
+     shell applies `> out.txt` in the forked child. Measured on Debian 12 (2026-10-20): only **bash**
+     and **zsh** do; **dash** (Debian/Ubuntu `/bin/sh`), **mksh**, **ksh**, **posh**, **yash** and
+     **busybox sh** apply it in the parent shell before forking, so while the command runs the parent's
+     stdout is that same file and the comparison wrongly says "the parent's". So when stdout is a
+     **regular file** and the parent's process name is not `bash` or `zsh` (a leading `-` of a login
+     shell ignored), the command is transparent. A pipe keeps the identity rule (a pipeline's ends are
+     the child's own, in every shell measured). Cost of the miss: under such a shell an agent capture
+     that is a regular file is not dieted (it is, as always, still a correct, untouched output).
   7. One of the environment markers `CLAUDECODE`, `CURSOR_TRACE_ID`, `GEMINI_CLI` is set → agent.
   8. The parent chain contains an AI agent → agent; otherwise transparent. The walk follows parent
      PIDs from the shim's parent, at most **16** hops, stops at PID 1 or a PID already seen, and

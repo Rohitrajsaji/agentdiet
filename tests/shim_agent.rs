@@ -51,6 +51,11 @@ impl Shim {
     /// the agent's capture, and a command run as-is shares it. An isolated home and none of the
     /// developer's own agent markers.
     fn sh(&self, snippet: &str) -> Command {
+        self.shell(std::path::Path::new("/bin/sh"), &[], snippet)
+    }
+
+    /// [`Shim::sh`] with another shell: `<program> <pre…> -c <snippet> <shim>`.
+    fn shell(&self, program: &std::path::Path, pre: &[&str], snippet: &str) -> Command {
         let path = std::env::join_paths([
             self.shims.as_path(),
             self.real.as_path(),
@@ -58,8 +63,9 @@ impl Shim {
             std::path::Path::new("/bin"),
         ])
         .unwrap();
-        let mut cmd = Command::new("/bin/sh");
-        cmd.arg("-c")
+        let mut cmd = Command::new(program);
+        cmd.args(pre)
+            .arg("-c")
             .arg(snippet)
             .arg(self.shims.join("cargo"))
             .env("HOME", &self.env.paths.home)
@@ -416,4 +422,62 @@ fn the_workspace_env_var_overrides_discovery() {
         .unwrap();
     assert!(elsewhere.join(".agentdiet/memory.db").is_file());
     assert!(!shim.env.paths.memory_db().exists());
+}
+
+/// `> out.txt` must reach the file untouched whatever shell runs it, including the many shells that
+/// apply the redirection in the parent (SPEC §3 Tier 1 step 6); and bash/zsh with a shared regular
+/// capture file (how Claude Code captures) must still be dieted.
+#[test]
+fn a_redirect_reaches_the_file_untouched_in_every_installed_shell() {
+    let shim = failing_cargo_test();
+    let original = fs::read(fixture_path("cargo_test_pass.txt")).unwrap();
+    let mut tried = Vec::new();
+    for shell in [
+        "sh", "bash", "zsh", "dash", "mksh", "ksh", "posh", "yash", "busybox",
+    ] {
+        let Ok(path) = which(shell) else { continue };
+        tried.push(shell);
+        let file = shim.env.dir.path().join(format!("out-{shell}.txt"));
+        let pre: &[&str] = if shell == "busybox" { &["sh"] } else { &[] };
+        let out = shim
+            .shell(&path, pre, r#""$0" test > "$1"; exit $?"#)
+            .arg(&file)
+            .env("AGENTDIET_FORCE_AGENT", "1")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(101), "{shell}");
+        assert_eq!(
+            fs::read(&file).unwrap(),
+            original,
+            "{shell}: the file got something else"
+        );
+    }
+    assert!(tried.contains(&"sh"), "{tried:?}");
+
+    // A capture file shared with a bash or zsh parent (Claude Code's shape) is still dieted.
+    // Distinct arguments per shell: the same command twice in a row is passed raw on the retry.
+    for (shell, jobs) in [("zsh", "1"), ("bash", "2")] {
+        let Ok(path) = which(shell) else { continue };
+        let capture = shim.env.dir.path().join(format!("capture-{shell}.txt"));
+        let out = shim
+            .shell(&path, &[], &format!(r#""$0" test --jobs {jobs}; exit $?"#))
+            .env("AGENTDIET_FORCE_AGENT", "1")
+            .stdout(fs::File::create(&capture).unwrap())
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(101), "{shell}");
+        let text = String::from_utf8(fs::read(&capture).unwrap()).unwrap();
+        assert!(
+            text.contains("🥗 Diet: "),
+            "{shell}: a shared capture file is dieted"
+        );
+    }
+}
+
+fn which(name: &str) -> Result<std::path::PathBuf, ()> {
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .chain(["/bin".into(), "/usr/bin".into()])
+        .map(|d| d.join(name))
+        .find(|p| p.is_file())
+        .ok_or(())
 }

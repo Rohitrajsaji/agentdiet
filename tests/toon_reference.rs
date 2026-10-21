@@ -164,7 +164,7 @@ fn primitive(rng: &mut Rng) -> String {
         1 => "true".into(),
         2 => "false".into(),
         3..=5 => (*rng.pick(NUMBERS)).to_string(),
-        _ => json_string(rng.pick(STRINGS)),
+        _ => json_string(rng.pick::<&str>(STRINGS)),
     }
 }
 

@@ -241,6 +241,46 @@ fn stdout_is_device() -> bool {
     true
 }
 
+/// stdout is a regular file: an agent's capture file, or a `> out.txt` redirect.
+#[cfg(unix)]
+fn stdout_is_regular_file() -> bool {
+    use std::os::fd::AsFd;
+    std::io::stdout()
+        .as_fd()
+        .try_clone_to_owned()
+        .ok()
+        .and_then(|fd| std::fs::File::from(fd).metadata().ok())
+        .is_some_and(|m| m.file_type().is_file())
+}
+
+#[cfg(not(unix))]
+fn stdout_is_regular_file() -> bool {
+    false
+}
+
+/// The shells measured to apply a redirection in the forked child (SPEC §3 Tier 1 step 6). dash,
+/// mksh, ksh, posh, yash and busybox `sh` apply it in the parent.
+const CHILD_REDIRECT_SHELLS: [&str; 2] = ["bash", "zsh"];
+
+/// `true` when the parent is a shell known to redirect in the child, so a regular-file stdout it
+/// shares really is its own. Unknown means `false`.
+pub fn is_child_redirect_shell(info: &ProcInfo) -> bool {
+    info.names
+        .iter()
+        .any(|n| CHILD_REDIRECT_SHELLS.contains(&n.trim_start_matches('-')))
+}
+
+fn parent_redirects_in_child() -> bool {
+    #[cfg(unix)]
+    {
+        os_lookup(std::os::unix::process::parent_id()).is_some_and(|p| is_child_redirect_shell(&p))
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
 /// What an open file descriptor refers to, comparable across processes: two descriptors with the
 /// same identity write to the same place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -377,6 +417,11 @@ fn route(name: &str, args: &[OsString]) -> Route {
         return Route::Transparent;
     }
     if !stdout_is_parents() {
+        return Route::Transparent;
+    }
+    // Most shells but bash and zsh apply `> file` in the parent, which makes a redirect look like the
+    // parent's stdout; for a regular file that only bash and zsh can vouch for (SPEC §3 Tier 1 step 6).
+    if stdout_is_regular_file() && !parent_redirects_in_child() {
         return Route::Transparent;
     }
     let session = std::env::var(CLAUDE_SESSION_ENV)
