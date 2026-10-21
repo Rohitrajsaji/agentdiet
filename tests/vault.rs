@@ -50,6 +50,8 @@ fn files_in(dir: &Path) -> Vec<(String, Vec<u8>)> {
         .unwrap()
         .map(|e| e.unwrap())
         .filter(|e| e.path().is_file())
+        // The lock file holds no data, and on Windows a held lock makes reading it fail.
+        .filter(|e| e.file_name() != ".lock")
         .map(|e| {
             (
                 e.file_name().to_string_lossy().into_owned(),

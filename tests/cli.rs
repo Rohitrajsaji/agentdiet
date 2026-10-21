@@ -1876,7 +1876,11 @@ fn completions_are_valid_shell_scripts_and_only_the_script_is_printed() {
             .output()
             .unwrap();
         assert_eq!(out.stdout, ascii.stdout, "data, never transliterated");
-        // Syntax check with the shell itself, where it is installed.
+        // Syntax check with the shell itself, where it is installed. Not on Windows: `bash` there is
+        // usually the WSL launcher, which fails without a Linux distribution installed.
+        if cfg!(windows) {
+            continue;
+        }
         let file = env.dir.path().join(format!("agentdiet.{shell}"));
         fs::write(&file, &out.stdout).unwrap();
         match Command::new(checker).arg("-n").arg(&file).output() {

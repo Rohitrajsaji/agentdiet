@@ -1,0 +1,6 @@
+# Test fixtures are byte-exact inputs (tool output, source files, a Vault entry named by its hash):
+# never convert their line endings on checkout (git on Windows defaults to CRLF), but keep text diffs.
+tests/fixtures/** -text diff
+tests/fixtures/**/*.db binary
+# Shell scripts run with LF endings everywhere (Git Bash on Windows included).
+*.sh text eol=lf
