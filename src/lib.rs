@@ -102,6 +102,51 @@ fn config_dir() -> Option<PathBuf> {
     dirs::config_dir()
 }
 
+/// The path to record for this binary (SPEC §2.2 "The binary's path"): `arg0` (made absolute against
+/// `cwd`, or looked up on `path_var` when it is a bare name) when it is named `agentdiet` and resolves to
+/// the same file as `current`; otherwise `current`. A package manager's stable link is kept that way,
+/// where Linux's `current_exe` would give its versioned target.
+pub fn invoked_exe(
+    arg0: &std::ffi::OsStr,
+    cwd: &Path,
+    path_var: Option<&std::ffi::OsStr>,
+    current: PathBuf,
+) -> PathBuf {
+    if cfg!(windows) || !is_agentdiet_exe(Path::new(arg0)) {
+        return current;
+    }
+    let arg0 = Path::new(arg0);
+    let candidate = if arg0.components().count() > 1 {
+        let joined = if arg0.is_absolute() {
+            arg0.to_path_buf()
+        } else {
+            cwd.join(arg0)
+        };
+        // `./agentdiet` -> `<cwd>/agentdiet`; `..` is kept (it may cross a link).
+        joined
+            .components()
+            .filter(|c| !matches!(c, std::path::Component::CurDir))
+            .collect()
+    } else {
+        let Some(found) = path_var.and_then(|p| {
+            std::env::split_paths(p)
+                .filter(|dir| dir.is_absolute())
+                .map(|dir| dir.join(arg0))
+                .find(|c| c.is_file())
+        }) else {
+            return current;
+        };
+        found
+    };
+    match (
+        std::fs::canonicalize(&candidate),
+        std::fs::canonicalize(&current),
+    ) {
+        (Ok(a), Ok(b)) if a == b => candidate,
+        _ => current,
+    }
+}
+
 impl Paths {
     /// Build paths from explicit locations; `agentdiet_home` is `<home>/.agentdiet`.
     pub fn new(home: PathBuf, config_dir: PathBuf, project_root: PathBuf, exe: PathBuf) -> Self {
@@ -124,6 +169,15 @@ impl Paths {
         let project_root =
             std::env::current_dir().context("could not read the current directory")?;
         let exe = std::env::current_exe().context("could not locate the agentdiet executable")?;
+        let exe = match std::env::args_os().next() {
+            Some(arg0) => invoked_exe(
+                &arg0,
+                &project_root,
+                std::env::var_os("PATH").as_deref(),
+                exe,
+            ),
+            None => exe,
+        };
         let mut paths = Self::new(home, config_dir, project_root, exe);
         paths.workspace_override = std::env::var_os(WORKSPACE_ENV)
             .filter(|v| !v.is_empty())
@@ -206,6 +260,77 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    /// A Homebrew-style layout: `bin/agentdiet` links to `Cellar/agentdiet/<version>/bin/agentdiet`.
+    #[cfg(unix)]
+    fn cellar(dir: &TempDir) -> (PathBuf, PathBuf) {
+        let real = dir.path().join("Cellar/agentdiet/0.2.0/bin/agentdiet");
+        fs::create_dir_all(real.parent().unwrap()).unwrap();
+        fs::write(&real, "").unwrap();
+        let link = dir.path().join("bin/agentdiet");
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink("../Cellar/agentdiet/0.2.0/bin/agentdiet", &link).unwrap();
+        (link, real)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_invoked_link_is_recorded_when_it_is_this_binary() {
+        let dir = TempDir::new().unwrap();
+        let (link, real) = cellar(&dir);
+        let bin = dir.path().join("bin");
+        // As the shell ran it: by absolute path, relative path, or bare name on PATH.
+        assert_eq!(
+            invoked_exe(link.as_os_str(), dir.path(), None, real.clone()),
+            link
+        );
+        assert_eq!(
+            invoked_exe("./bin/agentdiet".as_ref(), dir.path(), None, real.clone()),
+            link
+        );
+        let path_var = std::env::join_paths([Path::new("relative/ignored"), &bin]).unwrap();
+        assert_eq!(
+            invoked_exe(
+                "agentdiet".as_ref(),
+                Path::new("/"),
+                Some(&path_var),
+                real.clone()
+            ),
+            link
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn anything_else_keeps_the_executable_path() {
+        let dir = TempDir::new().unwrap();
+        let (link, real) = cellar(&dir);
+        // Another agentdiet (a different file) is not this binary.
+        let other = dir.path().join("other/agentdiet");
+        fs::create_dir_all(other.parent().unwrap()).unwrap();
+        fs::write(&other, "").unwrap();
+        assert_eq!(
+            invoked_exe(other.as_os_str(), dir.path(), None, real.clone()),
+            real
+        );
+        // A shim (`git` -> agentdiet) or any other name is never recorded as the binary.
+        let shim = dir.path().join("bin/git");
+        std::os::unix::fs::symlink(&link, &shim).unwrap();
+        assert_eq!(
+            invoked_exe(shim.as_os_str(), dir.path(), None, real.clone()),
+            real
+        );
+        // A bare name that is not on PATH, or a missing file.
+        assert_eq!(
+            invoked_exe("agentdiet".as_ref(), dir.path(), None, real.clone()),
+            real
+        );
+        let gone = dir.path().join("gone/agentdiet");
+        assert_eq!(
+            invoked_exe(gone.as_os_str(), dir.path(), None, real.clone()),
+            real
+        );
+    }
 
     #[test]
     fn a_nested_directory_finds_the_git_root_or_an_existing_memory_db() {

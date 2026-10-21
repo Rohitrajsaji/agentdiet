@@ -35,6 +35,45 @@ fn run(env: &Env, args: &[&str]) -> Output {
     agentdiet(env).args(args).output().unwrap()
 }
 
+/// Reached through a package manager's stable link, `init` records the link, not the versioned
+/// target that `/proc/self/exe` resolves to on Linux, so an upgrade keeps assistants working (SPEC §2.2).
+#[cfg(unix)]
+#[test]
+fn init_records_the_stable_link_it_was_run_through() {
+    let env = Env::empty();
+    let cellar = env.dir.path().join("Cellar/agentdiet/0.2.0/bin");
+    fs::create_dir_all(&cellar).unwrap();
+    fs::copy(BIN, cellar.join("agentdiet")).unwrap();
+    let bin = env.dir.path().join("brew/bin");
+    fs::create_dir_all(&bin).unwrap();
+    let link = bin.join("agentdiet");
+    std::os::unix::fs::symlink(cellar.join("agentdiet"), &link).unwrap();
+    for run_as in [link.clone().into_os_string(), "agentdiet".into()] {
+        let out = Command::new(&run_as)
+            .args(["init", "--only", "claude"])
+            .env("HOME", &env.paths.home)
+            .env("USERPROFILE", &env.paths.home)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env_remove("AGENTDIET_WORKSPACE")
+            .current_dir(&env.paths.project_root)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let mcp: Value =
+            serde_json::from_str(&env.read(&env.paths.home.join(".claude.json"))).unwrap();
+        assert_eq!(
+            mcp["mcpServers"]["agentdiet"]["command"].as_str(),
+            link.to_str(),
+            "run as {run_as:?}"
+        );
+    }
+}
+
 #[test]
 fn error_messages_never_repeat_a_secret_from_the_arguments() {
     let env = Env::empty();

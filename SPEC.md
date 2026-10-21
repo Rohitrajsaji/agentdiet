@@ -97,6 +97,14 @@ redraws. The terminal is restored on every exit path, including a panic and Ctrl
 - Shell rc files are never edited; `init` prints the `PATH` line for the shims directory instead,
   unless the shims directory already comes first on this process's `PATH` (the `doctor` PATH check,
   §3b "Doctor").
+- **The binary's path.** Every config `init` writes (hooks, MCP servers, shim links) names this binary
+  by an absolute path: the path it was **invoked by** (`argv[0]`, made absolute, or found on `PATH` when
+  it is a bare name) when that is named `agentdiet` and resolves to the same file as the running
+  executable, so a package manager's stable link (Homebrew's `bin/agentdiet` → `Cellar/…/<version>/…`)
+  is what assistants keep, and an upgrade does not break them. Otherwise, and always on Windows, the
+  operating system's executable path. (Linux's `/proc/self/exe` resolves every link: until 0.2.0 Linux
+  recorded the versioned target, so `doctor` reported a missing binary after an upgrade until `init`
+  was re-run.)
 - **Choosing targets without a terminal.** `--only` and `--all` pick the targets. Without either, a
   terminal gets the checklist. Without a terminal (stdin or stdout not a TTY), `--dry-run` previews
   the targets the checklist would pre-select (the detected assistants, plus the shims at user scope),
