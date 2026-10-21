@@ -1402,9 +1402,9 @@ Requirements are not redefined to match a measurement.
 
 | Boundary | What it covers | Requirement | Status |
 |---|---|---|---|
-| **B1 — shim end-to-end overhead** | Wall time of spawning a shimmed command until it exits, minus the same command spawned directly (`E2 − E0`), human path, warm | < 0.2 ms | **NOT MET.** Slice 4: median **3.74–3.84 ms** against 3.22–3.33 ms for the Slice 3B binary in the same session (see "Slice 4 re-measurement" below). Slice 3A: median 2.24 ms (p95 2.34, p99 2.59; n = 1000 iteration-matched pairs). |
+| **B1 — shim end-to-end overhead** | Wall time of spawning a shimmed command until it exits, minus the same command spawned directly (`E2 − E0`), human path, warm | **≤ F + 0.5 ms**, where **F** is the exec floor measured in the same run (`EF − E0`: a minimal C program that only `execv`s the same real binary). Until 2026-10-20 the requirement was < 0.2 ms; see "B1 amendment" below | see "B1 amendment" and the latest re-measurement; history: Slice 4: median **3.74–3.84 ms** against 3.22–3.33 ms for the Slice 3B binary in the same session (see "Slice 4 re-measurement" below). Slice 3A: median 2.24 ms (p95 2.34, p99 2.59; n = 1000 iteration-matched pairs). |
 | B2 — process launch | Spawning `agentdiet hook noop` minus spawning the direct command (`E1 − E0`) | none; context for B1 | median 1.12 ms (p95 1.20, p99 1.24; n = 1000) |
-| B3 — in-process routing | `shim_name` + `resolve_real` on a synthetic `PATH`, up to the `exec` call | none; context for B1 | median 0.027 ms (p95 0.029, p99 0.030; n = 10000) |
+| B3 — in-process routing | `shim_name` + `resolve_real` on a synthetic `PATH`, up to the `exec` call | **< 0.2 ms** (the original B1 number, now applied to what AgentDiet's code itself costs) | median 0.027 ms (p95 0.029, p99 0.030; n = 10000) |
 | **B4 — Diet Engine fast path** | Pure transform (classify, scrub, candidate, checks) of an input of up to 256 KiB, in process, warm, no I/O | < 10 ms | **NOT MET** at 256 KiB. Worst p50 **28.7 ms**: realistic Rust source through the fold path (p99 29.6 ms; the tree-sitter parse alone is ~22 ms, so a large valid file cannot meet the budget while it is folded). Also over 10 ms at p50: adversarial "secrets everywhere" `shell` 13.7 ms and `read` 12.9 ms (the scrubber takes 6.2 ms on clean text of this size), "deep (60) JSON, large leaf" `json` 12.7 ms (TOON's 10-pass bound) and "diagnostic on every line" `read` 10.0 ms. Realistic 256 KiB JSON → TOON: p50 9.8 ms, p99 over 10 ms in every run (10.2–36.2 ms). Other realistic 256 KiB rows: cargo 7.7 ms, pytest 6.7 ms, npm 5.4 ms. The hostile "numbers and punctuation" `read` was p50 **247 ms** until the bounded parse (§3, Signature folding) and is now 8.4 ms (p99 8.8 ms); "multibyte text" `read` is 8.5 ms. Several rows show isolated p99 spikes of 26–37 ms (n = 60) that follow no one input. Larger inputs (not judged): 1 MiB of Rust is now left unchanged after ~57 ms where it used to fold in ~117 ms, because it exceeds the 30 ms parse deadline. Measured at `10d1ad6` plus the bounded-parse change, release, n = 60 per row. |
 | **B5 — persistence** | Durable Vault write (`fsync` file and directory), GC, ID selection, index and state update; measured with 0, 100 and 1000 entries in the Vault | reported with B4; the engine's end-to-end budget is B4 + B5 + process launch (B2) < 10 ms | **MISS** on the end-to-end budget. `Engine::run` on 64 KiB: p50 **22–26 ms** at 0, 100 and 1000 entries (flat in entry count; three runs). Floors: `fsync` of a 32 KiB file plus its directory p50 8.1–9.3 ms; `state::record_telemetry` p50 8.6–10.4 ms; `Cas::put` p50 10.5–12.6 ms. Cold first `Engine::run` (30 fresh processes) p50 38–43 ms. |
 
@@ -1541,6 +1541,18 @@ bytes, sha256 `63b60a73…`; `scripts/check-binary-deps.sh --build`: only `libSy
   per spawn from a Python driver (it includes the driver's own spawn cost, the same for both binaries).
   The P2 regression scenario (MCP session, `PostToolUse` hook, `show '#id'`, `stats --json`, `scan`) gives
   byte-identical output. **B1 remains NOT MET.**
+
+**B1 amendment** (owner's decision, 2026-10-20; recorded here so the change is never silent). The original
+< 0.2 ms cannot be met by any shim that is a separate executable on `PATH`, on macOS: measured on this
+machine (Apple M1, Darwin 27, n = 1000 interleaved), a 33 KB C program that does nothing but `execv` the
+real binary adds **1.72 ms** over running that binary directly, the same as launching AgentDiet alone
+(`hook noop`, +1.71 ms). Launch costs against a 17 KB C program that only exits: a minimal Rust binary
+(std, LTO) **+0.38 ms**, AgentDiet (10 MB) **+1.21 ms**; Apple's own `/usr/bin/true` is 0.47 ms *faster*
+than either (platform binaries are validated differently). So B1 is now judged against the exec floor
+**F** measured in the same run, with 0.5 ms allowed for AgentDiet's own process image and decision, and
+the 0.2 ms number moves to B3, which is what AgentDiet's code alone controls. A miss stays a miss: what
+is above F + 0.5 ms is reported as NOT MET, and closing it is a design question (a smaller image, or a
+dedicated shim executable, which `CLAUDE.md`'s single-binary rule does not allow today).
 
 Notes:
 
