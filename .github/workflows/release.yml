@@ -1,0 +1,100 @@
+# Release: build every target from a version tag, package reproducibly, attach SHA256SUMS, and create a
+# DRAFT GitHub release. Nothing is published until a maintainer reviews the draft and presses Publish.
+# `workflow_dispatch` builds and uploads the archives as workflow artifacts only (a dry run).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.99.1"
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { os: macos-15, target: aarch64-apple-darwin }
+          - { os: macos-15, target: x86_64-apple-darwin }
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-musl, musl: true }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, musl: true }
+          - { os: windows-2025, target: x86_64-pc-windows-msvc }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: The tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          [ "v$version" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME != Cargo.toml $version"; exit 1; }
+      - name: Toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target ${{ matrix.target }}
+          rustup default "$RUST_TOOLCHAIN"
+          if [ "${{ matrix.musl }}" = "true" ]; then sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools; fi
+      - name: "Build (reproducible: locked, pinned toolchain, no local paths in the binary)"
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+        run: |
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          export SOURCE_DATE_EPOCH
+          home="${USERPROFILE:-$HOME}" # the native form on Windows, where rustc sees native paths
+          export RUSTFLAGS="--remap-path-prefix=$GITHUB_WORKSPACE=/build --remap-path-prefix=$home/.cargo=/cargo --remap-path-prefix=$home/.rustup=/rustup"
+          # Windows: link the C runtime statically, so the binary needs only system DLLs (SPEC §10).
+          case "${{ matrix.target }}" in *-windows-msvc) RUSTFLAGS="$RUSTFLAGS -C target-feature=+crt-static" ;; esac
+          cargo build --release --locked --target ${{ matrix.target }}
+      - name: Dependency policy (libSystem only on macOS, fully static on Linux)
+        if: runner.os != 'Windows'
+        run: scripts/check-binary-deps.sh target/${{ matrix.target }}/release/agentdiet
+      - name: Windows binary runs
+        if: runner.os == 'Windows'
+        run: target/${{ matrix.target }}/release/agentdiet.exe --version
+      - name: Package
+        run: |
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          export SOURCE_DATE_EPOCH
+          exe=target/${{ matrix.target }}/release/agentdiet
+          [ -f "$exe.exe" ] && exe="$exe.exe"
+          python3 scripts/package.py binary ${{ matrix.target }} "$exe" dist
+          if [ "${{ matrix.target }}" = "aarch64-apple-darwin" ]; then
+            python3 scripts/package.py completions target/${{ matrix.target }}/release/agentdiet dist
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  draft-release:
+    name: draft release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: SHA256SUMS
+        run: cd dist && cat ./*.sha256 | sort -k 2 > SHA256SUMS && rm -f ./*.sha256 && cat SHA256SUMS
+      - name: Create the draft (never published by CI)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes=$(awk '/^## \[/{n++} n==1' CHANGELOG.md)
+          gh release create "$GITHUB_REF_NAME" dist/* --draft --verify-tag --title "AgentDiet $GITHUB_REF_NAME" --notes "$notes"

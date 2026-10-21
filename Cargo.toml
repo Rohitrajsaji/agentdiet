@@ -2,9 +2,15 @@
 name = "agentdiet"
 version = "0.1.0"
 edition = "2024"
-description = "Context firewall for AI coding agents"
+description = "Context firewall for AI coding agents: trims noisy tool output, keeps it recoverable"
 license = "MIT"
 readme = "README.md"
+repository = "https://github.com/Rohitrajsaji/agentdiet"
+homepage = "https://github.com/Rohitrajsaji/agentdiet"
+keywords = ["ai", "agents", "mcp", "cli", "tokens"]
+categories = ["command-line-utilities", "development-tools"]
+# The newest rust-version among the dependencies (tree-sitter); CI checks it (job `msrv`).
+rust-version = "1.90"
 
 [lib]
 name = "agentdiet"

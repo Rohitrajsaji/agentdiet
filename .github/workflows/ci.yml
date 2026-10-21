@@ -1,0 +1,119 @@
+# Continuous integration. Third-party actions are pinned to full commit SHAs (the tag is in the comment);
+# Rust comes from rustup, which every GitHub-hosted runner has.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # The toolchain every check is pinned to; MSRV is checked separately.
+  RUST_TOOLCHAIN: "1.99.1"
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy
+          rustup default "$RUST_TOOLCHAIN"
+      - name: cargo-nextest
+        run: |
+          case "$(uname -s)-$(uname -m)" in
+            Linux-x86_64) n=linux ;; Linux-aarch64) n=linux-arm ;; Darwin-*) n=mac ;;
+          esac
+          mkdir -p ~/.cargo/bin
+          curl -LsSf "https://get.nexte.st/latest/$n" | tar zxf - -C ~/.cargo/bin
+      - name: Shells for the completion tests
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh
+      - run: cargo fmt --check
+      - run: cargo check --locked --all-targets
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo nextest run --locked --no-fail-fast
+      - run: cargo test --locked --doc
+      - name: Release build links only what it may
+        run: scripts/check-binary-deps.sh --build
+        if: runner.os == 'macOS'
+      - name: Live check (installed assistant CLIs only; none are installed on hosted runners)
+        run: cargo build --release --locked && scripts/live-check.sh target/release/agentdiet
+
+  windows:
+    # Windows without shims (SPEC §10). nextest is not installed here: `cargo test` also runs the doctests.
+    name: test (windows-2025)
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy
+          rustup default "$RUST_TOOLCHAIN"
+      - run: cargo check --locked --all-targets
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked --no-fail-fast
+      - name: The release binary runs and needs no C runtime DLL
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          cargo build --release --locked
+          target/release/agentdiet.exe --version
+          USERPROFILE="$(mktemp -d)" target/release/agentdiet.exe status --json
+
+  msrv:
+    name: minimum Rust (1.90)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install 1.90 --profile minimal && rustup default 1.90
+      - run: cargo check --locked --all-targets
+
+  musl:
+    name: static ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-musl }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Rust toolchain and musl C toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target ${{ matrix.target }}
+          rustup default "$RUST_TOOLCHAIN"
+          sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+        env:
+          CC: musl-gcc
+      - name: Fully static (no interpreter, no DT_NEEDED)
+        run: scripts/check-binary-deps.sh target/${{ matrix.target }}/release/agentdiet
+      - name: Runs
+        run: |
+          bin=target/${{ matrix.target }}/release/agentdiet
+          "$bin" --version
+          HOME="$(mktemp -d)" "$bin" status --json
+
+  deny:
+    name: dependencies (cargo deny)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: cargo install cargo-deny --locked
+      - run: cargo deny check advisories licenses sources bans
