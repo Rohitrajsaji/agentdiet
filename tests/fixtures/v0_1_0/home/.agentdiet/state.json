@@ -1,0 +1,10 @@
+{
+  "status": "paused",
+  "mode": "balanced",
+  "raw_tokens_passed_while_paused": 0,
+  "on_session_start": "prompt",
+  "last_trimmed_id": "8b744be8",
+  "trimmed_outputs": 1,
+  "tokens_saved": 4652,
+  "cas_dereferences": 0
+}

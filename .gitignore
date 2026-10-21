@@ -1,4 +1,6 @@
 /target
 .claude/settings.local.json
 .agentdiet/
+# Data written by released versions, read by tests/compat.rs.
+!/tests/fixtures/**/.agentdiet/
 .DS_Store
