@@ -311,7 +311,7 @@ impl MemoryDb {
             &path,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
-        fsutil::require_same_file(&checked, &path).map_err(io_err)?;
+        require_opened_checked(&conn, &checked, &path).map_err(io_err)?;
         drop(checked);
         conn.busy_timeout(busy)?;
         enable_wal(&conn, busy)?;
@@ -671,6 +671,47 @@ pub fn fts_query(query: &str) -> Option<String> {
     (!phrases.is_empty()).then(|| phrases.join(" "))
 }
 
+/// Fail unless the file SQLite opened is the one `checked` (opened `O_NOFOLLOW` beforehand) holds:
+/// SQLite's own handle still matches the path (`SQLITE_FCNTL_HAS_MOVED`, which compares the
+/// inode it opened with a fresh `stat`), and the path matches `checked`. Comparing the path with
+/// `checked` alone would miss a file swapped in for SQLite's `open` and swapped back before the
+/// check (SPEC §3 Tier 3 "memory.db metadata").
+fn require_opened_checked(
+    conn: &Connection,
+    checked: &std::fs::File,
+    path: &Path,
+) -> io::Result<()> {
+    if sqlite_file_has_moved(conn)? {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "file was replaced while opening",
+        ));
+    }
+    fsutil::require_same_file(checked, path)
+}
+
+/// `SQLITE_FCNTL_HAS_MOVED` on the main database. `false` where the VFS does not implement it
+/// (Windows), which SPEC §10 states.
+fn sqlite_file_has_moved(conn: &Connection) -> io::Result<bool> {
+    use rusqlite::ffi;
+    let mut moved: std::ffi::c_int = 0;
+    // SAFETY: `conn.handle()` is the open connection's live `sqlite3*`, "main" is a NUL-terminated
+    // schema name, and HAS_MOVED writes exactly one `int` through the pointer it is given.
+    let rc = unsafe {
+        ffi::sqlite3_file_control(
+            conn.handle(),
+            c"main".as_ptr(),
+            ffi::SQLITE_FCNTL_HAS_MOVED,
+            (&raw mut moved).cast(),
+        )
+    };
+    match rc {
+        ffi::SQLITE_OK => Ok(moved != 0),
+        ffi::SQLITE_NOTFOUND => Ok(false),
+        _ => Err(io::Error::other("could not check the opened database file")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -683,6 +724,58 @@ mod tests {
         assert_eq!(fts_query("say \"hi\"").unwrap(), "\"say\" \"\"\"hi\"\"\"");
         assert_eq!(fts_query("  * - :  "), None);
         assert_eq!(fts_query(""), None);
+    }
+
+    /// A file swapped in for SQLite's `open` and swapped back before the check: the path names
+    /// the checked file again, so comparing the path alone passes; SQLite's handle does not.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_swapped_in_and_back_around_sqlites_open_is_refused() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("memory.db");
+        drop(MemoryDb::open(&path).unwrap());
+        let checked = fsutil::open_or_create_private(&path).unwrap();
+
+        let aside = dir.path().join("aside.db");
+        std::fs::rename(&path, &aside).unwrap();
+        drop(MemoryDb::open(&path).unwrap()); // another database at the path
+        let conn = Connection::open(&path).unwrap();
+        std::fs::rename(&path, dir.path().join("planted.db")).unwrap();
+        std::fs::rename(&aside, &path).unwrap();
+
+        fsutil::require_same_file(&checked, &path).expect("the path alone looks unchanged");
+        let err = require_opened_checked(&conn, &checked, &path).unwrap_err();
+        assert_eq!(err.to_string(), "file was replaced while opening");
+
+        // And the normal case passes.
+        let conn = Connection::open(&path).unwrap();
+        require_opened_checked(&conn, &checked, &path).unwrap();
+    }
+
+    /// A cloned repository can carry `.agentdiet/memory.db-wal` / `-shm` as symlinks. The bundled
+    /// SQLite opens both `O_NOFOLLOW`, so the targets are never written: indexing fails instead.
+    #[cfg(unix)]
+    #[test]
+    fn planted_wal_and_shm_symlinks_are_never_written_through() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::create_dir(&victim).unwrap();
+        let db_dir = dir.path().join(".agentdiet");
+        std::fs::create_dir(&db_dir).unwrap();
+        for sibling in ["wal", "shm"] {
+            std::fs::write(victim.join(sibling), b"untouched").unwrap();
+            std::os::unix::fs::symlink(
+                victim.join(sibling),
+                db_dir.join(format!("memory.db-{sibling}")),
+            )
+            .unwrap();
+        }
+        let indexed = MemoryDb::open(&db_dir.join("memory.db"))
+            .and_then(|db| db.index(Kind::Command, &scrub(b"t"), &scrub(b"b"), None, None));
+        assert!(indexed.is_err(), "a symlinked -shm cannot be used");
+        for sibling in ["wal", "shm"] {
+            assert_eq!(std::fs::read(victim.join(sibling)).unwrap(), b"untouched");
+        }
     }
 
     /// `rusqlite` is built with `bundled` only (no `bundled-full`); this pins down that the

@@ -939,10 +939,19 @@ label (the agent's session id, `pid:<n>` or `agent:unknown`). It never holds out
   therefore only accepted as scrubbed text of at most 256 bytes. The file is created `0600` before
   SQLite opens it (SQLite gives `-wal` and `-shm` the main file's mode) and the project
   `.agentdiet/` directory `0700`. The final path component is opened with `O_NOFOLLOW|O_NONBLOCK`
-  first, and once SQLite has opened the file, before anything is read or written, the path must still
-  be that same inode. (`SQLITE_OPEN_NOFOLLOW` is not used: it rejects a symlink anywhere in the path,
-  such as macOS's `/var` or a project below a linked directory.) A swap in the instant between
-  SQLite's `open` and the check is detected, not prevented. Error values never contain row text.
+  first, and once SQLite has opened the file, before anything is read or written, two checks must
+  pass: SQLite's own handle still matches the path (`SQLITE_FCNTL_HAS_MOVED`: the inode SQLite opened
+  against a fresh `stat`), and the path is still the inode opened first. Comparing the path alone is
+  not enough: a file swapped in for SQLite's `open` and swapped back before the check would pass it.
+  (`SQLITE_OPEN_NOFOLLOW` is not used: it rejects a symlink anywhere in the path, such as macOS's
+  `/var` or a project below a linked directory.) The bundled SQLite opens the database, `-wal` and
+  `-shm` with `O_NOFOLLOW` itself, so a symlink planted at any of them (a cloned repository can carry
+  one) is never written through; indexing fails instead and the engine's note says so.
+  **What remains** (documented, not prevented): a double swap between those two `stat` calls, which
+  needs write access to the `.agentdiet/` directory, that is, the user's own privileges; a
+  pre-existing `.agentdiet/` (or one that is a symlink to a directory) is used as it is, its mode
+  not tightened; on Windows the VFS has no `HAS_MOVED` and `require_same_file` checks only that the
+  path is a regular file (§10). Error values never contain row text.
 - **`state.json` updates are serialised.** Every read-modify-write holds an exclusive advisory lock
   (`flock` on the private sibling file `state.json.lock`, created `0600`, never deleted) from the read
   to the rename. An explicit `pause`/`resume`/mode change waits at most **2 s** and then fails with a
