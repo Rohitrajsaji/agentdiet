@@ -101,7 +101,7 @@ jobs:
           path: dist
           merge-multiple: true
       - name: SHA256SUMS
-        run: cd dist && cat ./*.sha256 | sort -k 2 > SHA256SUMS && rm -f ./*.sha256 && cat SHA256SUMS
+        run: cd dist && cat ./*.sha256 | tr -d '\r' | sort -k 2 > SHA256SUMS && rm -f ./*.sha256 && cat SHA256SUMS
       - name: Attest every archive (verify with `gh attestation verify <archive> --repo <owner>/agentdiet`)
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:

@@ -87,7 +87,13 @@ jobs:
           mkdir -p "$scratch"
           USERPROFILE="$scratch" APPDATA="$scratch" "$exe" status --json
           # Imported DLLs: only Windows' own; no VCRUNTIME*/MSVCP*/UCRT forwarders (SPEC §10).
-          ldd "$exe" | tee dlls.txt
+          # llvm-objdump ships with GitHub's Windows images; ldd (Git Bash) is the fallback.
+          if command -v llvm-objdump > /dev/null 2>&1; then
+            llvm-objdump -p "$exe" | grep -i "DLL Name" | tee dlls.txt
+          else
+            ldd "$exe" | tee dlls.txt
+          fi
+          [ -s dlls.txt ] || { echo "could not list the binary's DLLs"; exit 1; }
           if grep -i -E 'vcruntime|msvcp|api-ms-win-crt|ucrtbase' dlls.txt; then
             echo "the release binary needs a C runtime DLL"; exit 1
           fi

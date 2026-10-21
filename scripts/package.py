@@ -79,7 +79,7 @@ def main(argv):
     path = os.path.join(outdir, prefix + (".zip" if windows else ".tar.gz"))
     (zip_file if windows else tar_gz)(path, prefix, files, epoch())
     digest = hashlib.sha256(read(path)).hexdigest()
-    with open(path + ".sha256", "w", encoding="ascii") as f:
+    with open(path + ".sha256", "w", encoding="ascii", newline="\n") as f:  # LF on Windows too
         f.write(f"{digest}  {os.path.basename(path)}\n")
     print(path)
 
