@@ -387,3 +387,34 @@ GitHub, Slack, OpenAI or private-key patterns, no e-mail address and no home pat
 literal is a deliberately fake 49-character test key in `tests/cli.rs` (since `0d310ed`). If GitHub push
 protection flags it anyway, the push is rejected (nothing is published) and the choice to mark it a
 false positive is the owner's.
+
+### 5.5 First GitHub CI run (2026-10-21, branch `ci/p4.5` at `43da1a2`, owner-approved push)
+
+CI run 39571340359 and release dry run 39571340486. Nothing was pushed to `main`; no tag, release or
+attestation.
+
+| Job | Result |
+|---|---|
+| test (ubuntu-24.04, x86_64) | **pass**: fmt, check, clippy, nextest 487/487, doctests, live check (no clients installed) |
+| test (ubuntu-24.04-arm) | **pass** |
+| test (macos-15) | **pass**: 488/488; release binary links only libSystem |
+| test (windows-2025) | **fail**: 354 passed, 20 failed (below); later steps (release build, DLL check) did not run |
+| minimum Rust (1.90) | **pass** |
+| static x86_64 / aarch64 musl | **pass**: fully static, runs |
+| cargo deny | **pass** |
+| release dry run: macOS arm64, macOS x86_64, Linux musl ×2, Windows MSVC | **pass**: built, checked, packaged, uploaded (artifacts expire after one day); draft job skipped as designed |
+
+Windows failures, all diagnosed, none in product code:
+- 18: fixtures checked out with CRLF (no `.gitattributes`; git on Windows defaults to `autocrlf`).
+  A repository defect any Windows clone hits. Reproduced on macOS with an `autocrlf=true` clone.
+- 1: `bash -n` on Windows is the WSL launcher (CI environment; test now skips the shell check there).
+- 1: a test helper read the held `.lock` file; Windows locks are mandatory (test defect).
+
+Also found: the Windows archive's `.sha256` was written with CRLF, which would break `sha256sum -c` on the
+release's `SHA256SUMS` (packaging defect). The dry run's MSVC binary imports only Windows' own DLLs
+(checked offline with llvm-objdump), so `+crt-static` works.
+
+Fixes, local and **not pushed** (each needs approval): `0f01206` (`.gitattributes`, the two test
+fixes; an `autocrlf=true` clone now passes 488/488 on macOS) and `4dbd61d` (LF checksum files, a DLL
+check that does not depend on `ldd`). Windows stays **under test, not supported** until the
+`windows-2025` job passes.
