@@ -1,7 +1,7 @@
 # AgentDiet — P4 release readiness
 
-Status: **audit and plan** (this document). Results are added in the final section as each phase is
-verified. `SPEC.md` stays the source of truth for behaviour; this document records what was checked,
+Status: **release candidate prepared locally; not released** (2026-10-21). Section 4 records what was
+verified, where, and what is still open. `SPEC.md` stays the source of truth for behaviour; this document records what was checked,
 where, and what is still open.
 
 ## 1. Audit (2026-10-20, at `0d310ed`)
@@ -129,6 +129,156 @@ Each step is independently testable and committed on its own; nothing is pushed,
    labelled as **not** real Windows; CI adds a `windows-latest` job for the real check.
 8. **Final verification and report** (section 4).
 
-## 4. Results
+## 4. Results (2026-10-21, release candidate at `b3248a9`)
 
-(Filled in as each phase is verified.)
+"Verified" below means a command was run and its exit status checked; where something was only built,
+or only written, it says so. Nothing has been pushed, tagged or published.
+
+### 4.1 Commits (P4)
+
+| Commit | Slice |
+|---|---|
+| `ca3a7f2` | fix(privacy): titles, summaries and notes are scrubbed whole before they are cut |
+| `a26350e` | fix(shim): a redirect under dash/ksh/mksh/posh/yash/busybox stays transparent (found on Linux) |
+| `88e9380` | perf(spec): B1 judged against the exec floor measured in the same run (owner's decision) |
+| `f413349` | test: every assistant end to end from its own config format; v0.1.0 upgrade data |
+| `517cc4a` | fix(memory): SQLite's own handle is checked (`SQLITE_FCNTL_HAS_MOVED`), not just the path |
+| `324e610` | feat(windows): everything but the shims |
+| `ffda21a` | ci: CI and draft-release workflows, cargo-deny, reproducible packaging, installer |
+| `29f97ef` | docs: CHANGELOG, SECURITY, VERSIONING, README install and platforms |
+| `b3248a9` | fix(privacy): every diagnostic that can quote the caller's input is scrubbed |
+
+### 4.2 Platforms
+
+| Platform | Result | Evidence |
+|---|---|---|
+| macOS aarch64 (M1, Darwin 27) | **verified** | full suite at HEAD: 481 passed, 9 skipped (nextest; the skips are opt-in benchmarks and helper processes); clippy `-D warnings`, fmt, doctests; release binary links only `libSystem` (`check-binary-deps.sh`); RC smoke test (init, doctor, MCP trim, recovery, byte-exact disconnect) OK |
+| macOS x86_64 | **built only** | release binary from HEAD, links only `libSystem`; not executed (no Rosetta on this Mac, and installing it is a system change) |
+| Linux aarch64, glibc (Debian 12, Docker, non-root) | **verified** | at HEAD: fmt, check, clippy `-D warnings`, nextest **480 passed**, 9 skipped, doctests; with bash, zsh, dash, mksh, ksh, posh, yash and busybox installed. A first attempt at HEAD failed in nextest while the machine was saturated by x86_64 emulation; its log was lost with the container (see 4.10, flakes). Earlier (mid-P4 tree) the suite also passed on Rust **1.90** (472/472). x86_64 glibc: CI only |
+| Linux musl aarch64 / x86_64 (release binaries) | **verified** (x86_64 under Docker's Rosetta emulation, not x86 hardware) | built from HEAD twice in different directories, byte-identical (aarch64 `38603dea…`, x86_64 `7f022b9e…`); no `DT_NEEDED`, no interpreter (`check-binary-deps.sh`); in a bare `alpine:3.20` container each passed the smoke test: version, `status --json`, init, doctor, MCP trim, recovery of all 4000 lines, byte-exact disconnect |
+| Windows aarch64 (llvm-mingw), **Wine 10.0** on Debian 13 arm64 | **runs under Wine** | Wine is not Windows. At `324e610`: whole suite 351 passed, 0 failed, 3 ignored. At HEAD: clippy `-D warnings` clean; 352 passed, 2 failed, both wall-clock tests (a hook that must not wait on an open stdin; a 2 s launch bound) while the machine was saturated; both passed twice when rerun idle. The breadcrumb's literal recovery command works in `cmd.exe`. Wine 8.0 (Debian 12) could not run Rust ≥ 1.78 binaries (no `ProcessPrng`) and crashed in thread-local storage on arm64 |
+| Windows x86_64 (mingw) | **built only**: release build, clippy `-D warnings`, every test binary compiles | Wine aborts under Docker Desktop's Rosetta x86_64 emulation (`xsave_header.xfeatures` assertion), so nothing x86_64-Windows was executed |
+| Windows x86_64 MSVC (the release target) | **not built here** (no MSVC toolchain) | CI `windows` job and the release workflow, not yet run |
+
+### 4.3 Defects found and fixed in P4
+
+1. **Privacy: unredacted secret prefixes in memory.db** (present since v0.1.0). Titles were cut to 240
+   bytes before scrubbing; a key crossing the cut was stored as a prefix too short to match. Fixed by
+   scrubbing first; regression tests read the persisted rows and FTS index for command and read titles.
+2. **Privacy: diagnostics repeated the caller's input** (`show <id>`, `scan <path>`, MCP tool and
+   JSON-RPC errors, clap usage errors). Found by planting a key in every entry point's input and forcing
+   error paths; all now scrubbed (SPEC P1). Hook payloads, `diet_exec` output and the shim agent path
+   were already clean; panics in hook/shim/MCP print only a fixed note.
+3. **Shim trimmed a redirected file under dash** (Debian/Ubuntu `/bin/sh`) and five other shells that
+   redirect in the parent. Found by the first Linux run.
+4. **memory.db open check was weaker than SPEC claimed**: comparing the path with the pre-opened handle
+   misses a swap-and-restore around SQLite's `open`. Now SQLite's own handle is compared too. Audit: the
+   bundled SQLite opens the database, `-wal` and `-shm` with `O_NOFOLLOW`, so planted symlinks (a cloned
+   repository can carry them) are never written through (tested). Remaining, documented: a double swap
+   between two `stat` calls (needs the user's own write access), pre-existing `.agentdiet/` used as is.
+5. **Windows: `dirs` ignores `%USERPROFILE%`/`%APPDATA%`**, so AgentDiet and Node-based assistants could
+   disagree, and `cargo test` on a Windows machine would have written to the developer's real assistant
+   configs. Now the environment is read first; every test isolates both.
+6. **Windows: the breadcrumb's recovery command failed in `cmd.exe`** (it keeps the `'` quotes). IDs in
+   one pair of single quotes are now accepted; the breadcrumb text is unchanged.
+7. Test-suite portability: Linux `openpty`, MSRV 1.90 inference, Unix-only tests gated with reasons.
+
+### 4.4 Integrations
+
+| Assistant | Automated (`tests/integrations.rs`: config parsed in the client's format, exact command started, MCP trim + recovery, doctor, byte-exact disconnect, reconnect) | Live (real client, scratch HOME) |
+|---|---|---|
+| Claude Code | yes | **2.1.305**: `claude mcp list` → Connected (2026-10-21); hooks replaced output live with 2.1.302 on 2026-10-17 |
+| Codex | yes | **codex-cli 0.163.0**: `codex mcp get agentdiet` parses the server (stdio) (2026-10-21) |
+| Gemini CLI | yes | not installed here: unverified live |
+| Cursor | yes | needs the GUI: unverified live |
+| Windsurf | yes | needs the GUI: unverified live |
+| Copilot (VS Code) | yes | needs the GUI: unverified live |
+
+Claude Code hooks on Windows (`"<exe>" hook <Event>`) have not been run by a real client.
+
+### 4.5 Upgrade compatibility
+
+- `tests/compat.rs` reads state, a Vault entry and memory.db **written by the v0.1.0 binary** (fixture
+  committed): counters, `show`, `doctor`, MCP search/inspect, `resume`.
+- Configs written by v0.1.0's `init` are updated in place by the new `init` and removed by `eject`,
+  which restored the pre-v0.1.0 originals byte for byte (scratch HOME, v0.1.0 built from its tag).
+
+### 4.6 Packaging and installation
+
+- Archives: `package.py` output is byte-identical across runs (macOS, musl and a Windows zip checked).
+- RC archives for macOS aarch64/x86_64 and musl aarch64/x86_64 plus completions, with `SHA256SUMS`, are
+  in the session scratch directory (not in the repo, not published). They carry version **0.1.0**,
+  because `Cargo.toml` still says so; they are a rehearsal, to be rebuilt by CI after the version bump.
+- `install.sh` against those archives over `file://` (macOS): fresh install OK (checksum verified), upgrade over an older binary replaced it with the RC binary byte for byte, a tampered archive was refused with nothing installed. Not run on Linux (the Alpine image has no curl); the Linux branch is target detection only.
+- musl binaries are reproducible (two build directories, `cmp` equal): **yes**, both targets. macOS release builds were not built twice.
+- Homebrew: formula template only. On macOS a symlinked install records the stable symlink path in
+  assistant configs. **On Linux it records the versioned target** (`/brew/Cellar/agentdiet/0.2.0/bin/agentdiet`, checked in Alpine with both musl binaries), because `current_exe` reads `/proc/self/exe`. A Linuxbrew upgrade would leave assistants pointing at a removed binary until `agentdiet init` is re-run (`doctor` reports it). `install.sh` is not affected (it replaces the file in place). Open: fix before publishing a Linux Homebrew formula (prefer the invoked path when it resolves to the same file; a SPEC change).
+
+### 4.7 CI/CD
+
+Written, linted (actionlint 1.7.7 with shellcheck: clean), **never run on GitHub**. Written CI is not
+passing CI: the first push will be its first run, and jobs that have never run (Windows above all) should
+be expected to need fixes.
+
+### 4.8 Security
+
+- `cargo deny` (advisories, licences, sources, bans) at HEAD: **ok**; warnings only for duplicate
+  `foldhash`, `hashbrown`, `syn` versions. Advisory database in a scratch path.
+- Secret probe at every entry point: see 4.3 (2). The transparent shim path and config backups are the
+  documented exceptions (SECURITY.md).
+
+### 4.9 Performance
+
+- **B1: NOT MET**, recorded in SPEC §7 ("P4 re-measurement"): RC median 2.705 / 2.707 ms against a limit of F + 0.5 ≈ 2.0 ms (F = 1.49–1.50 ms measured in the same runs), about 0.7 ms over; the P3 binary measured 2.699 / 2.680 ms in the same alternating session, so P4 added nothing. The excess is the 10 MB process image; it was not won back, and only a dedicated small shim executable would remove it, which `CLAUDE.md` does not allow. Owner's decision.
+- **B3: MET**, 0.027 ms against 0.2 ms.
+- B4/B5: unchanged documented misses (not re-measured in P4).
+
+### 4.10 Blockers and decisions left to the owner
+
+**Blockers before publishing a release:**
+1. **CI has never run.** Push to a branch and get every job green, Windows included.
+2. **Version.** `Cargo.toml` is 0.1.0 and the `v0.1.0` tag already exists (before P0–P3), so the next
+   release needs a new version: **0.2.0** is recommended (new commands, new MCP tool, behaviour changes,
+   nothing removed). Bump it, move the CHANGELOG's Unreleased section under it, then tag.
+3. **Real Windows** has not run anything; until the CI `windows` job passes, keep Windows marked
+   "under test" in release notes.
+
+4. **Linux symlinked installs** record the versioned path (4.6): fix before a Linux Homebrew formula,
+   or ship install.sh/archives only.
+
+**Owner decisions (not blockers):**
+- B1 (see 4.9): accept the miss, or allow a dedicated shim executable.
+- Whether a pre-existing `.agentdiet/` that is a symlink, or has a loose mode or foreign owner, should be
+  refused or tightened (today it is used as is; SPEC §3 Tier 3 says so).
+- Signing release archives (today: checksums only, which prove integrity, not origin).
+- Gemini CLI, Cursor, Windsurf and Copilot live checks need those clients.
+
+**Known limitations, documented:** B4/B5 misses (durability is not traded for speed); best-effort secret
+detection; the transparent shim path is not scrubbed; Windows has no shims; `folding` tests depend on a
+300 ms debug parse budget and failed once on this machine while it was saturated by x86_64 emulation
+(passed 3/3 alone): a flake risk on slow CI runners. Wall-clock tests (hook stdin timeout, launch bounds)
+behave the same way under heavy load.
+
+### 4.11 Publishing steps (for the owner; none has been done)
+
+1. `git push` the branch; wait for CI to pass on every job.
+2. Bump `version` in `Cargo.toml` (and `Cargo.lock` via `cargo check`) to 0.2.0; date the CHANGELOG
+   section; commit; push; CI green again.
+3. `git tag -a v0.2.0 -m "AgentDiet 0.2.0"` and `git push origin v0.2.0`: `release.yml` builds every
+   target, checks the tag against `Cargo.toml`, and creates a **draft** release with `SHA256SUMS`.
+4. Download the draft's archives on a Mac and a Linux machine (and Windows), check them against
+   `SHA256SUMS`, run `scripts/install.sh` with `AGENTDIET_VERSION=0.2.0` once the release is visible,
+   then press Publish.
+5. Optional: fill `packaging/homebrew/agentdiet.rb` from `SHA256SUMS` and add it to a tap.
+
+### 4.12 Session housekeeping
+
+- The real `~/.local/bin/agentdiet` is unchanged (9,939,344 bytes, 2026-10-19). Every AgentDiet run used a
+  scratch HOME. `~/.codex/config.toml` shows a modification at 01:11 on 2026-10-21; this session's
+  commands only read that file (and ran `codex --help`/`--version`), and Codex was active at the time
+  (`~/.codex/agentdiet-orchestration` changed at 01:13), so it is Codex's own write, not this work's.
+  `~/.claude.json` is rewritten by Claude Code itself on every session.
+- Two writes under the real HOME happened and were undone: a `cargo deny` run on 2026-10-20 created
+  `~/.cargo/advisory-dbs` (6.6 MB, removed; later runs used a scratch path), and on 2026-10-21
+  `rustup target add x86_64-apple-darwin` installed that target's standard library into `~/.rustup` for
+  the macOS x86_64 build (removed with `rustup target remove` right after the build).

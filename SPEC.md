@@ -1417,7 +1417,7 @@ Requirements are not redefined to match a measurement.
 
 | Boundary | What it covers | Requirement | Status |
 |---|---|---|---|
-| **B1 — shim end-to-end overhead** | Wall time of spawning a shimmed command until it exits, minus the same command spawned directly (`E2 − E0`), human path, warm | **≤ F + 0.5 ms**, where **F** is the exec floor measured in the same run (`EF − E0`: a minimal C program that only `execv`s the same real binary). Until 2026-10-20 the requirement was < 0.2 ms; see "B1 amendment" below | see "B1 amendment" and the latest re-measurement; history: Slice 4: median **3.74–3.84 ms** against 3.22–3.33 ms for the Slice 3B binary in the same session (see "Slice 4 re-measurement" below). Slice 3A: median 2.24 ms (p95 2.34, p99 2.59; n = 1000 iteration-matched pairs). |
+| **B1 — shim end-to-end overhead** | Wall time of spawning a shimmed command until it exits, minus the same command spawned directly (`E2 − E0`), human path, warm | **≤ F + 0.5 ms**, where **F** is the exec floor measured in the same run (`EF − E0`: a minimal C program that only `execv`s the same real binary). Until 2026-10-20 the requirement was < 0.2 ms; see "B1 amendment" below | **NOT MET** (P4, 2026-10-21, release candidate `b3248a9`): median **2.705 / 2.707 ms** in two runs against F = **1.49 / 1.50 ms**, limit ≈ 2.0 ms, so about 0.7 ms over; the P3 binary in the same alternating session: 2.699 / 2.680 ms (no regression). History: Slice 4: median **3.74–3.84 ms** against 3.22–3.33 ms for the Slice 3B binary in the same session (see "Slice 4 re-measurement" below). Slice 3A: median 2.24 ms (p95 2.34, p99 2.59; n = 1000 iteration-matched pairs). |
 | B2 — process launch | Spawning `agentdiet hook noop` minus spawning the direct command (`E1 − E0`) | none; context for B1 | median 1.12 ms (p95 1.20, p99 1.24; n = 1000) |
 | B3 — in-process routing | `shim_name` + `resolve_real` on a synthetic `PATH`, up to the `exec` call | **< 0.2 ms** (the original B1 number, now applied to what AgentDiet's code itself costs) | median 0.027 ms (p95 0.029, p99 0.030; n = 10000) |
 | **B4 — Diet Engine fast path** | Pure transform (classify, scrub, candidate, checks) of an input of up to 256 KiB, in process, warm, no I/O | < 10 ms | **NOT MET** at 256 KiB. Worst p50 **28.7 ms**: realistic Rust source through the fold path (p99 29.6 ms; the tree-sitter parse alone is ~22 ms, so a large valid file cannot meet the budget while it is folded). Also over 10 ms at p50: adversarial "secrets everywhere" `shell` 13.7 ms and `read` 12.9 ms (the scrubber takes 6.2 ms on clean text of this size), "deep (60) JSON, large leaf" `json` 12.7 ms (TOON's 10-pass bound) and "diagnostic on every line" `read` 10.0 ms. Realistic 256 KiB JSON → TOON: p50 9.8 ms, p99 over 10 ms in every run (10.2–36.2 ms). Other realistic 256 KiB rows: cargo 7.7 ms, pytest 6.7 ms, npm 5.4 ms. The hostile "numbers and punctuation" `read` was p50 **247 ms** until the bounded parse (§3, Signature folding) and is now 8.4 ms (p99 8.8 ms); "multibyte text" `read` is 8.5 ms. Several rows show isolated p99 spikes of 26–37 ms (n = 60) that follow no one input. Larger inputs (not judged): 1 MiB of Rust is now left unchanged after ~57 ms where it used to fold in ~117 ms, because it exceeds the 30 ms parse deadline. Measured at `10d1ad6` plus the bounded-parse change, release, n = 60 per row. |
@@ -1568,6 +1568,22 @@ than either (platform binaries are validated differently). So B1 is now judged a
 the 0.2 ms number moves to B3, which is what AgentDiet's code alone controls. A miss stays a miss: what
 is above F + 0.5 ms is reported as NOT MET, and closing it is a design question (a smaller image, or a
 dedicated shim executable, which `CLAUDE.md`'s single-binary rule does not allow today).
+
+**P4 re-measurement** (2026-10-21, Apple M1, Darwin 27, no containers running, n = 1000 interleaved per
+run, `AGENTDIET_PERF_BIN` alternating between the release candidate `b3248a9` and the P3 binary):
+
+| Run | Binary | B1 median | F | F + 0.5 | Verdict | B3 median |
+|---|---|---|---|---|---|---|
+| 1 | RC | 2.705 ms | 1.493 ms | 1.993 ms | NOT MET | 0.0271 ms (MET) |
+| 1 | P3 | 2.699 ms | 1.505 ms | 2.005 ms | NOT MET | 0.0271 ms |
+| 2 | RC | 2.707 ms | 1.502 ms | 2.002 ms | NOT MET | 0.0270 ms (MET) |
+| 2 | P3 | 2.680 ms | 1.495 ms | 1.995 ms | NOT MET | 0.0271 ms |
+
+What is above the floor (~1.2 ms) is AgentDiet's own process image: launching the 10 MB binary costs
++1.21 ms over a 17 KB C program that only exits, of which a minimal Rust binary accounts for +0.38 ms.
+P4 did not win it back: routing is already 0.03 ms, and the remaining cost scales with the image,
+which only a separate small shim executable would avoid (not allowed by `CLAUDE.md`'s single-binary
+rule). B1 stays a recorded miss; the decision (accept, or allow a dedicated shim binary) is the owner's.
 
 Notes:
 
