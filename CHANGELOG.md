@@ -84,5 +84,6 @@ Everything since the `v0.1.0` tag. Windows is **under test, not yet supported** 
 
 First tagged version (`e9daa72`): hook router and PPID-aware shims, the Diet Engine (shell compression,
 TOON, signature folding), the secret scrubber, the Vault and project memory, the MCP server
-(`diet_exec`, `diet_search`, `diet_inspect`), `scan`, `top`, `stats`, `init` and `eject`. Built from
-source only; no release binaries were published.
+(`diet_exec`, `diet_search`, `diet_inspect`), `scan`, `top`, `stats`, `init` and `eject`. Its GitHub release (published 2026-10-17) carries a single
+asset: a bare macOS arm64 `agentdiet` binary, with no archive, checksums or attestation; other platforms
+built from source.
