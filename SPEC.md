@@ -962,10 +962,28 @@ label (the agent's session id, `pid:<n>` or `agent:unknown`). It never holds out
   `-shm` with `O_NOFOLLOW` itself, so a symlink planted at any of them (a cloned repository can carry
   one) is never written through; indexing fails instead and the engine's note says so.
   **What remains** (documented, not prevented): a double swap between those two `stat` calls, which
-  needs write access to the `.agentdiet/` directory, that is, the user's own privileges; a
-  pre-existing `.agentdiet/` (or one that is a symlink to a directory) is used as it is, its mode
-  not tightened; on Windows the VFS has no `HAS_MOVED` and `require_same_file` checks only that the
-  path is a regular file (§10). Error values never contain row text.
+  needs write access to the `.agentdiet/` directory, that is, the user's own privileges; on Windows
+  the VFS has no `HAS_MOVED` and `require_same_file` checks only that the path is a regular file
+  (§10). Error values never contain row text.
+- **Private roots** (P4.5, owner's decisions of 2026-10-21). Everything AgentDiet writes lives under
+  one of two roots: `~/.agentdiet` (state, Vault, sessions, backups) and the workspace's
+  `.agentdiet/` (memory.db). Before anything is created under a root, the root itself is checked:
+  - missing: created `0700`, as before;
+  - **the project root is a symlink: refused.** A cloned repository can carry `.agentdiet` as a link
+    to anywhere in the user's files; project memory and the run log are then off in that workspace
+    (the engine's note says the memory index failed), and `doctor` says why and how to fix it
+    (replace the link with a directory, or set `AGENTDIET_WORKSPACE`);
+  - **the home root is a symlink:** followed when its target is a directory owned by the user
+    (dotfile managers, another disk), refused otherwise;
+  - not a directory, or **owned by another user: refused**;
+  - owned by the user with group or other permission bits (`0755` from a checkout or a manual
+    `mkdir`): **tightened to `0700`** by the first write. `status` and `doctor` never write: they
+    report it ("tightened to 0700 on the next write") and, for the project root, do not open
+    memory.db until then.
+  Directories and files *inside* a root keep the rules above (created private, never widened).
+  Installations made by earlier versions are unaffected: every root they created is a `0700`
+  directory owned by the user. On Windows only the symlink rule applies (the profile's ACL is the
+  protection, §10).
 - **`state.json` updates are serialised.** Every read-modify-write holds an exclusive advisory lock
   (`flock` on the private sibling file `state.json.lock`, created `0600`, never deleted) from the read
   to the rename. An explicit `pause`/`resume`/mode change waits at most **2 s** and then fails with a

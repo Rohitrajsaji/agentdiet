@@ -152,6 +152,91 @@ pub fn create_private_dir_all(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Which of AgentDiet's two private roots a directory is (SPEC §3 Tier 3 "Private roots").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Root {
+    /// `~/.agentdiet`: may be a symlink to a directory the user owns.
+    Home,
+    /// A workspace's `.agentdiet/`: never a symlink (a cloned repository can carry one).
+    Project,
+}
+
+/// What [`inspect_root`] found. Never changes anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RootState {
+    Missing,
+    Ok,
+    /// Owned by the user, but with group or other permission bits (`mode`); writers tighten it.
+    Loose {
+        mode: u32,
+    },
+    /// Unusable, for this reason (user-facing, after the path).
+    Refused(&'static str),
+}
+
+/// Check a private root without changing it.
+pub fn inspect_root(path: &Path, kind: Root) -> io::Result<RootState> {
+    let entry = match fs::symlink_metadata(path) {
+        Ok(entry) => entry,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(RootState::Missing),
+        Err(e) => return Err(e),
+    };
+    let meta = if entry.file_type().is_symlink() {
+        if kind == Root::Project {
+            return Ok(RootState::Refused(
+                "is a symlink, which a cloned repository could point anywhere",
+            ));
+        }
+        match fs::metadata(path) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Ok(RootState::Refused("is a symlink to nothing"));
+            }
+            Err(e) => return Err(e),
+        }
+    } else {
+        entry
+    };
+    if !meta.is_dir() {
+        return Ok(RootState::Refused("is not a directory"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: `geteuid` has no preconditions and cannot fail.
+        if meta.uid() != unsafe { libc::geteuid() } {
+            return Ok(RootState::Refused("is owned by another user"));
+        }
+        let mode = meta.mode() & 0o777;
+        if mode & 0o077 != 0 {
+            return Ok(RootState::Loose { mode });
+        }
+    }
+    Ok(RootState::Ok)
+}
+
+/// Make `path` a usable private root before anything is created in it: create it `0700`, tighten a
+/// loose one of the user's to `0700`, or fail with the reason it is refused.
+pub fn ensure_root(path: &Path, kind: Root) -> io::Result<()> {
+    match inspect_root(path, kind)? {
+        RootState::Missing => create_private_dir_all(path),
+        RootState::Ok => Ok(()),
+        RootState::Loose { .. } => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                // Follows a home-root link to its (checked, user-owned) target.
+                fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+            }
+            Ok(())
+        }
+        RootState::Refused(why) => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{} {why}", path.display()),
+        )),
+    }
+}
+
 /// Create the single directory `path` as `0700`; `AlreadyExists` if it is there.
 pub fn create_private_dir(path: &Path) -> io::Result<()> {
     private_dir_builder().create(path)
@@ -417,6 +502,81 @@ mod tests {
     fn mode(path: &Path) -> u32 {
         use std::os::unix::fs::PermissionsExt;
         fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn roots_are_created_tightened_followed_or_refused_as_specified() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let dir = tempfile::TempDir::new().unwrap();
+        let set = |p: &Path, m: u32| fs::set_permissions(p, fs::Permissions::from_mode(m)).unwrap();
+
+        // Missing: created 0700.
+        let new = dir.path().join("new/.agentdiet");
+        assert_eq!(
+            inspect_root(&new, Root::Project).unwrap(),
+            RootState::Missing
+        );
+        ensure_root(&new, Root::Project).unwrap();
+        assert_eq!(mode(&new), 0o700);
+        assert_eq!(inspect_root(&new, Root::Project).unwrap(), RootState::Ok);
+
+        // The user's own, loose: reported, then tightened by a writer, for either kind.
+        for kind in [Root::Home, Root::Project] {
+            let loose = dir.path().join(format!("loose-{kind:?}"));
+            fs::create_dir(&loose).unwrap();
+            set(&loose, 0o755);
+            assert_eq!(
+                inspect_root(&loose, kind).unwrap(),
+                RootState::Loose { mode: 0o755 }
+            );
+            assert_eq!(mode(&loose), 0o755, "inspecting changes nothing");
+            ensure_root(&loose, kind).unwrap();
+            assert_eq!(mode(&loose), 0o700);
+        }
+
+        // A link: refused for a project, followed (and its target tightened) for home.
+        let target = dir.path().join("elsewhere");
+        fs::create_dir(&target).unwrap();
+        set(&target, 0o750);
+        let link = dir.path().join("linked");
+        symlink(&target, &link).unwrap();
+        assert!(matches!(
+            inspect_root(&link, Root::Project).unwrap(),
+            RootState::Refused(_)
+        ));
+        let err = ensure_root(&link, Root::Project).unwrap_err();
+        assert!(err.to_string().contains("is a symlink"), "{err}");
+        assert_eq!(mode(&target), 0o750, "a refused root is not touched");
+        ensure_root(&link, Root::Home).unwrap();
+        assert_eq!(mode(&target), 0o700);
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+
+        // A dangling link and a plain file are refused for either kind.
+        let dangling = dir.path().join("dangling");
+        symlink(dir.path().join("nothing"), &dangling).unwrap();
+        let file = dir.path().join("file");
+        fs::write(&file, "x").unwrap();
+        for (path, why) in [(&dangling, "to nothing"), (&file, "not a directory")] {
+            match inspect_root(path, Root::Home).unwrap() {
+                RootState::Refused(r) => assert!(r.contains(why), "{r}"),
+                other => panic!("{other:?}"),
+            }
+        }
+        // Another user's directory cannot be made without privileges; `/` (root's) stands in for
+        // one unless the tests run as root.
+        // SAFETY: `geteuid` has no preconditions.
+        if unsafe { libc::geteuid() } != 0 {
+            assert_eq!(
+                inspect_root(Path::new("/"), Root::Home).unwrap(),
+                RootState::Refused("is owned by another user")
+            );
+        }
     }
 
     #[cfg(unix)]

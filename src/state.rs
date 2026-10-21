@@ -186,9 +186,7 @@ pub fn save(paths: &Paths, state: &State) -> Result<(), StateError> {
     json.push('\n');
     let path = paths.state_file();
     let write = || {
-        if let Some(parent) = path.parent() {
-            fsutil::create_private_dir_all(parent)?;
-        }
+        fsutil::ensure_root(&paths.agentdiet_home, fsutil::Root::Home)?;
         fsutil::atomic_write(&path, json.as_bytes())
     };
     write().map_err(|source| StateError::Write {
@@ -212,7 +210,7 @@ pub fn update_within(
         path: lock_path.display().to_string(),
         source,
     };
-    fsutil::create_private_dir_all(&paths.agentdiet_home).map_err(lock_err)?;
+    fsutil::ensure_root(&paths.agentdiet_home, fsutil::Root::Home).map_err(lock_err)?;
     let _guard = fsutil::lock_exclusive(&lock_path, timeout).map_err(|e| match e {
         LockError::Timeout { waited, .. } => StateError::Busy(waited),
         other => StateError::Lock(other.to_string()),

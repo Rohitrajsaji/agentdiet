@@ -448,9 +448,46 @@ fn describe_state(state: &State) -> String {
     format!("{status}, {} mode", state.mode.label())
 }
 
+/// A private root's problem as a doctor row, or `None` when it is usable as it is (SPEC §3 Tier 3
+/// "Private roots"). Never changes the directory: a loose one is reported, not tightened.
+fn root_check(paths: &Paths, label: &str, dir: &Path, kind: fsutil::Root) -> Option<Check> {
+    let shown = tilde(&paths.home, dir);
+    match fsutil::inspect_root(dir, kind) {
+        Ok(fsutil::RootState::Missing | fsutil::RootState::Ok) => None,
+        Ok(fsutil::RootState::Loose { mode }) => Some(Check::new(
+            label,
+            Level::Warning,
+            "loose",
+            format!("{shown} is {mode:04o}; AgentDiet tightens it to 0700 on its next write"),
+        )),
+        Ok(fsutil::RootState::Refused(why)) => {
+            let fix = match kind {
+                fsutil::Root::Project => format!(
+                    "replace {shown} with a directory (mkdir), or set AGENTDIET_WORKSPACE to another directory"
+                ),
+                fsutil::Root::Home => {
+                    format!("make {shown} a directory you own (or a link to one)")
+                }
+            };
+            Some(Check::new(label, Level::Broken, "refused", format!("{shown} {why}")).fix(fix))
+        }
+        Err(e) => Some(Check::new(
+            label,
+            Level::Broken,
+            "broken",
+            format!("{shown} cannot be checked ({e})"),
+        )),
+    }
+}
+
 fn memory_check(paths: &Paths) -> (Check, Activity) {
     let db = paths.memory_db();
     let shown = tilde(&paths.home, &db);
+    if let Some(root) = db.parent()
+        && let Some(check) = root_check(paths, "Memory", root, fsutil::Root::Project)
+    {
+        return (check, Activity::default());
+    }
     if !db.is_file() {
         let check = Check::new(
             "Memory",
@@ -512,6 +549,9 @@ fn memory_check(paths: &Paths) -> (Check, Activity) {
 }
 
 fn vault_check(paths: &Paths) -> Check {
+    if let Some(check) = root_check(paths, "Vault", &paths.agentdiet_home, fsutil::Root::Home) {
+        return check;
+    }
     let cas = Cas::new(paths.cas_dir()).lock_timeout(std::time::Duration::from_millis(500));
     match cas.stats() {
         Ok(stats) => Check::new("Vault", Level::Ok, "ok", crate::words::vault(&stats)),

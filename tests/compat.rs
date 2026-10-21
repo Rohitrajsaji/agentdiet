@@ -15,8 +15,15 @@ use serde_json::{Value, json};
 const BIN: &str = env!("CARGO_BIN_EXE_agentdiet");
 const ID: &str = "8b744be8";
 
+/// Copy the fixture. Git keeps no directory modes, so each directory gets the `0700` that v0.1.0
+/// created it with (SPEC §3 Tier 3 "Private roots"; a loose one is covered in tests/hardening.rs).
 fn copy_tree(from: &Path, to: &Path) {
     fs::create_dir_all(to).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(to, fs::Permissions::from_mode(0o700)).unwrap();
+    }
     for entry in fs::read_dir(from).unwrap() {
         let entry = entry.unwrap();
         let dest = to.join(entry.file_name());

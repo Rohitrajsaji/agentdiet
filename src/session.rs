@@ -107,6 +107,7 @@ pub fn update(
     f: impl FnOnce(&mut Sidecar),
 ) -> Result<Sidecar, SessionError> {
     let dir = paths.sessions_dir();
+    fsutil::ensure_root(&paths.agentdiet_home, fsutil::Root::Home)?;
     fsutil::create_private_dir_all(&dir)?;
     let _guard = fsutil::lock_exclusive(&dir.join(".lock"), LOCK_TIMEOUT)?;
     let before = load(paths, key);

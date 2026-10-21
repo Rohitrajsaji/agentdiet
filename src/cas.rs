@@ -220,6 +220,10 @@ impl Cas {
 
     /// Take the vault lock, creating the (private) directory first.
     fn lock(&self) -> Result<fsutil::LockGuard, CasError> {
+        // The Vault lives in `~/.agentdiet` (SPEC §3 Tier 3 "Private roots").
+        if let Some(root) = self.dir.parent().filter(|p| !p.as_os_str().is_empty()) {
+            fsutil::ensure_root(root, fsutil::Root::Home)?;
+        }
         fsutil::create_private_dir_all(&self.dir)?;
         self.acquire()
     }

@@ -301,7 +301,8 @@ impl MemoryDb {
             path.file_name(),
         ) {
             (Some(parent), Some(name)) => {
-                fsutil::create_private_dir_all(parent).map_err(io_err)?;
+                // The workspace's `.agentdiet/` (SPEC §3 Tier 3 "Private roots").
+                fsutil::ensure_root(parent, fsutil::Root::Project).map_err(io_err)?;
                 std::fs::canonicalize(parent).map_err(io_err)?.join(name)
             }
             _ => path.to_path_buf(),

@@ -137,6 +137,8 @@ impl<'a> Session<'a> {
             return Ok(dir.clone());
         }
         let root = self.paths.backups_dir();
+        let home = &self.paths.agentdiet_home;
+        fsutil::ensure_root(home, fsutil::Root::Home).map_err(io_err(home))?;
         fsutil::create_private_dir_all(&root).map_err(io_err(&root))?;
         let stamp = self.manifest.created_ms;
         let mut attempt = 0u32;

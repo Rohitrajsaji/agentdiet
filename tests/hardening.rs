@@ -352,3 +352,135 @@ fn valid_codex_configs_stay_valid_and_round_trip_through_eject() {
         assert_eq!(env.read(&codex_path(&env)), original);
     }
 }
+
+// ---- private roots (SPEC §3 Tier 3 "Private roots") --------------------------------------------
+
+/// A trimmed `diet_exec` through the MCP server, the way an assistant runs one; its text.
+fn trimmed_mcp_call(env: &Env) -> String {
+    use std::io::Write as _;
+    let mut child = Command::new(BIN)
+        .arg("mcp")
+        .env("HOME", &env.paths.home)
+        .env("USERPROFILE", &env.paths.home)
+        .env_remove("AGENTDIET_WORKSPACE")
+        .current_dir(&env.paths.project_root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let session = concat!(
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"diet_exec","arguments":{"command":["seq","1","4000"]}}}"#,
+        "\n"
+    );
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(session.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let last: serde_json::Value =
+        serde_json::from_str(text(&out.stdout).lines().last().unwrap()).unwrap();
+    let shown = last["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(shown.contains("🥗 Diet: "), "still trimmed: {shown}");
+    shown
+}
+
+fn doctor_check(env: &Env, name: &str) -> serde_json::Value {
+    let out = agentdiet(env, "022", &["doctor", "--json"]);
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["check"] == name)
+        .unwrap()
+        .clone()
+}
+
+#[test]
+fn a_symlinked_project_agentdiet_is_refused_and_nothing_is_written_through_it() {
+    let env = Env::empty();
+    fs::create_dir_all(env.paths.project_root.join(".git")).unwrap();
+    // What a cloned repository can ship: `.agentdiet` pointing at another of the user's directories.
+    let elsewhere = env.dir.path().join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, env.paths.project_root.join(".agentdiet")).unwrap();
+
+    trimmed_mcp_call(&env); // fails open: the output is trimmed and in the Vault
+    assert_eq!(
+        fs::read_dir(&elsewhere).unwrap().count(),
+        0,
+        "nothing written through the link"
+    );
+    let memory = doctor_check(&env, "memory");
+    assert_eq!(memory["level"], "broken", "{memory}");
+    assert!(
+        memory["detail"].as_str().unwrap().contains("is a symlink"),
+        "{memory}"
+    );
+    assert!(
+        memory["fix"]
+            .as_str()
+            .unwrap()
+            .contains("AGENTDIET_WORKSPACE"),
+        "{memory}"
+    );
+}
+
+#[test]
+fn a_loose_project_agentdiet_is_reported_then_tightened_by_the_first_write() {
+    let env = Env::empty();
+    fs::create_dir_all(env.paths.project_root.join(".git")).unwrap();
+    let root = env.paths.project_root.join(".agentdiet");
+    fs::create_dir_all(&root).unwrap();
+    set_mode(&root, 0o755); // as a checkout or a manual mkdir leaves it
+
+    let memory = doctor_check(&env, "memory");
+    assert_eq!(memory["level"], "warning", "{memory}");
+    assert!(
+        memory["detail"].as_str().unwrap().contains("0755"),
+        "{memory}"
+    );
+    assert_eq!(mode(&root), 0o755, "doctor never writes");
+
+    trimmed_mcp_call(&env);
+    assert_eq!(mode(&root), 0o700);
+    assert!(root.join("memory.db").is_file());
+    assert_eq!(doctor_check(&env, "memory")["level"], "ok");
+}
+
+#[test]
+fn a_home_agentdiet_linked_to_the_users_own_directory_is_followed() {
+    let env = Env::empty();
+    let target = env.dir.path().join("dotfiles/agentdiet");
+    fs::create_dir_all(&target).unwrap();
+    set_mode(&target, 0o700);
+    fs::create_dir_all(&env.paths.home).unwrap();
+    std::os::unix::fs::symlink(&target, &env.paths.agentdiet_home).unwrap();
+
+    assert_ok(&agentdiet(&env, "022", &["pause"]));
+    assert!(
+        target.join("state.json").is_file(),
+        "state lives in the link's target"
+    );
+    assert_ok(&agentdiet(&env, "022", &["resume"]));
+    trimmed_mcp_call(&env);
+    assert!(target.join("cas").is_dir(), "and the Vault");
+    assert_eq!(doctor_check(&env, "vault")["level"], "ok");
+
+    // A link to nothing is refused, and doctor says how to fix it.
+    fs::remove_file(&env.paths.agentdiet_home).unwrap();
+    std::os::unix::fs::symlink(env.dir.path().join("missing"), &env.paths.agentdiet_home).unwrap();
+    assert!(!agentdiet(&env, "022", &["pause"]).status.success());
+    let vault = doctor_check(&env, "vault");
+    assert_eq!(vault["level"], "broken", "{vault}");
+}
