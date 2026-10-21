@@ -20,11 +20,21 @@ Code, Cursor, Windsurf, Gemini CLI, GitHub Copilot in VS Code and Codex.
 
 ## Quick start
 
-**1. Install** the binary somewhere stable (assistant configs point at its full path):
+**1. Install.** On macOS or Linux, the install script downloads the release for your machine, checks
+its SHA-256 checksum, and puts `agentdiet` in `~/.local/bin` (it never edits your shell files):
 
 ```sh
-cargo install --path . --locked        # from a checkout; or copy target/release/agentdiet onto your PATH
+curl -fsSL https://raw.githubusercontent.com/Rohitrajsaji/agentdiet/main/scripts/install.sh | sh
 ```
+
+Or build it yourself (Rust 1.90 or newer and a C compiler):
+
+```sh
+cargo install --path . --locked        # from a checkout of this repository
+```
+
+Assistant configs point at the binary's full path, so install it somewhere it will stay. See
+[Installing, upgrading and removing](#installing-upgrading-and-removing) for the details.
 
 **2. Connect your assistants.** In a terminal, `agentdiet init` shows a checklist of the assistants it
 finds; or name them:
@@ -282,11 +292,44 @@ tokens), but secrets are still removed.
 
 `SPEC.md` is the authoritative description of the behaviour.
 
+## Installing, upgrading and removing
+
+| Platform | Status |
+|---|---|
+| macOS (Apple silicon, Intel) | supported |
+| Linux x86_64 and arm64 (any distribution: the release binaries are fully static) | supported |
+| Windows x86_64 | supported **without the shims** (hooks, the MCP server and every command work); not yet run on real Windows, only under Wine; see `SPEC.md` §10 |
+
+**Release archives** (`agentdiet-<version>-<target>.tar.gz`, `.zip` for Windows) contain the binary,
+the licence and these documents; `SHA256SUMS` lists every archive's checksum, and shell completions come
+as `agentdiet-<version>-completions.tar.gz`. To install by hand: download the archive for your platform
+and `SHA256SUMS`, check it (`shasum -a 256 -c SHA256SUMS --ignore-missing`, or `sha256sum -c`), unpack
+it, and put `agentdiet` somewhere on your `PATH`. On Windows (the install script is for macOS and
+Linux): check the `.zip` with `Get-FileHash agentdiet-<version>-x86_64-pc-windows-msvc.zip` against
+`SHA256SUMS`, unpack it, put `agentdiet.exe` in a directory on your `PATH`, then `agentdiet init`
+(it skips the shims). Recovery commands work as printed in PowerShell, Git Bash and `cmd.exe`.
+
+**Install script settings:** `AGENTDIET_VERSION=0.2.0` for a specific version, `AGENTDIET_INSTALL_DIR`
+for another directory.
+
+**Upgrading:** run the install script again (or replace the binary at the same path). Your assistants
+already point at that path, so nothing else is needed; `agentdiet doctor` confirms it. If you move the
+binary instead, `doctor` names the missing path and `agentdiet init --only <assistants>` fixes it. Then
+re-generate shell completions. Stored outputs, settings and project memory from older versions keep
+working.
+
+**Removing:** first `agentdiet eject` (restores every assistant's original config and removes the
+shims; add `--purge` to delete stored outputs and counters too), then delete the binary.
+
+**Compatibility:** what scripts may rely on (the `--json` outputs, exit statuses, MCP tools, the
+breadcrumb format) is listed in [`docs/VERSIONING.md`](docs/VERSIONING.md); changes are in
+[`CHANGELOG.md`](CHANGELOG.md). Security reports: [`SECURITY.md`](SECURITY.md).
+
 ## Build from source
 
 You need rustc 1.90 or newer and a C compiler.
-- *rustc:* 1.90 is the newest `rust-version` declared by a dependency (tree-sitter). Only rustc
-  1.99.1 has actually been tested.
+- *rustc:* 1.90 is the newest `rust-version` declared by a dependency (tree-sitter). The whole suite
+  has run on 1.99.1 (macOS, Linux) and on 1.90 (Linux); CI checks that 1.90 still compiles it.
 - *C compiler:* needed for the bundled SQLite and the statically linked tree-sitter grammars.
 
 ```sh
@@ -294,13 +337,17 @@ cargo build --release --locked         # → target/release/agentdiet
 scripts/check-binary-deps.sh --build   # verify the artifact links nothing beyond libSystem (macOS) / nothing (Linux musl)
 ```
 
-The intended Linux release targets are `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`,
-which give fully static binaries. These builds have not been verified for v0.1.0. They need
-`rustup target add <target>` and a musl-capable C toolchain:
+The Linux release targets are `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`, which give
+fully static binaries. They need `rustup target add <target>` and a musl-capable C toolchain (on
+Debian/Ubuntu: `musl-tools`, then `CC=musl-gcc`):
 
 ```sh
-cargo build --release --locked --target x86_64-unknown-linux-musl
+CC=musl-gcc cargo build --release --locked --target x86_64-unknown-linux-musl
 ```
+
+CI (`.github/workflows/ci.yml`) runs the checks below on macOS, Linux and Windows, the minimum Rust
+version, the musl builds and `cargo deny`; `release.yml` builds the release archives from a version tag
+as a draft. Neither has run on GitHub yet.
 
 Development loop (all three must pass):
 
