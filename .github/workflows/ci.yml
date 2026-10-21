@@ -4,11 +4,16 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # `ci/**` branches run CI without a pull request (how a change is validated before it reaches main).
+    branches: [main, "ci/**"]
   pull_request:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -23,6 +28,7 @@ jobs:
       matrix:
         os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Rust toolchain
@@ -34,11 +40,13 @@ jobs:
           case "$(uname -s)-$(uname -m)" in
             Linux-x86_64) n=linux ;; Linux-aarch64) n=linux-arm ;; Darwin-*) n=mac ;;
           esac
-          mkdir -p ~/.cargo/bin
-          curl -LsSf "https://get.nexte.st/latest/$n" | tar zxf - -C ~/.cargo/bin
-      - name: Shells for the completion tests
+          bin="${CARGO_HOME:-$HOME/.cargo}/bin" # on PATH wherever rustup put cargo
+          mkdir -p "$bin"
+          curl -LsSf "https://get.nexte.st/latest/$n" | tar zxf - -C "$bin"
+      - name: Shells for the completion and redirect tests
         if: runner.os == 'Linux'
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh
+        # dash is Ubuntu's /bin/sh already; the redirect test covers each shell that is installed.
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh mksh ksh yash busybox
       - run: cargo fmt --check
       - run: cargo check --locked --all-targets
       - run: cargo clippy --locked --all-targets -- -D warnings
@@ -54,6 +62,7 @@ jobs:
     # Windows without shims (SPEC §10). nextest is not installed here: `cargo test` also runs the doctests.
     name: test (windows-2025)
     runs-on: windows-2025
+    timeout-minutes: 60
     defaults:
       run:
         shell: bash
@@ -71,12 +80,22 @@ jobs:
           RUSTFLAGS: -C target-feature=+crt-static
         run: |
           cargo build --release --locked
-          target/release/agentdiet.exe --version
-          USERPROFILE="$(mktemp -d)" target/release/agentdiet.exe status --json
+          exe=target/release/agentdiet.exe
+          "$exe" --version
+          # A native path (RUNNER_TEMP), not an MSYS one, for the native binary.
+          scratch="$RUNNER_TEMP\agentdiet-home"
+          mkdir -p "$scratch"
+          USERPROFILE="$scratch" APPDATA="$scratch" "$exe" status --json
+          # Imported DLLs: only Windows' own; no VCRUNTIME*/MSVCP*/UCRT forwarders (SPEC §10).
+          ldd "$exe" | tee dlls.txt
+          if grep -i -E 'vcruntime|msvcp|api-ms-win-crt|ucrtbase' dlls.txt; then
+            echo "the release binary needs a C runtime DLL"; exit 1
+          fi
 
   msrv:
     name: minimum Rust (1.90)
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup toolchain install 1.90 --profile minimal && rustup default 1.90
@@ -91,6 +110,7 @@ jobs:
           - { os: ubuntu-24.04, target: x86_64-unknown-linux-musl }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Rust toolchain and musl C toolchain
@@ -113,7 +133,10 @@ jobs:
   deny:
     name: dependencies (cargo deny)
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Rust toolchain
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal && rustup default "$RUST_TOOLCHAIN"
       - run: cargo install cargo-deny --locked
       - run: cargo deny check advisories licenses sources bans

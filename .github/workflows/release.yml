@@ -1,11 +1,14 @@
-# Release: build every target from a version tag, package reproducibly, attach SHA256SUMS, and create a
-# DRAFT GitHub release. Nothing is published until a maintainer reviews the draft and presses Publish.
-# `workflow_dispatch` builds and uploads the archives as workflow artifacts only (a dry run).
+# Release: build every target from a version tag, package reproducibly, attach SHA256SUMS, attest
+# every archive (Sigstore-signed SLSA build provenance), and create a DRAFT GitHub release. Nothing is
+# published until a maintainer reviews the draft and presses Publish.
+# A push to a `ci/**` branch (or `workflow_dispatch`) is a dry run: it builds and packages every target
+# and keeps the archives as workflow artifacts for one day; it attests nothing and drafts nothing.
 name: Release
 
 on:
   push:
     tags: ["v*"]
+    branches: ["ci/**"]
   workflow_dispatch:
 
 permissions:
@@ -28,6 +31,7 @@ jobs:
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, musl: true }
           - { os: windows-2025, target: x86_64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     defaults:
       run:
         shell: bash
@@ -67,23 +71,29 @@ jobs:
           export SOURCE_DATE_EPOCH
           exe=target/${{ matrix.target }}/release/agentdiet
           [ -f "$exe.exe" ] && exe="$exe.exe"
-          python3 scripts/package.py binary ${{ matrix.target }} "$exe" dist
+          py=python3; command -v python3 > /dev/null 2>&1 || py=python # Windows runners: `python`
+          "$py" scripts/package.py binary ${{ matrix.target }} "$exe" dist
           if [ "${{ matrix.target }}" = "aarch64-apple-darwin" ]; then
-            python3 scripts/package.py completions target/${{ matrix.target }}/release/agentdiet dist
+            "$py" scripts/package.py completions target/${{ matrix.target }}/release/agentdiet dist
           fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
+          retention-days: ${{ startsWith(github.ref, 'refs/tags/v') && 7 || 1 }}
 
   draft-release:
     name: draft release
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
-      contents: write
+      contents: write # the draft release
+      id-token: write # a Sigstore signing certificate for the attestations
+      attestations: write
+      artifact-metadata: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -92,6 +102,10 @@ jobs:
           merge-multiple: true
       - name: SHA256SUMS
         run: cd dist && cat ./*.sha256 | sort -k 2 > SHA256SUMS && rm -f ./*.sha256 && cat SHA256SUMS
+      - name: Attest every archive (verify with `gh attestation verify <archive> --repo <owner>/agentdiet`)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS
       - name: Create the draft (never published by CI)
         env:
           GH_TOKEN: ${{ github.token }}
