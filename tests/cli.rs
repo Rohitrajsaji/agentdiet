@@ -35,6 +35,26 @@ fn run(env: &Env, args: &[&str]) -> Output {
     agentdiet(env).args(args).output().unwrap()
 }
 
+#[test]
+fn error_messages_never_repeat_a_secret_from_the_arguments() {
+    let env = Env::empty();
+    let key = ["AK", "IA"].concat() + &"Q7".repeat(8);
+    for args in [
+        vec!["show".to_string(), key.clone()],
+        vec!["scan".to_string(), format!("/nonexistent/{key}")],
+        // clap's usage errors quote the argument too.
+        vec!["mode".to_string(), key.clone()],
+        vec![key.clone()],
+    ] {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = run(&env, &args);
+        assert!(!out.status.success(), "{args:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("[REDACTED:"), "{args:?}: {err}");
+        assert!(!err.contains(&key[..12]), "{args:?}: {err}");
+    }
+}
+
 fn state(env: &Env) -> Value {
     serde_json::from_str(&env.read(&env.paths.state_file())).unwrap()
 }

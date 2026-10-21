@@ -501,7 +501,13 @@ wins**.
 - **P1 — Nothing unscrubbed reaches disk.** The Vault, `memory.db`, `state.json`, breadcrumbs,
   summaries and diagnostics hold only scrubbed text. This covers recorded command lines and
   arguments too (token-bearing git URLs, `curl -H "Authorization: Bearer …"`). The one exception is
-  the byte-exact config backup made by `init` (§2.2).
+  the byte-exact config backup made by `init` (§2.2). The same holds for what AgentDiet itself prints:
+  every stderr line, MCP tool error and JSON-RPC error message, and a usage error that quotes an
+  argument, is scrubbed, because each may quote the caller's own input (an ID, a path, a value).
+  Checked at every entry point with a key planted in the input and error paths forced (P4). Not
+  covered by design: the transparent shim path, which passes the real program's bytes untouched.
+  The hook, shim and MCP entry points print only a fixed note on a panic; other commands keep
+  Rust's default panic message.
 - **P2 — Never break the caller (fail open).** Any error or panic inside the engine yields the best
   safe output: the scrubbed output if scrubbing finished, otherwise the raw output (a scrubber
   failure is the one case where privacy yields to delivering the command's output). The engine only

@@ -21,6 +21,7 @@ use crate::diet::{
 };
 use crate::memory::{MemoryDb, Origin, RunKind};
 use crate::runlog;
+use crate::scrubber::scrub;
 use crate::session;
 use crate::shim::{self, NESTED_ENV};
 use crate::state::{self, Status};
@@ -95,6 +96,7 @@ pub fn serve(
 }
 
 fn error(id: Value, code: i64, message: &str) -> Value {
+    let message = scrub(message.as_bytes()).to_lossy_string();
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
@@ -111,8 +113,9 @@ fn ok_text(text: impl Into<String>) -> Value {
     tool_result(vec![text.into()], false)
 }
 
+/// A tool error. Scrubbed: it may quote the caller's own arguments (an ID, a path), SPEC P1.
 fn err_text(text: impl Into<String>) -> Value {
-    tool_result(vec![text.into()], true)
+    tool_result(vec![scrub(text.into().as_bytes()).to_lossy_string()], true)
 }
 
 /// The `tools/list` entries.

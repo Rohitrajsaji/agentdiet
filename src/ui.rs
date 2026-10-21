@@ -178,10 +178,12 @@ pub fn emit(text: &str) -> std::io::Result<()> {
     }
 }
 
-/// One line on stderr. Never fails and never panics: a closed or broken stderr is ignored, because
-/// a warning must not turn a finished command into a crash (unlike `eprintln!`).
+/// One line on stderr, scrubbed (it may quote the caller's own arguments, SPEC P1). Never fails and
+/// never panics: a closed or broken stderr is ignored, because a warning must not turn a finished
+/// command into a crash (unlike `eprintln!`).
 pub fn warn(line: &str) {
     use std::io::Write;
+    let line = crate::scrubber::scrub(line.as_bytes()).to_lossy_string();
     let mut err = std::io::stderr().lock();
     let _ = writeln!(err, "{line}");
 }

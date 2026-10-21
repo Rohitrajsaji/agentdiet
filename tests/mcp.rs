@@ -130,6 +130,19 @@ fn tools_list_advertises_the_four_tools_with_schemas() {
 }
 
 #[test]
+fn errors_that_quote_the_callers_arguments_are_scrubbed() {
+    let env = Env::empty();
+    let key = ["AK", "IA"].concat() + &"Q7".repeat(8);
+    let result = call_one(&env, "diet_inspect", json!({"id": key}));
+    assert_eq!(result["isError"], true);
+    let shown = text(&result);
+    assert!(shown.contains("[REDACTED:"), "{shown}");
+    assert!(!shown.contains(&key[..12]), "{shown}");
+    let reply = session(&env, &[call(7, &key, json!({}))]).remove(0);
+    assert!(!reply.to_string().contains(&key[..12]), "{reply}");
+}
+
+#[test]
 fn unknown_tool_is_invalid_params() {
     let env = Env::empty();
     let reply = session(&env, &[call(7, "diet_nope", json!({}))]).remove(0);

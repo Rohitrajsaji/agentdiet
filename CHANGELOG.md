@@ -50,6 +50,8 @@ Everything since the `v0.1.0` tag. Not yet published.
 - memory.db: the open now checks that SQLite itself opened the checked file (a file swapped in and
   back around SQLite's open was not detected).
 - An ID inside single quotes (`'#4f9a1b2c'`, as `cmd.exe` passes it) is accepted.
+- **Privacy:** error messages (stderr, MCP tool errors, usage errors) that quote an argument are
+  scrubbed: `agentdiet show <a key>` or a bad `diet_inspect` ID no longer repeats a secret.
 
 ### Compatibility with v0.1.0
 - Unchanged: breadcrumb and fold-marker text; every ID form v0.1.0 accepted (a quoted form was added); `scan`'s report format and exit

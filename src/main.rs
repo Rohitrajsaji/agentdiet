@@ -39,6 +39,20 @@ fn main() -> ExitCode {
     }
 }
 
+/// clap's own exit for help, versions and usage errors, except that a usage error quoting a secret
+/// (`invalid value 'AKIA…'`) is printed scrubbed and uncoloured (SPEC P1).
+fn exit_on_usage_error(e: clap::Error) -> ! {
+    if e.use_stderr() {
+        let plain = e.render().to_string();
+        let scrubbed = agentdiet::scrubber::scrub(plain.as_bytes());
+        if scrubbed.redactions() > 0 {
+            ui::warn(scrubbed.to_lossy_string().trim_end());
+            std::process::exit(e.exit_code());
+        }
+    }
+    e.exit()
+}
+
 /// The engine runs in hooks and shims, where a panic message could carry tool output: print only
 /// the fixed note (SPEC §3 Tier 2, "Panics").
 fn install_quiet_panic_hook() {
@@ -142,7 +156,7 @@ fn path_var() -> OsString {
 }
 
 fn run() -> anyhow::Result<ExitCode> {
-    let cli = Cli::parse();
+    let cli = Cli::try_parse().unwrap_or_else(|e| exit_on_usage_error(e));
     let paths = Paths::from_env()?;
 
     match cli.command {
