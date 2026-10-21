@@ -131,21 +131,37 @@ fn hook_with_no_payload_or_an_unknown_event_is_silent() {
         assert!(out.stdout.is_empty() && out.stderr.is_empty(), "{event}");
     }
 
-    for event in ["noop", "NotARealEvent"] {
-        let start = std::time::Instant::now();
+    // A real event with the same never-closed stdin, started at the same moment, is the yardstick:
+    // it must wait out the stdin timeout, so an event that does not read stdin finishes well before
+    // it whatever the machine's load (an absolute bound measured the machine, not the rule).
+    let spawn_held = |event: &str| {
         let mut child = agentdiet(&env)
             .args(["hook", event])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
             .unwrap();
-        let _held_open = child.stdin.take().unwrap(); // never written, never closed
+        let held = child.stdin.take().unwrap(); // never written, never closed
+        (child, held)
+    };
+    let start = std::time::Instant::now();
+    let (reference, _reference_stdin) = spawn_held("PostToolUse");
+    let mut finished = Vec::new();
+    for event in ["noop", "NotARealEvent"] {
+        let (child, _held_open) = spawn_held(event);
         let out = child.wait_with_output().unwrap();
         assert!(out.status.success());
         assert!(out.stdout.is_empty());
+        finished.push((event, start.elapsed()));
+    }
+    assert!(reference.wait_with_output().unwrap().status.success());
+    let reference_done = start.elapsed();
+    let timeout = agentdiet::hook::STDIN_TIMEOUT;
+    assert!(reference_done >= timeout - std::time::Duration::from_millis(100));
+    for (event, done) in finished {
         assert!(
-            start.elapsed() < std::time::Duration::from_secs(2),
-            "{event}"
+            done + timeout / 2 <= reference_done,
+            "{event} took {done:?}, the stdin-waiting reference {reference_done:?}: it waited for stdin"
         );
     }
 }

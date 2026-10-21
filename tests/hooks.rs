@@ -710,22 +710,35 @@ fn bad_payloads_fail_open_silently() {
 #[test]
 fn a_payload_that_never_arrives_cannot_hold_the_agent() {
     let env = Env::empty();
-    let start = Instant::now();
-    let mut child = agentdiet(&env)
-        .args(["hook", "PostToolUse"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let _held_open = child.stdin.take().unwrap(); // never written, never closed
+    let held = |event: &str| {
+        let start = Instant::now();
+        let mut child = agentdiet(&env)
+            .args(["hook", event])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let held_open = child.stdin.take().unwrap(); // never written, never closed
+        (start, child, held_open)
+    };
+    // `noop` exits without reading stdin: started alongside, it measures what launching costs on
+    // this machine right now, so the bound is the stdin timeout plus that cost, not a guess.
+    let (start, child, _stdin) = held("PostToolUse");
+    let (launch_start, launch, _launch_stdin) = held("noop");
+    assert!(launch.wait_with_output().unwrap().status.success());
+    let launch_cost = launch_start.elapsed();
     let out = child.wait_with_output().unwrap();
+    let waited = start.elapsed();
     assert!(out.status.success());
     assert!(out.stdout.is_empty());
-    let waited = start.elapsed();
+    let timeout = agentdiet::hook::STDIN_TIMEOUT;
     assert!(
-        waited >= agentdiet::hook::STDIN_TIMEOUT - Duration::from_millis(100)
-            && waited < agentdiet::hook::STDIN_TIMEOUT + Duration::from_secs(5),
-        "{waited:?}"
+        waited >= timeout - Duration::from_millis(100),
+        "gave up early: {waited:?}"
+    );
+    assert!(
+        waited < timeout + launch_cost * 3 + Duration::from_secs(1),
+        "waited {waited:?}: the {timeout:?} timeout plus a launch ({launch_cost:?} now)"
     );
 }
 

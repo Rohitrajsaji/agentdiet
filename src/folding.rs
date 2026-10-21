@@ -86,7 +86,8 @@ impl Language {
         }
     }
 
-    fn grammar(self) -> tree_sitter::Language {
+    /// The statically linked tree-sitter grammar.
+    pub fn grammar(self) -> tree_sitter::Language {
         match self {
             Language::Rust => tree_sitter_rust::LANGUAGE.into(),
             Language::Python => tree_sitter_python::LANGUAGE.into(),

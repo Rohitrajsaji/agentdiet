@@ -15,7 +15,7 @@ use agentdiet::diet::{
     Candidate, Disposition, Engine, Extent, FoldStyle, Input, Layout, Piece, Settings, Source,
     Transform,
 };
-use agentdiet::folding::{Language, count_lines, fold, parse};
+use agentdiet::folding::{Language, count_lines, fold};
 #[cfg(unix)]
 use agentdiet::scrubber::scrub;
 use agentdiet::state::Mode;
@@ -63,6 +63,15 @@ fn marker_re() -> Regex {
         .unwrap()
 }
 
+/// `text` as `language` when it parses without an error. Unlike `folding::parse` there is no time
+/// budget: these checks are about syntax, and a busy test machine must not turn them into failures.
+fn parse_cleanly(language: Language, text: &str) -> Option<tree_sitter::Tree> {
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&language.grammar()).ok()?;
+    let tree = parser.parse(text, None)?;
+    (!tree.root_node().has_error()).then_some(tree)
+}
+
 #[derive(Debug)]
 struct Marker {
     first: usize,
@@ -105,7 +114,8 @@ const FUNCTION_KINDS: [&str; 7] = [
 
 /// `(signature text, nested inside another function?)` for every function with a body.
 fn signatures(language: Language, text: &str) -> Vec<(String, bool)> {
-    let tree = parse(language, text).unwrap_or_else(|| panic!("does not parse cleanly:\n{text}"));
+    let tree =
+        parse_cleanly(language, text).unwrap_or_else(|| panic!("does not parse cleanly:\n{text}"));
     fn is_fn(language: Language, n: Node<'_>) -> bool {
         if language == Language::Python {
             n.kind() == "function_definition"
@@ -235,7 +245,7 @@ fn check_view(language: Language, original: &str, folded: &str) -> Vec<Marker> {
 fn candidate(name: &str, language: Language, mode: Mode) -> Option<(String, Candidate)> {
     let text = fixture(name);
     assert!(
-        parse(language, &text).is_some(),
+        parse_cleanly(language, &text).is_some(),
         "{name} must parse cleanly before folding"
     );
     let c = fold(name, Extent::Complete, text.as_bytes(), mode)?;
@@ -670,7 +680,7 @@ fn crlf_files_fold_and_keep_their_line_endings() {
             "{name}: a bare LF appeared"
         );
         assert!(folded.len() < crlf.len());
-        assert!(parse(language, &folded).is_some(), "{name}");
+        assert!(parse_cleanly(language, &folded).is_some(), "{name}");
         assert_eq!(count_lines(folded.as_bytes()), c.lines.unwrap().0);
     }
 }
@@ -716,7 +726,7 @@ fn hostile_nesting_is_handled_without_recursion_or_a_long_stall() {
         started.elapsed()
     );
     if let Some(c) = result {
-        parse(Language::Rust, &render(&c, "abcdef12")).expect("the view parses");
+        parse_cleanly(Language::Rust, &render(&c, "abcdef12")).expect("the view parses");
     }
 }
 
@@ -761,7 +771,7 @@ fn mutated_files_never_panic_and_a_fold_always_yields_a_parsable_view() {
                     let text = String::from_utf8(bytes).expect("only valid UTF-8 is folded");
                     let view = render(&c, "abcdef12");
                     assert!(
-                        parse(language, &view).is_some(),
+                        parse_cleanly(language, &view).is_some(),
                         "{name} round {round}: the view does not parse\n{view}"
                     );
                     check_view(language, &text, &view);
@@ -1089,12 +1099,16 @@ fn a_function_or_class_that_spans_the_probe_cut_is_still_folded() {
                 src.len() > 8 * 2048,
                 "{name}: the first item must span the probe's cut"
             );
-            assert!(parse(language, &src).is_some(), "{name} pad {pad} is valid");
+            assert!(
+                parse_cleanly(language, &src).is_some(),
+                "{name} pad {pad} is valid"
+            );
             let folded = fold(name, Extent::Complete, src.as_bytes(), Mode::UltraLean)
                 .unwrap_or_else(|| panic!("{name} pad {pad} was not folded"));
             let view = render(&folded, "abcdef12");
             assert!(view.len() < src.len() / 2, "{name} pad {pad}");
-            parse(language, &view).unwrap_or_else(|| panic!("{name} pad {pad}: view must parse"));
+            parse_cleanly(language, &view)
+                .unwrap_or_else(|| panic!("{name} pad {pad}: view must parse"));
         }
     }
 }
