@@ -3,10 +3,9 @@
 All notable changes to AgentDiet. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [Semantic Versioning](https://semver.org/) as described in `docs/VERSIONING.md`.
 
-## [0.2.0] - Unreleased
+## [0.2.0] - 2026-10-21
 
-Everything since the `v0.1.0` tag. Prepared, not yet tagged or published: the date is set when the
-release is tagged (docs/RELEASE_READINESS.md, "Publishing steps").
+Everything since the `v0.1.0` tag. Windows is **under test, not yet supported** (see Known issues).
 
 ### Added
 - `agentdiet status`, `doctor`, `mode`, `show last` and `disconnect` (`eject --only`).
@@ -19,8 +18,8 @@ release is tagged (docs/RELEASE_READINESS.md, "Publishing steps").
   `~/.claude/rules/agentdiet.md`. Re-run `agentdiet init` to add them to an existing setup.
 - `init` verifies what it connected ("configured", "not yet observed", "verified").
 - A Windows build without the shims (`SPEC.md` §10), **under test, not yet supported**: every command,
-  the Control Center, hooks and the MCP server build and pass the test suite under Wine; nothing has
-  run on real Windows yet.
+  the Control Center, hooks and the MCP server build, and the test suite passes on GitHub's Windows Server 2025 runner (x86_64, MSVC); interactive
+  console use and real assistant clients on Windows have not been validated.
 - Release tooling: CI for macOS, Linux and Windows, static Linux (musl) builds, reproducible archives
   with SHA-256 checksums, `scripts/install.sh`, `scripts/live-check.sh`.
 - Every release archive carries a Sigstore-signed build provenance attestation
@@ -69,7 +68,9 @@ release is tagged (docs/RELEASE_READINESS.md, "Publishing steps").
 ### Known issues
 - The shims' overhead (B1) is about 2.7 ms per command on an Apple M1, about 0.7 ms over the budget
   (the measured exec floor plus 0.5 ms, `SPEC.md` §7). The single-binary design is kept; see README.
-- Windows has not run on real Windows yet (Wine only) and has no shims.
+- Windows is under test, not yet supported: the test suite passes on GitHub's Windows Server 2025 runner (x86_64, MSVC), but Ctrl-C in the
+  Control Center and `top`, Claude Code hooks and other clients, and recovery commands in PowerShell
+  and Git Bash have not been validated on Windows. Windows has no shims.
 - B4/B5 engine timings exceed their budgets on large or adversarial inputs (durability is not traded
   for speed).
 

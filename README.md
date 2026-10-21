@@ -298,7 +298,7 @@ tokens), but secrets are still removed.
 |---|---|
 | macOS (Apple silicon, Intel) | supported |
 | Linux x86_64 and arm64 (any distribution: the release binaries are fully static) | supported |
-| Windows x86_64 | **under test, not yet supported**: builds without the shims (the aarch64 build passes its tests under Wine); not yet run on real Windows; see `SPEC.md` §10 |
+| Windows x86_64 | **under test, not yet supported**: builds without the shims and the test suite passes on GitHub's Windows Server 2025 runner (x86_64, MSVC); interactive console use and real assistant clients not yet validated; see `SPEC.md` §10 |
 
 **Release archives** (`agentdiet-<version>-<target>.tar.gz`, `.zip` for Windows) contain the binary,
 the licence and these documents; `SHA256SUMS` lists every archive's checksum, and shell completions come
@@ -379,8 +379,9 @@ Some things are not done yet. `SPEC.md` §7–§8 has the details and the measur
 - **Live checks so far: Claude Code and Codex.** Claude Code: the hooks, the MCP tools and a shimmed
   `cargo test`; Codex: it reads the MCP server `init` writes. Gemini CLI, Cursor, Windsurf and Copilot
   are covered by automated tests of their config formats, not by live runs.
-- **Windows is under test.** It builds and its test suite passes under Wine; it has not run on real
-  Windows yet (the CI `windows` job is the first real check), and it has no shims.
+- **Windows is under test, not yet supported.** It has no shims, and the test suite passes on GitHub's Windows Server 2025 runner (x86_64, MSVC),
+  but Ctrl-C in the Control Center and `top`, real assistant clients (Claude Code hooks among them) and
+  recovery commands in PowerShell and Git Bash have not been validated on Windows.
   - The shims trim only commands that an agent runs without a terminal; a command run in an
     integrated terminal runs untouched.
 - **Failing commands** are trimmed only through the shims: Claude Code's hook cannot replace the result

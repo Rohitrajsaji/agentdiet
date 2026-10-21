@@ -1,7 +1,7 @@
 # AgentDiet — P4 release readiness
 
-Status: **v0.2.0 prepared locally; not pushed, tagged or released** (2026-10-21). Section 4 records the
-P4 release candidate; section 5 the P4.5 blocker work and what is still open. `SPEC.md` stays the source of truth for behaviour; this document records what was checked,
+Status: **v0.2.0 finalized on `main`; not yet tagged or released** (2026-10-21). Section 4 records the
+P4 release candidate; section 5 the P4.5 blocker work, the GitHub CI runs and what is still open. `SPEC.md` stays the source of truth for behaviour; this document records what was checked,
 where, and what is still open.
 
 ## 1. Audit (2026-10-20, at `0d310ed`)
@@ -476,3 +476,39 @@ environment are byte-identical (§5.1).
 
 Known issues shipped with 0.2.0: B1 (~0.7 ms over its amended budget, single binary kept), B4/B5, the
 Windows items above, live checks only for Claude Code and Codex.
+
+### 5.9 Third `ci/p4.5` run and the first CI run on `main` (2026-10-21)
+
+**`ci/p4.5` at `5d9f549`** (owner-approved push): CI run 39583452316 and release dry run 39583452298,
+every job passed.
+- windows-2025: **375 passed, 0 failed, 4 ignored**, including `junctions_are_treated_as_links`
+  (real `mklink /J` junctions: refused as a project root, followed as a home root, never opened as a
+  private file); the `+crt-static` release binary ran; it imports no C-runtime DLL.
+- The six dry-run archives (five targets plus completions) verify with `shasum -a 256 -c` and
+  `sha256sum -c`; no `.sha256` file contains a CR.
+
+**`main` fast-forwarded to `5d9f549`** (owner-approved; `5092910..5d9f549`, 30 commits, no merge
+commit). CI run 39585223486 on `main`: **every job passed**.
+
+| Job | Result |
+|---|---|
+| test (windows-2025) | 375 passed, 0 failed, 4 ignored; junction test ok; no forbidden DLL imports |
+| test (ubuntu-24.04) | 487 passed |
+| test (ubuntu-24.04-arm) | 487 passed |
+| test (macos-15) | 488 passed; release binary links only libSystem |
+| MSRV 1.90, static musl x86_64 and aarch64, cargo deny | passed |
+
+The release workflow did not run on `main` (it runs on tags and `ci/**` only); the only tag is
+`v0.1.0`.
+
+**Windows stays under test, not supported, for v0.2.0** (owner, 2026-10-21), even with the native suite
+green: interactive console behaviour (Ctrl-C in the Control Center and `top`) and native client
+integrations (Claude Code hooks, recovery commands in PowerShell and Git Bash) have not been validated.
+
+**Performance limitations shipped with v0.2.0**, unchanged (SPEC §7): B1 shim overhead about 0.7 ms over
+its amended budget (the measured exec floor + 0.5 ms), single binary kept; B4 and B5 engine timings over
+budget on large or adversarial inputs (durability is not traded for speed).
+
+**Release state:** the CHANGELOG is dated 2026-10-21. Not yet done, each needing the owner's approval:
+the `v0.2.0` tag (which runs the attestation and draft-release jobs for the first time), the draft's
+verification, and publishing.
