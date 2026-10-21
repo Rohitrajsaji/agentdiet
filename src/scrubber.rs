@@ -245,6 +245,18 @@ pub fn scrub(raw: &[u8]) -> Scrubbed {
     scrub_with(raw, true)
 }
 
+/// `text` scrubbed, then cut to at most `max_bytes` (on a character boundary), then scrubbed again.
+/// Scrubbing the whole text first means a secret straddling the cut is redacted rather than kept as
+/// a prefix too short to match; the second pass covers a match that only the cut creates.
+pub fn scrub_bounded(text: &str, max_bytes: usize) -> Scrubbed {
+    let scrubbed = scrub(text.as_bytes()).to_lossy_string();
+    let mut end = scrubbed.len().min(max_bytes);
+    while !scrubbed.is_char_boundary(end) {
+        end -= 1;
+    }
+    scrub(&scrubbed.as_bytes()[..end])
+}
+
 /// `scrub`, optionally ignoring the `needs` prefilters (tests prove they change nothing).
 fn scrub_with(raw: &[u8], prefilter: bool) -> Scrubbed {
     let mut bytes = raw.to_vec();

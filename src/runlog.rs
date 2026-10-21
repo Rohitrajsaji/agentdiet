@@ -11,7 +11,7 @@ use crate::basename;
 use crate::compress::parse_simple_command;
 use crate::diet::ExitStatus;
 use crate::memory::{self, NewRun, Origin, RunKind, RunOutcome};
-use crate::scrubber::{Scrubbed, scrub};
+use crate::scrubber::{Scrubbed, scrub, scrub_bounded};
 use crate::session::{self, Key};
 
 /// Recorded titles are cut to this many bytes (after scrubbing).
@@ -39,8 +39,8 @@ pub struct Run<'a> {
 
 /// Record `run` in the workspace's memory.db. `Err` carries a bounded, scrubbed note.
 pub fn record(paths: &Paths, run: &Run<'_>) -> Result<(), String> {
-    let family = scrub_cut(run.family, 64);
-    let title = scrub_cut(run.title, MAX_TITLE_BYTES);
+    let family = scrub_bounded(run.family, 64);
+    let title = scrub_bounded(run.title, MAX_TITLE_BYTES);
     let row = NewRun {
         origin: run.origin,
         kind: run.kind,
@@ -118,19 +118,6 @@ fn is_assignment(word: &str) -> bool {
 /// Scrub the whole text first, then cut: cutting first could leave the head of a secret that the
 /// cut made too short to be detected. Scrubbing a prefix of scrubbed text changes nothing; it only
 /// gives the type.
-fn scrub_cut(text: &str, max: usize) -> Scrubbed {
-    let scrubbed = scrub(text.as_bytes()).to_lossy_string();
-    scrub(cut(&scrubbed, max).as_bytes())
-}
-
-fn cut(text: &str, max: usize) -> &str {
-    let mut end = text.len().min(max);
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    &text[..end]
-}
-
 #[cfg(test)]
 mod tests {
     use tempfile::TempDir;
@@ -195,7 +182,7 @@ mod tests {
         // A secret straddling the cut is redacted, not cut to an undetectable head.
         let straddling = format!("{} {key}", "y".repeat(MAX_TITLE_BYTES - 10));
         assert!(
-            !scrub_cut(&straddling, MAX_TITLE_BYTES)
+            !scrub_bounded(&straddling, MAX_TITLE_BYTES)
                 .to_lossy_string()
                 .contains(&key[..10])
         );

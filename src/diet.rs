@@ -21,7 +21,8 @@ use std::time::SystemTime;
 use crate::Paths;
 use crate::cas::{Cas, CasError};
 use crate::memory::{self, MemoryDb};
-use crate::scrubber::{Scrubbed, scrub};
+use crate::runlog;
+use crate::scrubber::{Scrubbed, scrub, scrub_bounded};
 use crate::state::{self, Mode};
 
 /// Output above this many bytes is scrubbed and emitted, never transformed or stored (P3).
@@ -373,7 +374,7 @@ fn summarize(candidate: &Candidate, source: &Source, redactions: usize) -> Strin
     // The summary is composed from fixed templates and sanitized names, and goes through the
     // scrubber anyway: the rule holds for text the engine itself writes. The cut is a backstop
     // for the (impossible with those templates) case of an over-long required part.
-    scrub(truncate_chars(&summary, MAX_SUMMARY_BYTES).as_bytes()).to_lossy_string()
+    scrub_bounded(&summary, MAX_SUMMARY_BYTES).to_lossy_string()
 }
 
 /// Render a candidate with `id` (the final bytes that would be emitted).
@@ -470,7 +471,7 @@ impl Outcome {
 
 /// A diagnostic for stderr: at most [`MAX_NOTE_BYTES`] of `text`, scrubbed.
 pub fn note(text: &str) -> String {
-    scrub(truncate_chars(text, MAX_NOTE_BYTES).as_bytes()).to_lossy_string()
+    scrub_bounded(text, MAX_NOTE_BYTES).to_lossy_string()
 }
 
 // ---- the pure step ----------------------------------------------------------------------------
@@ -759,7 +760,7 @@ impl<'a> Engine<'a> {
             Source::Read { path, .. } => (memory::Kind::Read, path.clone()),
             Source::ModelJson => (memory::Kind::Command, "model-facing JSON".to_string()),
         };
-        let title = scrub(truncate_chars(&title, 240).as_bytes());
+        let title = scrub_bounded(&title, runlog::MAX_TITLE_BYTES);
         let body = scrub(summary.as_bytes());
         let indexed = MemoryDb::open(&self.paths.memory_db()).and_then(|db| {
             db.index(kind, &title, &body, Some(sha), self.session.as_ref())
@@ -793,14 +794,6 @@ impl<'a> Engine<'a> {
         }
         outcome
     }
-}
-
-fn truncate_chars(text: &str, max_bytes: usize) -> &str {
-    let mut end = text.len().min(max_bytes);
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    &text[..end]
 }
 
 #[cfg(test)]
@@ -1231,6 +1224,73 @@ mod tests {
     }
 
     // ---- replacement
+
+    #[test]
+    fn a_note_cut_through_a_secret_keeps_none_of_it() {
+        let key = aws_key();
+        let text = format!("{} {key}", "e".repeat(MAX_NOTE_BYTES - 13));
+        let shown = note(&text);
+        assert!(shown.len() <= MAX_NOTE_BYTES);
+        assert!(!shown.contains(&key[..12]), "{shown}");
+    }
+
+    #[test]
+    fn a_secret_straddling_the_title_cut_never_reaches_memory_db() {
+        // The cut falls 12 bytes into the key: those 12 bytes alone match no rule, so cutting first
+        // and scrubbing after would store them. Commands and reads both index a title.
+        let key = aws_key();
+        let x = |n: usize| "x".repeat(n);
+        let sources = [
+            // "deploy " + 220 + "=" + 12 key bytes = 240
+            Source::Shell {
+                argv: vec!["deploy".into(), format!("{}={key}", x(220))],
+                exit: ExitStatus::Code(0),
+            },
+            // "/" + 226 + "/" + 12 key bytes = 240
+            Source::Read {
+                path: format!("/{}/{key}/notes.txt", x(226)),
+                extent: Extent::Complete,
+            },
+        ];
+        for src in &sources {
+            let dir = TempDir::new().unwrap();
+            let p = paths(&dir);
+            let out = Engine::new(&p).run_with(
+                &Input {
+                    bytes: &long_text(),
+                    source: src,
+                },
+                &balanced(),
+                &scrub,
+                &keep_head,
+            );
+            assert!(matches!(out.disposition, Disposition::Replaced(_)));
+            assert!(out.note.is_none(), "{:?}", out.note);
+
+            // Read what was persisted, from the file, not through the engine.
+            let conn = rusqlite::Connection::open(p.memory_db()).unwrap();
+            let titles: Vec<String> = conn
+                .prepare("SELECT title FROM entries")
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            assert_eq!(titles.len(), 1, "{src:?}");
+            let stem = &key[..12];
+            assert!(titles[0].len() <= 240, "{src:?}");
+            assert!(!titles[0].contains(stem), "{src:?}: {}", titles[0]);
+            assert!(titles[0].contains("[REDACTED:"), "{src:?}: {}", titles[0]);
+            let indexed: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM entries_fts WHERE entries_fts MATCH ?1",
+                    [format!("\"{stem}\"")],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(indexed, 0, "{src:?}: the FTS index holds the key's stem");
+        }
+    }
 
     #[test]
     fn a_replacement_is_persisted_first_and_recoverable_byte_for_byte() {

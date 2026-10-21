@@ -824,7 +824,10 @@ lesser form):
    counts against the no-inflation check (P5).
 7. **Index summaries** into `.agentdiet/memory.db` (project-local SQLite, WAL, FTS5 + BM25) in the
    **workspace root** (below). PreCompact recovery uses this index to re-surface relevant context.
-   Index rows hold scrubbed text only (P1).
+   Index rows hold scrubbed text only (P1). Every bounded text AgentDiet writes (an entry's title —
+   the command line or the read path —, a run title, the summary, a stderr note) is scrubbed whole
+   first and only then cut to its bound, so a secret straddling the cut is redacted rather than kept
+   as a prefix too short to match; the cut text is scrubbed again. Entry titles are cut to 240 bytes.
 
 #### Workspace root
 
