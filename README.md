@@ -307,7 +307,8 @@ and `SHA256SUMS`, check it (`shasum -a 256 -c SHA256SUMS --ignore-missing`, or `
 it, and put `agentdiet` somewhere on your `PATH`. On Windows (the install script is for macOS and
 Linux): check the `.zip` with `Get-FileHash agentdiet-<version>-x86_64-pc-windows-msvc.zip` against
 `SHA256SUMS`, unpack it, put `agentdiet.exe` in a directory on your `PATH`, then `agentdiet init`
-(it skips the shims). Recovery commands work as printed in PowerShell, Git Bash and `cmd.exe`.
+(it skips the shims). The printed recovery command was checked in `cmd.exe` under Wine; PowerShell and
+Git Bash should accept it as printed (their quoting rules), but have not been run.
 
 **Install script settings:** `AGENTDIET_VERSION=0.2.0` for a specific version, `AGENTDIET_INSTALL_DIR`
 for another directory.

@@ -1647,9 +1647,9 @@ License: MIT (`LICENSE`); third-party notices in `THIRD_PARTY_NOTICES`.
 | Platform | Support | What has actually been run (see `docs/RELEASE_READINESS.md` §4) |
 |---|---|---|
 | macOS aarch64 | supported | full suite, pseudo-terminal tests, benchmarks, live client checks |
-| macOS x86_64 | supported | built by the release workflow only; not run on Intel hardware |
-| Linux aarch64 / x86_64, glibc | supported | full suite on aarch64 (Docker, Debian 12); x86_64 by CI |
-| Linux aarch64 / x86_64, static musl (the release binaries) | supported | built and run in Docker |
+| macOS x86_64 | supported | built locally from the release candidate; links only `libSystem`; not executed (no Intel hardware or Rosetta here). The release workflow has not run |
+| Linux aarch64 / x86_64, glibc | supported | full suite on aarch64 (Docker, Debian 12); x86_64 not run (the CI job is written, not yet run) |
+| Linux aarch64 / x86_64, static musl (the release binaries) | supported | built reproducibly and smoke-tested in bare Alpine containers (Docker); x86_64 under Docker's Rosetta emulation, not x86 hardware |
 | Windows x86_64 / aarch64 | **supported without shims** (P4) | not run on real Windows. aarch64 (llvm-mingw): whole suite under Wine 10 on arm64 Linux; x86_64 (mingw): built, clippy-clean, tests compiled, not run (Wine cannot run under Docker's Rosetta emulation here). Real Windows: the CI `windows` job, once it has run |
 
 **Windows (P4).** Everything but the shims: the CLI, the Control Center and `top`, `init`/`disconnect`/
@@ -1669,7 +1669,7 @@ License: MIT (`LICENSE`); third-party notices in `THIRD_PARTY_NOTICES`.
   no test could keep a run away from the real profile.)
 - **Recovery commands in `cmd.exe`.** `cmd.exe` does not treat `'` as quoting, so the breadcrumb's
   `agentdiet show '#<id>'` reaches AgentDiet with its quotes; IDs are accepted inside one pair of single
-  quotes everywhere an ID is read. PowerShell and Git Bash need nothing special. The breadcrumb text
+  quotes everywhere an ID is read (checked in `cmd.exe` under Wine). PowerShell and Git Bash treat `'…'` as quoting, so they should need nothing special; neither has been run. The breadcrumb text
   itself is unchanged on every platform.
 - **Claude Code hooks** are written as `"<exe>" hook <Event>`, which `cmd.exe` and Git Bash run as is;
   PowerShell would need a leading `&`. Which shell Claude Code uses for hooks on Windows has not been
@@ -1691,5 +1691,9 @@ License: MIT (`LICENSE`); third-party notices in `THIRD_PARTY_NOTICES`.
   single-binary rule on macOS and Linux. (Not yet checked with a DLL listing on a real build.)
 - **`diet_exec`** kills only the child it started when a call is cancelled or times out: Windows has no
   process groups, so a grandchild can outlive it.
-- **Full-screen views.** There are no SIGTERM/SIGHUP handlers on Windows; Ctrl-C reaches the view as a
-  key in raw mode, as on Unix.
+- **Full-screen views.** There are no SIGTERM/SIGHUP handlers on Windows; Ctrl-C should reach the view as
+  a key in raw mode, as on Unix (crossterm's behaviour; no Windows console has been driven yet).
+- **Not yet observed on Windows** (Wine has no real ACLs, junction semantics or console): the profile ACL
+  protection, refusal of a planted junction, and `LockFileEx` contention between processes. Each
+  follows from the code and the platform's documented behaviour; the CI `windows` job is the first
+  real check.
