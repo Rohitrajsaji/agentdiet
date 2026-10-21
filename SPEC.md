@@ -1605,6 +1605,12 @@ run, `AGENTDIET_PERF_BIN` alternating between the release candidate `b3248a9` an
 | 2 | RC | 2.707 ms | 1.502 ms | 2.002 ms | NOT MET | 0.0270 ms (MET) |
 | 2 | P3 | 2.680 ms | 1.495 ms | 1.995 ms | NOT MET | 0.0271 ms |
 
+**v0.2.0 (P4.5, 2026-10-21, `5e4edc3`)**, same method, alternating with the P4 release candidate:
+0.2.0 median **2.772 / 2.788 ms** (F = 1.570 / 1.573 ms, limit 2.070 / 2.073 ms: **NOT MET**); the P4
+candidate 2.776 / 2.789 ms in the same session. B3 0.027 ms (MET). The private-root and invoked-path
+checks are not on the shim path, and the numbers show no change. **B1 ships in v0.2.0 as a known
+miss** (CHANGELOG "Known issues"); the single-binary architecture is kept (owner, 2026-10-21).
+
 What is above the floor (~1.2 ms) is AgentDiet's own process image: launching the 10 MB binary costs
 +1.21 ms over a 17 KB C program that only exits, of which a minimal Rust binary accounts for +0.38 ms.
 P4 did not win it back: routing is already 0.03 ms, and the remaining cost scales with the image,

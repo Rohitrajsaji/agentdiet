@@ -1,7 +1,7 @@
 # AgentDiet — P4 release readiness
 
-Status: **release candidate prepared locally; not released** (2026-10-21). Section 4 records what was
-verified, where, and what is still open. `SPEC.md` stays the source of truth for behaviour; this document records what was checked,
+Status: **v0.2.0 prepared locally; not pushed, tagged or released** (2026-10-21). Section 4 records the
+P4 release candidate; section 5 the P4.5 blocker work and what is still open. `SPEC.md` stays the source of truth for behaviour; this document records what was checked,
 where, and what is still open.
 
 ## 1. Audit (2026-10-20, at `0d310ed`)
@@ -309,3 +309,74 @@ Decisions (owner, 2026-10-21):
   one owned by another user is refused.
 - Signing: **GitHub artifact attestations** (Sigstore keyless SLSA build provenance), verified with
   `gh attestation verify`.
+
+### 5.1 Results (2026-10-21, at `5e4edc3`, version 0.2.0)
+
+| # | Blocker | Result |
+|---|---|---|
+| 1 | CI never ran | **Validated locally, still never run on GitHub.** Both workflows: actionlint 1.7.12 + shellcheck clean; every action pinned to a commit SHA, each SHA checked against its tag with the GitHub API. Under act 0.2.89 (arm64, unprivileged runner user, an image adding what GitHub's runners ship): CI `test` (fmt, check, clippy, **487/487** nextest, doctests, live check), `msrv` (1.90), `musl` (aarch64: static, runs) and `deny` pass; the release job's build, dependency-policy and package steps pass. act cannot run macOS or Windows jobs, nor emulate upload-artifact v7, attestation or the draft. The macOS job's steps pass on this Mac. Two workflow bugs found by act and fixed: nextest unpacked into `~/.cargo/bin` regardless of `CARGO_HOME`; `deny` relied on the runner's default toolchain |
+| 2 | Timing tests | Fixed (`7765dc1`): folding syntax checks have no deadline; hook stdin tests compare against a reference process started alongside. Linux, all cores saturated: two full runs at HEAD 487/487 (and three at `7765dc1`). The P4 one-off Linux failure was not reproduced; the P4 "deterministic" load failure was a harness artifact (the copy dropped the fixture's `.agentdiet/`) |
+| 3 | Linux symlinked install | Fixed (`2a11e75`, SPEC §2.2). Linux, old vs new: the test records `…/Cellar/agentdiet/0.2.0/bin/agentdiet` with the old rule and fails, `…/brew/bin/agentdiet` with the new. Both 0.2.0 musl binaries record `/brew/bin/agentdiet` in bare Alpine |
+| 4 | `.agentdiet/` validation | Implemented (`341510e`, SPEC §3 Tier 3 "Private roots") per the owner's decisions; a symlinked project root was written through before (the test fails on the old code) |
+| 5 | Native Windows | Prepared, **not run**: `windows-2025` job (check, clippy, `cargo test`, `+crt-static` release build that must run, DLL import check). Wine 10 (aarch64) at HEAD: **374 passed, 0 failed**, 4 ignored; x86_64 Windows clippy clean. Windows stays "under test" in README, SPEC §10 and CHANGELOG |
+| 6 | Signing | **GitHub artifact attestations** chosen (owner) and implemented in `release.yml` (tag runs only; see 5.2). Not run |
+| 7 | B1 | Single binary kept; re-measured for 0.2.0: 2.772 / 2.788 ms vs limit ≈ 2.07 ms, **NOT MET** by ~0.7 ms, unchanged from P4; documented in SPEC §7, CHANGELOG Known issues, README |
+| 8 | Version | `0.2.0` (`5e4edc3`); CHANGELOG `[0.2.0] - Unreleased`; local artifacts below |
+
+Also verified at HEAD: macOS arm64 suite 488/488, clippy, fmt, doctests; `cargo deny` ok (duplicate-version
+warnings only); macOS release binary links only libSystem; the secret probe (a key planted in every entry
+point's input, error paths forced) finds the key only on the documented transparent shim path; each P4.5
+commit passes clippy `-D warnings` on its own.
+
+**Local 0.2.0 artifacts** (session scratch directory, not in the repo, not published):
+`agentdiet-0.2.0-{aarch64,x86_64}-apple-darwin.tar.gz`, `agentdiet-0.2.0-{aarch64,x86_64}-unknown-linux-musl.tar.gz`,
+`agentdiet-0.2.0-completions.tar.gz`, `SHA256SUMS`. macOS builds link only libSystem (arm64 smoke test OK;
+x86_64 not executed); musl builds are byte-reproducible across two build directories (`dea64b79…`,
+`8da85f4e…`), fully static, and pass the smoke test in bare Alpine (x86_64 under emulation).
+`install.sh` (macOS, `file://`): installs 0.2.0 byte-identical to the build; a tampered archive is
+refused. No Windows archive (MSVC is CI-only). **These are rehearsal artifacts: the release is the one CI
+builds and attests from the tag.**
+
+### 5.2 Signing evaluation
+
+| Option | Keys | Verification | Cost here | Verdict |
+|---|---|---|---|---|
+| **GitHub artifact attestations** (`actions/attest`, Sigstore keyless SLSA provenance) | none: a short-lived certificate bound to the workflow run's OIDC identity | `gh attestation verify <file> --repo Rohitrajsaji/agentdiet` (also offline with a downloaded bundle) | one step and three permissions on the tag-only job | **chosen** |
+| cosign `sign-blob` (keyless) | none | `cosign verify-blob` with the identity and issuer flags; bundles attached to the release | more workflow code; users need cosign and the exact identity strings | not now; possible later for users without `gh` |
+| GPG or minisign | a long-lived key to protect, rotate and publish | `gpg --verify` / `minisign -V` | key management | rejected |
+
+What an attestation proves: that a GitHub Actions run of this repository's `release.yml`, at a given
+commit and tag, produced exactly those bytes. Not that the code is safe. Pushing a tag records the
+attestations in Sigstore's **public** transparency log even while the release is still a draft.
+
+### 5.3 Remaining blockers
+
+1. **First GitHub CI run** (needs the approval below). Expect fixes in jobs act could not run: macOS
+   (x86_64 cross build in release), Windows (first native run of the suite, `ldd` DLL check), artifact
+   upload/download, and the Windows release build.
+2. **Windows on real Windows**: blocked on 1. Until the `windows` job is green, Windows stays "under
+   test"; behaviours Wine cannot show (ACLs, junction refusal, `LockFileEx` contention, console Ctrl-C)
+   remain unobserved.
+3. **Tagging v0.2.0** (a separate approval after CI is green): date the CHANGELOG, `git tag -a v0.2.0`,
+   push the tag; the workflow drafts the release and records attestations publicly; verify a downloaded
+   archive with `gh attestation verify`; then publish the draft.
+
+Not blockers: B1 (accepted known issue); Homebrew formula (template only); live checks for Gemini CLI,
+Cursor, Windsurf and Copilot (need those clients).
+
+### 5.4 Approval needed for the first GitHub CI run
+
+`main` is **24 commits ahead of `origin/main`** (P0 to P4.5); `origin` has only `main`. The repository is
+**public**. The exact action:
+
+```sh
+git push origin main:refs/heads/ci/p4.5
+```
+
+This creates the branch `ci/p4.5` on github.com/Rohitrajsaji/agentdiet and makes all 24 commits public.
+It starts `ci.yml` (Ubuntu x64, Ubuntu arm64, macOS 15, Windows 2025, MSRV, musl ×2, cargo-deny) and the
+`release.yml` **dry run** (five targets built and packaged; the archives are unsigned workflow artifacts
+kept one day, downloadable by signed-in GitHub users). It does not touch `main`, create a tag, a release,
+an attestation or a Sigstore log entry. Hosted runners are free for public repositories. After the push,
+only read-only commands follow (`gh run list`, `gh run watch`, `gh run view --log-failed`); fixes go to
+the same branch, each push approved again unless you approve repeated pushes to `ci/p4.5`.
