@@ -418,3 +418,61 @@ Fixes, local and **not pushed** (each needs approval): `0f01206` (`.gitattribute
 fixes; an `autocrlf=true` clone now passes 488/488 on macOS) and `4dbd61d` (LF checksum files, a DLL
 check that does not depend on `ldd`). Windows stays **under test, not supported** until the
 `windows-2025` job passes.
+
+### 5.6 Second GitHub CI run (2026-10-21, `ci/p4.5` at `88cad0a`, owner-approved push)
+
+CI run 39574556552 and release dry run 39574556676: **every job passed.**
+
+| Job | Result |
+|---|---|
+| test (windows-2025) | **pass**: check, clippy, `cargo test` **374 passed, 0 failed, 4 ignored** (25 test binaries); the `+crt-static` release build ran (`agentdiet 0.2.0`, `status --json` in a scratch profile); DLL check passed: imports only kernel32, user32, shell32, combase, ntdll, bcryptprimitives and an api-ms-win-core forwarder |
+| test (ubuntu-24.04), test (ubuntu-24.04-arm), test (macos-15), MSRV 1.90, musl ×2, cargo deny | **pass** |
+| release dry run, five targets | **pass**; draft job skipped as designed |
+
+SHA-256: the six dry-run archives (five targets plus completions) were downloaded, `SHA256SUMS` assembled
+as the draft job does (no CR in any `.sha256`), and verified with `shasum -a 256 -c` (macOS) and
+`sha256sum -c` (Alpine): all OK. `install.sh` installed 0.2.0 from them (macOS, `file://`).
+
+Reproducibility is per build environment: GitHub's musl binaries differ from the local Debian-built
+ones of the same source (different musl-gcc builds compile the C code differently); two builds in one
+environment are byte-identical (§5.1).
+
+### 5.7 Windows risks still open
+
+- **Junctions.** By std's source (Rust 1.99.1), a junction is a symlink to `FileType::is_symlink`, so a
+  junction at a project `.agentdiet` is refused and one at a private file path is not opened. Not yet
+  executed: `junctions_are_treated_as_links` (local commit, Windows-only; Wine cannot create junctions)
+  runs on the next windows-2025 run. Not covered: a junction *above* a private root or file (only the
+  last component is checked, on every platform, SPEC §3 Tier 3).
+- **Ctrl-C in the Control Center and `top`.** crossterm's raw mode turns off console processed input,
+  so Ctrl-C should arrive as a key; untested because CI has no interactive console. Manual check on a
+  Windows machine: run `agentdiet` in Windows Terminal (PowerShell) and in `cmd.exe`, press Ctrl-C in
+  the Control Center and in `top`; expect a clean exit, the cursor visible and the prompt usable;
+  repeat after resizing the window.
+- **Not exercised natively:** profile ACL protection (inherited, not set by AgentDiet), `LockFileEx`
+  contention between two processes, Claude Code hooks on Windows (`"<exe>" hook <Event>`, untested
+  with a real client), the `cmd.exe` recovery command (Wine only), PowerShell and Git Bash.
+
+### 5.8 v0.2.0 release checklist (each step needs the owner's approval where marked)
+
+1. [ ] Approve pushing the local junction-test commit (and this report) to `ci/p4.5`; CI green again,
+       `junctions_are_treated_as_links` passing on windows-2025. *(approval: push to `ci/p4.5`)*
+2. [ ] Decide Windows' status for 0.2.0: "under test" (default; keep the docs as they are) or
+       "supported" after (1) and the manual Ctrl-C check. *(owner decision)*
+3. [ ] Merge to `main`: fast-forward `origin/main` to the tested commit
+       (`git push origin <commit>:main`); CI runs on `main`. *(approval: push to `main`)*
+4. [ ] Date the CHANGELOG section (`## [0.2.0] - YYYY-MM-DD`), commit, push to `main`, CI green.
+       *(approval: push to `main`)*
+5. [ ] Tag and push: `git tag -a v0.2.0 -m "AgentDiet 0.2.0"` on that commit,
+       `git push origin v0.2.0`. This builds every target, checks the tag against `Cargo.toml`, records
+       Sigstore attestations (public log) and creates a **draft** release. *(approval: tag push)*
+6. [ ] On the draft: download every archive and `SHA256SUMS`; `sha256sum -c SHA256SUMS`;
+       `gh attestation verify <archive> --repo Rohitrajsaji/agentdiet` for each; smoke-test the macOS,
+       Linux and Windows archives; read the notes (first CHANGELOG section).
+7. [ ] Publish the draft. *(approval: publish)*
+8. [ ] After publishing: `curl -fsSL …/install.sh | sh` on a clean macOS and Linux machine; delete the
+       `ci/p4.5` branch if no longer needed; optionally fill and publish the Homebrew formula.
+       *(approval: anything public)*
+
+Known issues shipped with 0.2.0: B1 (~0.7 ms over its amended budget, single binary kept), B4/B5, the
+Windows items above, live checks only for Claude Code and Codex.
