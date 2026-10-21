@@ -315,7 +315,7 @@ Decisions (owner, 2026-10-21):
 | # | Blocker | Result |
 |---|---|---|
 | 1 | CI never ran | **Validated locally, still never run on GitHub.** Both workflows: actionlint 1.7.12 + shellcheck clean; every action pinned to a commit SHA, each SHA checked against its tag with the GitHub API. Under act 0.2.89 (arm64, unprivileged runner user, an image adding what GitHub's runners ship): CI `test` (fmt, check, clippy, **487/487** nextest, doctests, live check), `msrv` (1.90), `musl` (aarch64: static, runs) and `deny` pass; the release job's build, dependency-policy and package steps pass. act cannot run macOS or Windows jobs, nor emulate upload-artifact v7, attestation or the draft. The macOS job's steps pass on this Mac. Two workflow bugs found by act and fixed: nextest unpacked into `~/.cargo/bin` regardless of `CARGO_HOME`; `deny` relied on the runner's default toolchain |
-| 2 | Timing tests | Fixed (`7765dc1`): folding syntax checks have no deadline; hook stdin tests compare against a reference process started alongside. Linux, all cores saturated: two full runs at HEAD 487/487 (and three at `7765dc1`). The P4 one-off Linux failure was not reproduced; the P4 "deterministic" load failure was a harness artifact (the copy dropped the fixture's `.agentdiet/`) |
+| 2 | Timing tests | Fixed (`7765dc1`): folding syntax checks have no deadline; hook stdin tests compare against a reference process started alongside. Linux, all cores saturated: two full runs at HEAD 487/487; three earlier loaded runs at `7765dc1` passed every timing test and each failed only the compat test, a harness artifact (see below). The P4 one-off Linux failure was not reproduced; the P4 "deterministic" load failure was a harness artifact (the copy dropped the fixture's `.agentdiet/`) |
 | 3 | Linux symlinked install | Fixed (`2a11e75`, SPEC §2.2). Linux, old vs new: the test records `…/Cellar/agentdiet/0.2.0/bin/agentdiet` with the old rule and fails, `…/brew/bin/agentdiet` with the new. Both 0.2.0 musl binaries record `/brew/bin/agentdiet` in bare Alpine |
 | 4 | `.agentdiet/` validation | Implemented (`341510e`, SPEC §3 Tier 3 "Private roots") per the owner's decisions; a symlinked project root was written through before (the test fails on the old code) |
 | 5 | Native Windows | Prepared, **not run**: `windows-2025` job (check, clippy, `cargo test`, `+crt-static` release build that must run, DLL import check). Wine 10 (aarch64) at HEAD: **374 passed, 0 failed**, 4 ignored; x86_64 Windows clippy clean. Windows stays "under test" in README, SPEC §10 and CHANGELOG |
@@ -366,17 +366,24 @@ Cursor, Windsurf and Copilot (need those clients).
 
 ### 5.4 Approval needed for the first GitHub CI run
 
-`main` is **24 commits ahead of `origin/main`** (P0 to P4.5); `origin` has only `main`. The repository is
+`main` is **25 commits ahead of `origin/main`** (P0 to P4.5); `origin` has only `main`. The repository is
 **public**. The exact action:
 
 ```sh
 git push origin main:refs/heads/ci/p4.5
 ```
 
-This creates the branch `ci/p4.5` on github.com/Rohitrajsaji/agentdiet and makes all 24 commits public.
+This creates the branch `ci/p4.5` on github.com/Rohitrajsaji/agentdiet and makes all 25 commits public.
 It starts `ci.yml` (Ubuntu x64, Ubuntu arm64, macOS 15, Windows 2025, MSRV, musl ×2, cargo-deny) and the
 `release.yml` **dry run** (five targets built and packaged; the archives are unsigned workflow artifacts
 kept one day, downloadable by signed-in GitHub users). It does not touch `main`, create a tag, a release,
 an attestation or a Sigstore log entry. Hosted runners are free for public repositories. After the push,
 only read-only commands follow (`gh run list`, `gh run watch`, `gh run view --log-failed`); fixes go to
 the same branch, each push approved again unless you approve repeated pushes to `ci/p4.5`.
+
+Pre-push checks (2026-10-21): git pushes through `gh auth git-credential`, whose token has the `workflow`
+scope that pushing `.github/workflows/*` needs. A scan of every line the 25 commits add found no AWS,
+GitHub, Slack, OpenAI or private-key patterns, no e-mail address and no home path; one Anthropic-pattern
+literal is a deliberately fake 49-character test key in `tests/cli.rs` (since `0d310ed`). If GitHub push
+protection flags it anyway, the push is rejected (nothing is published) and the choice to mark it a
+false positive is the owner's.

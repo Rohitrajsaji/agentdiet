@@ -298,7 +298,7 @@ tokens), but secrets are still removed.
 |---|---|
 | macOS (Apple silicon, Intel) | supported |
 | Linux x86_64 and arm64 (any distribution: the release binaries are fully static) | supported |
-| Windows x86_64 | supported **without the shims** (hooks, the MCP server and every command work); not yet run on real Windows, only under Wine; see `SPEC.md` §10 |
+| Windows x86_64 | **under test, not yet supported**: builds without the shims (the aarch64 build passes its tests under Wine); not yet run on real Windows; see `SPEC.md` §10 |
 
 **Release archives** (`agentdiet-<version>-<target>.tar.gz`, `.zip` for Windows) contain the binary,
 the licence and these documents; `SHA256SUMS` lists every archive's checksum, and shell completions come

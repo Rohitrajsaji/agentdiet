@@ -1682,11 +1682,12 @@ License: MIT (`LICENSE`); third-party notices in `THIRD_PARTY_NOTICES`.
 | macOS x86_64 | supported | built locally from the release candidate; links only `libSystem`; not executed (no Intel hardware or Rosetta here). The release workflow has not run |
 | Linux aarch64 / x86_64, glibc | supported | full suite on aarch64 (Docker, Debian 12); x86_64 not run (the CI job is written, not yet run) |
 | Linux aarch64 / x86_64, static musl (the release binaries) | supported | built reproducibly and smoke-tested in bare Alpine containers (Docker); x86_64 under Docker's Rosetta emulation, not x86 hardware |
-| Windows x86_64 / aarch64 | **supported without shims** (P4) | not run on real Windows. aarch64 (llvm-mingw): whole suite under Wine 10 on arm64 Linux; x86_64 (mingw): built, clippy-clean, tests compiled, not run (Wine cannot run under Docker's Rosetta emulation here). Real Windows: the CI `windows` job, once it has run |
+| Windows x86_64 / aarch64 | **under test, not yet supported**: no native run yet; no shims (P4) | not run on real Windows. aarch64 (llvm-mingw): whole suite under Wine 10 on arm64 Linux; x86_64 (mingw): built, clippy-clean, tests compiled, not run (Wine cannot run under Docker's Rosetta emulation here). Real Windows: the CI `windows` job, once it has run |
 
-**Windows (P4).** Everything but the shims: the CLI, the Control Center and `top`, `init`/`disconnect`/
-`eject` for every assistant, the MCP server, Claude Code hooks, the Vault, project memory, `doctor`,
-`status`, `stats`, `scan`, `reflect` and completions.
+**Windows (P4; under test).** Built for everything but the shims: the CLI, the Control Center and `top`,
+`init`/`disconnect`/`eject` for every assistant, the MCP server, Claude Code hooks, the Vault, project
+memory, `doctor`, `status`, `stats`, `scan`, `reflect` and completions. It is **not supported** until the
+CI `windows` job has run the suite on real Windows; so far it has run only under Wine.
 
 - **Shims are not supported on Windows.** The shim's safety check (decision step 6, §3 Tier 1) compares
   open files of the shim and its parent, which Windows does not expose to another process; without it a

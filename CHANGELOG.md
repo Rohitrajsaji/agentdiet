@@ -18,8 +18,9 @@ release is tagged (docs/RELEASE_READINESS.md, "Publishing steps").
 - Claude Code: a `PostToolUseFailure` hook (failed tool calls), and a one-line `EXPERIENCE.md` pointer in
   `~/.claude/rules/agentdiet.md`. Re-run `agentdiet init` to add them to an existing setup.
 - `init` verifies what it connected ("configured", "not yet observed", "verified").
-- Windows support without the shims (`SPEC.md` §10): every command, the Control Center, hooks and the
-  MCP server. Tested under Wine only so far.
+- A Windows build without the shims (`SPEC.md` §10), **under test, not yet supported**: every command,
+  the Control Center, hooks and the MCP server build and pass the test suite under Wine; nothing has
+  run on real Windows yet.
 - Release tooling: CI for macOS, Linux and Windows, static Linux (musl) builds, reproducible archives
   with SHA-256 checksums, `scripts/install.sh`, `scripts/live-check.sh`.
 - Every release archive carries a Sigstore-signed build provenance attestation
