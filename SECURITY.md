@@ -43,4 +43,16 @@ One static binary; dependencies come from crates.io only and are checked in CI w
 (known vulnerabilities, licences, sources). Release archives are built by CI from a tag with
 `--locked`, are reproducible, and come with SHA-256 checksums (`SHA256SUMS`); `scripts/install.sh`
 verifies the checksum before installing. The checksums come from the same release page as the archives,
-so they prove the download is intact, not who built it: the archives are not signed yet.
+so on their own they prove the download is intact, not who built it.
+
+From v0.2.0 every archive also carries a **build provenance attestation**: the release workflow asks
+GitHub for a short-lived Sigstore certificate (keyless: there is no signing key to leak) and signs, for
+each archive's SHA-256, a SLSA statement of which repository, workflow, commit and tag built it. The
+signature is recorded in Sigstore's public transparency log. To check an archive you downloaded:
+
+```sh
+gh attestation verify agentdiet-0.2.0-aarch64-apple-darwin.tar.gz --repo Rohitrajsaji/agentdiet
+```
+
+A pass means GitHub Actions in this repository built exactly those bytes; it does not vouch for the
+code itself.

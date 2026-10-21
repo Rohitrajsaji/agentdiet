@@ -310,6 +310,9 @@ Linux): check the `.zip` with `Get-FileHash agentdiet-<version>-x86_64-pc-window
 (it skips the shims). The printed recovery command was checked in `cmd.exe` under Wine; PowerShell and
 Git Bash should accept it as printed (their quoting rules), but have not been run.
 
+**Verifying a download** (v0.2.0 and later): besides `SHA256SUMS`, each archive has a signed build
+provenance attestation (`SECURITY.md`): `gh attestation verify <archive> --repo Rohitrajsaji/agentdiet`.
+
 **Install script settings:** `AGENTDIET_VERSION=0.2.0` for a specific version, `AGENTDIET_INSTALL_DIR`
 for another directory.
 
@@ -363,16 +366,21 @@ The benchmarks are opt-in: `cargo test --release --test perf -- --ignored --noca
 
 ## Status and known limits
 
-This is v0.1.0, and some things are not done yet. `SPEC.md` §7–§8 has the details and the measurements.
+Some things are not done yet. `SPEC.md` §7–§8 has the details and the measurements.
 
 - **Performance budgets are not met yet.** All three were measured on an Apple M1:
-  - The shims add about 2.7–3.9 ms per command (it varies by session) against a < 0.2 ms budget; this
-    needs a shim redesign.
+  - The shims add about 2.7 ms per command. Any separate program on `PATH` that only re-executes the
+    real one already costs about 1.5 ms there (the exec floor); the budget allows 0.5 ms above that,
+    and AgentDiet is about 0.7 ms over it, the cost of launching its 10 MB single binary. Closing it
+    would take a separate small shim program, which the single-binary design rules out for now.
   - The engine's pure transform is up to about 29 ms on 256 KiB inputs, against < 10 ms.
   - A full engine run on 64 KiB, including the durable Vault write, takes about 22–26 ms. Most of
     that is macOS `F_FULLFSYNC`, and durability is never traded for speed.
-- **Live checks so far: Claude Code only.** That covers the hooks, the MCP tools, and a shimmed
-  `cargo test`. The other assistants get the MCP server but no hooks, and have not been checked live.
+- **Live checks so far: Claude Code and Codex.** Claude Code: the hooks, the MCP tools and a shimmed
+  `cargo test`; Codex: it reads the MCP server `init` writes. Gemini CLI, Cursor, Windsurf and Copilot
+  are covered by automated tests of their config formats, not by live runs.
+- **Windows is under test.** It builds and its test suite passes under Wine; it has not run on real
+  Windows yet (the CI `windows` job is the first real check), and it has no shims.
   - The shims trim only commands that an agent runs without a terminal; a command run in an
     integrated terminal runs untouched.
 - **Failing commands** are trimmed only through the shims: Claude Code's hook cannot replace the result

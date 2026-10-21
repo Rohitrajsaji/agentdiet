@@ -3,9 +3,10 @@
 All notable changes to AgentDiet. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [Semantic Versioning](https://semver.org/) as described in `docs/VERSIONING.md`.
 
-## [Unreleased]
+## [0.2.0] - Unreleased
 
-Everything since the `v0.1.0` tag. Not yet published.
+Everything since the `v0.1.0` tag. Prepared, not yet tagged or published: the date is set when the
+release is tagged (docs/RELEASE_READINESS.md, "Publishing steps").
 
 ### Added
 - `agentdiet status`, `doctor`, `mode`, `show last` and `disconnect` (`eject --only`).
@@ -21,6 +22,8 @@ Everything since the `v0.1.0` tag. Not yet published.
   MCP server. Tested under Wine only so far.
 - Release tooling: CI for macOS, Linux and Windows, static Linux (musl) builds, reproducible archives
   with SHA-256 checksums, `scripts/install.sh`, `scripts/live-check.sh`.
+- Every release archive carries a Sigstore-signed build provenance attestation
+  (`gh attestation verify`; `SECURITY.md`).
 
 ### Changed
 - Grouped `--help` with examples; one vocabulary across the CLI, the Control Center and `top`; errors
@@ -34,7 +37,16 @@ Everything since the `v0.1.0` tag. Not yet published.
 - Project memory is found at the workspace root (the nearest `.git` or `.agentdiet/memory.db`, or
   `AGENTDIET_WORKSPACE`), so subdirectories share it.
 
+- `~/.agentdiet` and a project's `.agentdiet/` are checked before AgentDiet writes under them
+  (`SPEC.md` §3 Tier 3 "Private roots"): a project `.agentdiet` that is a symlink is refused (project
+  memory is then off there; `doctor` explains), a symlinked `~/.agentdiet` must point at a directory
+  you own, a directory owned by another user is refused, and one of yours with loose permissions is
+  tightened to `0700`. Installations made by v0.1.0 are unaffected.
+
 ### Fixed
+- Linux: installing through a link (Homebrew's `bin/agentdiet`) recorded the versioned target in
+  every assistant's config, which an upgrade then removed; the link is recorded now, as on macOS.
+  Run `agentdiet init` once after upgrading to replace an old versioned path.
 - **Privacy:** a secret in a command line or read path that crossed the 240-byte title cut could leave
   an unredacted prefix in `memory.db` (present since v0.1.0). Titles, summaries and stderr notes are
   now scrubbed whole before they are cut. Rows written by earlier builds are not rewritten: delete
@@ -52,6 +64,13 @@ Everything since the `v0.1.0` tag. Not yet published.
 - An ID inside single quotes (`'#4f9a1b2c'`, as `cmd.exe` passes it) is accepted.
 - **Privacy:** error messages (stderr, MCP tool errors, usage errors) that quote an argument are
   scrubbed: `agentdiet show <a key>` or a bad `diet_inspect` ID no longer repeats a secret.
+
+### Known issues
+- The shims' overhead (B1) is about 2.7 ms per command on an Apple M1, about 0.7 ms over the budget
+  (the measured exec floor plus 0.5 ms, `SPEC.md` §7). The single-binary design is kept; see README.
+- Windows has not run on real Windows yet (Wine only) and has no shims.
+- B4/B5 engine timings exceed their budgets on large or adversarial inputs (durability is not traded
+  for speed).
 
 ### Compatibility with v0.1.0
 - Unchanged: breadcrumb and fold-marker text; every ID form v0.1.0 accepted (a quoted form was added); `scan`'s report format and exit
