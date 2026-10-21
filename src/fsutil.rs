@@ -504,6 +504,56 @@ mod tests {
         fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 
+    /// Junctions need no privileges to create (`mklink /J`), so a cloned repository or a script can
+    /// plant one: as a project root it is refused like a symlink, as a home root it is followed, and
+    /// a private file is never opened through one (SPEC §10 "No following of links").
+    #[cfg(windows)]
+    #[test]
+    fn junctions_are_treated_as_links() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("elsewhere");
+        fs::create_dir(&target).unwrap();
+        let junction = |at: &Path| {
+            let out = std::process::Command::new("cmd")
+                .arg("/C")
+                .arg("mklink")
+                .arg("/J")
+                .arg(at)
+                .arg(&target)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        let root = dir.path().join(".agentdiet");
+        junction(&root);
+        assert!(
+            fs::symlink_metadata(&root)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        match inspect_root(&root, Root::Project).unwrap() {
+            RootState::Refused(why) => assert!(why.contains("symlink"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(ensure_root(&root, Root::Project).is_err());
+        assert_eq!(inspect_root(&root, Root::Home).unwrap(), RootState::Ok);
+        assert_eq!(
+            fs::read_dir(&target).unwrap().count(),
+            0,
+            "nothing created through it"
+        );
+
+        // A junction planted where a private file goes is not opened.
+        let file = dir.path().join("state.json");
+        junction(&file);
+        assert!(open_or_create_private(&file).is_err());
+    }
+
     #[cfg(unix)]
     #[test]
     fn roots_are_created_tightened_followed_or_refused_as_specified() {
